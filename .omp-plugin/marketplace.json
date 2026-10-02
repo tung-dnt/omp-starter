@@ -1,0 +1,14 @@
+{
+  "name": "omp-starter",
+  "owner": { "name": "tung-dnt" },
+  "metadata": { "description": "First-run setup plugin for omp" },
+  "plugins": [
+    {
+      "name": "starter",
+      "description": "First-run wizard: Obsidian vault as knowledge base + memory, Paseo phone access over Tailscale, optional agent-skills",
+      "version": "0.1.0",
+      "license": "MIT",
+      "source": "./"
+    }
+  ]
+}
