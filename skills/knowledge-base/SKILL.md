@@ -7,7 +7,7 @@ description: Search, create, and link notes in the Obsidian knowledge base confi
 
 ## Location
 
-The knowledge base root is the `KB root` path in your context (written by omp-starter into `AGENTS.md`, e.g. `~/.omp-kb/KnowledgeBase`). Everything below is relative to it. If no KB root is in context, ask the user for the vault path, or tell them to run `/starter kb`.
+The knowledge base root is the `KB root` path in your context (written by omp-starter into `AGENTS.md`, e.g. `~/.omp-kb/KnowledgeBase`). Everything below is relative to it. If no KB root is in context, use the `ask` tool with options such as "Run `/starter kb`" and "Use a vault path I give you" (the user types the path via the dialog's free-text answer).
 
 ## Conventions
 

@@ -1,6 +1,6 @@
 {
   "name": "omp-starter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "First-run setup for omp: an Obsidian vault as knowledge base + memory, Paseo phone access over Tailscale, optional agent-skills",
   "license": "MIT",

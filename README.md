@@ -53,6 +53,10 @@ Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked 
 
 If agent-skills is installed, the plugin also ports its Claude Code SessionStart hook: when a session starts in a repository with claimed tasks, the agent is told to run `/resume`.
 
+## Asking questions
+
+The plugin ships an always-on rule (`rules/ask-user.md`): every question the agent asks you goes through omp's `ask` dialog, one question at a time, with 2–5 multiple-choice answers, their trade-offs, and a recommended pick. That includes approval gates and setup confirmations; the agent never asks in plain prose.
+
 ## License
 
 MIT
