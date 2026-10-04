@@ -4,6 +4,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { syncAgentSkillsStore } from "./lib/agent-skills-store";
 import { setupModels } from "./lib/routing";
 import { HOME, expandHome, readState, tildify, updateState, type KbState } from "./lib/state";
 
@@ -211,6 +212,7 @@ export async function setupKnowledgeBase(ui: WizardUi): Promise<KbState> {
 	ui.notify(`Knowledge base wired into ${tildify(contextFile)}. Takes effect in new sessions.`, "info");
 	return {
 		status: "done",
+		vault: kbRootAbs === kbAbs ? vault : KB_LINK,
 		kbRef,
 		kbPaths: [...new Set([kbRootAbs, kbAbs])],
 		contextFile,
@@ -342,7 +344,14 @@ export default function ompStarter(pi: ExtensionAPI): void {
 	async function run(ui: WizardUi, steps: Steps): Promise<void> {
 		if (steps.skills) updateState({ agentSkills: await setupAgentSkills(ui, exec) });
 		if (steps.models) updateState({ models: await setupModels(ui, exec) });
-		if (steps.kb) updateState({ kb: await setupKnowledgeBase(ui) });
+		if (steps.kb) {
+			const next = updateState({ kb: await setupKnowledgeBase(ui) });
+			try {
+				syncAgentSkillsStore(next);
+			} catch (error) {
+				ui.notify(`Could not point agent-skills at the vault: ${String(error)}`, "warning");
+			}
+		}
 		if (steps.remote) updateState({ remote: { status: await setupRemote(ui, exec) } });
 	}
 
@@ -352,6 +361,16 @@ export default function ompStarter(pi: ExtensionAPI): void {
 		const steps = { skills: !state.agentSkills, models: !state.models, kb: !state.kb, remote: !state.remote };
 		if (!steps.skills && !steps.models && !steps.kb && !steps.remote) return;
 		void run(ctx.ui, steps).catch((error: unknown) => ctx.ui.notify(`Setup failed: ${String(error)}`, "error"));
+	});
+
+	// Cheap sync so installs that predate the vault key pick it up without rerunning the wizard.
+	pi.on("session_start", (_event, ctx) => {
+		if (ctx.agent?.kind === "sub") return;
+		try {
+			syncAgentSkillsStore(readState());
+		} catch (error) {
+			if (ctx.hasUI) ctx.ui.notify(`Could not point agent-skills at the vault: ${String(error)}`, "warning");
+		}
 	});
 
 	pi.registerCommand("starter", {

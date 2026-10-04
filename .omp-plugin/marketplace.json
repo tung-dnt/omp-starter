@@ -6,7 +6,7 @@
     {
       "name": "starter",
       "description": "First-run wizard: Claude model/effort routing with capped Fable escalation, Obsidian vault as knowledge base + memory, Paseo phone access over Tailscale, optional agent-skills",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "license": "MIT",
       "source": "./"
     }

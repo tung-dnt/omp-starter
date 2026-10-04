@@ -5,6 +5,8 @@ import * as path from "node:path";
 
 export interface KbState {
 	status: "done" | "skipped";
+	/** Absolute vault root (the space-free link when one was made). Absent in older state. */
+	vault?: string;
 	/** Space-free path the agent uses, e.g. `~/.omp-kb/KnowledgeBase`. */
 	kbRef?: string;
 	/** Absolute paths that identify a KB write (symlink form and resolved form). */

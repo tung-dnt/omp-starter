@@ -79,9 +79,22 @@ Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked 
 
 If agent-skills is installed, the plugin also ports its Claude Code SessionStart hook: when a session starts in a repository with claimed tasks, the agent is told to run `/resume`.
 
+### Task tracking
+
+agent-skills work state (stories, tasks, statuses) is stored as notes in the format of Obsidian's project-manager plugin (dotpm). Once the knowledge-base step is done, the notes live in your vault under `<vault>/<projectsFolder>/<repo>/stories` and `…/epics`, where `<projectsFolder>` is the project-manager plugin's setting (default `Projects`) and `<repo>` is the repository name. Without a vault, they live in the repo under `docs/stories`, with the same note format.
+
+The plugin tells agent-skills where your vault is by writing `~/.config/agent-skills/config.json` (or under `$XDG_CONFIG_HOME`). It does this when the knowledge-base step finishes and again at each session start, so existing installs pick it up without rerunning the wizard. The file is per machine, other keys in it are kept, and the plugin never deletes it.
+
+Two optional keys in a repo's committed `.agent-skills.json` override this:
+
+- `"store": "repo"` keeps that repo's tasks in git, even when a vault is configured.
+- `"vaultFolder": "group/name"` changes the folder used under the projects folder (default: the repo name).
+
 ## Asking questions
 
 The plugin ships an always-on rule (`rules/ask-user.md`): every question the agent asks you goes through omp's `ask` dialog, one question at a time, with 2–5 multiple-choice answers, their trade-offs, and a recommended pick. That includes approval gates and setup confirmations; the agent never asks in plain prose.
+
+A second always-on rule (`rules/how-means-plan.md`): a request phrased as "how …" is treated as planning and discussion. The agent investigates read-only, presents options, trade-offs and a recommendation, and asks before building anything.
 
 ## License
 
