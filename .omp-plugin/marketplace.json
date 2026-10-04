@@ -5,8 +5,8 @@
   "plugins": [
     {
       "name": "starter",
-      "description": "First-run wizard: Claude model/effort routing with capped Fable escalation, Obsidian vault as knowledge base + memory, Paseo phone access over Tailscale, optional agent-skills",
-      "version": "0.5.0",
+      "description": "First-run wizard: Claude model/effort routing with capped Fable escalation, Obsidian vault as knowledge base + memory, optional agent-skills",
+      "version": "0.6.0",
       "license": "MIT",
       "source": "./"
     }

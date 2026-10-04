@@ -1,5 +1,5 @@
-// First-run setup wizard: optional agent-skills install, Claude model routing, an Obsidian vault
-// as omp's knowledge base and memory, and Paseo for phone access over Tailscale.
+// First-run setup wizard: optional agent-skills install, Claude model routing, and an Obsidian
+// vault as omp's knowledge base and memory.
 // Runs automatically in the TUI until each step is done or skipped; `/starter` reruns it.
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -27,9 +27,6 @@ const OBSIDIAN_REGISTRY = path.join(HOME, "Library/Application Support/obsidian/
 const ICLOUD_OBSIDIAN = path.join(HOME, "Library/Mobile Documents/iCloud~md~obsidian/Documents");
 const KB_LINK = path.join(HOME, ".omp-kb");
 const OTHER_FOLDER = "Other folder…";
-const PASEO_APP = "/Applications/Paseo.app";
-const PASEO_CLI = `${PASEO_APP}/Contents/Resources/bin/paseo`;
-const PASEO_PORT = 6767;
 
 // ── agent-skills ────────────────────────────────────────────────────────────
 
@@ -220,119 +217,12 @@ export async function setupKnowledgeBase(ui: WizardUi): Promise<KbState> {
 	};
 }
 
-// ── Remote access (Paseo) ───────────────────────────────────────────────────
-
-interface Tailnet {
-	ip: string;
-	hostnames: string[];
-}
-
-async function readTailnet(exec: Exec): Promise<Tailnet | undefined> {
-	for (const bin of ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]) {
-		const ip = await exec(bin, ["ip", "-4"]).catch(() => undefined);
-		if (!ip || ip.code !== 0 || !ip.stdout.trim()) continue;
-		const status = await exec(bin, ["status", "--json"]).catch(() => undefined);
-		const dnsName = String(JSON.parse(status?.stdout || "{}").Self?.DNSName ?? "").replace(/\.$/, "");
-		return {
-			ip: ip.stdout.trim().split("\n")[0],
-			hostnames: dnsName ? [dnsName.split(".")[0], dnsName] : [],
-		};
-	}
-	return undefined;
-}
-
-export async function setupRemote(ui: WizardUi, exec: Exec, paseoHome = path.join(HOME, ".paseo")): Promise<"done" | "skipped"> {
-	if (!(await ui.confirm("Remote access", "Set up Paseo so you can start and drive omp sessions from your phone?"))) {
-		return "skipped";
-	}
-	if (!fs.existsSync(PASEO_APP)) {
-		if (!(await ui.confirm("Install Paseo", "Paseo is not installed. Install it with `brew install --cask paseo`?"))) {
-			return "skipped";
-		}
-		ui.notify("Installing Paseo…", "info");
-		const brew = await exec("brew", ["install", "--cask", "paseo"], { timeout: 600_000 });
-		if (brew.code !== 0) {
-			ui.notify(`Paseo install failed: ${(brew.stderr || brew.stdout).trim()}`, "error");
-			return "skipped";
-		}
-	}
-
-	const configFile = path.join(paseoHome, "config.json");
-	const config = fs.existsSync(configFile) ? JSON.parse(fs.readFileSync(configFile, "utf8")) : { version: 1 };
-	config.daemon ??= {};
-	config.daemon.relay = { ...config.daemon.relay, enabled: true };
-	config.agents ??= {};
-	config.agents.providers ??= {};
-	config.agents.providers.omp = { ...config.agents.providers.omp, enabled: true };
-
-	const tailnet = await readTailnet(exec);
-	if (tailnet) {
-		config.daemon.listen = `${tailnet.ip}:${PASEO_PORT}`;
-		config.daemon.hostnames = [...new Set([...(config.daemon.hostnames ?? []), ...tailnet.hostnames])];
-	} else {
-		ui.notify("Tailscale not found or not connected — using Paseo's encrypted relay only.", "warning");
-	}
-
-	const hasPassword = Boolean(config.daemon.auth?.password);
-	const choice = await ui.select("Paseo daemon password", [
-		...(hasPassword ? ["Keep the current password"] : []),
-		"Generate a random password",
-		"Enter my own",
-		"No password",
-	]);
-	let password: string | undefined;
-	if (choice === "Generate a random password") {
-		password = Buffer.from(crypto.getRandomValues(new Uint8Array(12))).toString("base64url");
-	} else if (choice === "Enter my own") {
-		password = (await ui.input("Password"))?.trim() || undefined;
-	} else if (choice === "No password") {
-		delete config.daemon.auth;
-	} else if (!choice) {
-		return "skipped";
-	}
-	if (password) config.daemon.auth = { password: await Bun.password.hash(password, { algorithm: "bcrypt", cost: 12 }) };
-
-	fs.mkdirSync(paseoHome, { recursive: true });
-	fs.writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`);
-
-	const running = await exec(PASEO_CLI, ["daemon", "status", "--home", paseoHome]).catch(() => undefined);
-	if (running?.code === 0 && /localDaemon:\s*running/.test(running.stdout)) {
-		await exec(PASEO_CLI, ["daemon", "restart", "--home", paseoHome], { timeout: 60_000 });
-	} else {
-		await exec("open", ["-g", "-a", PASEO_APP]);
-	}
-	const loginItems = await exec("osascript", ["-e", 'tell application "System Events" to get the name of every login item']);
-	if (!loginItems.stdout.includes("Paseo")) {
-		await exec("osascript", [
-			"-e",
-			`tell application "System Events" to make login item at end with properties {path:"${PASEO_APP}", hidden:true}`,
-		]);
-	}
-
-	const host = tailnet?.hostnames[0] ?? tailnet?.ip;
-	await ui.confirm(
-		"Paseo ready — connect your phone",
-		[
-			"1. Install \"Paseo – Pocket Engineer\" on the phone.",
-			host
-				? `2. Tailscale on → Paseo → Settings → Add host → Direct connection: host ${host} (or ${tailnet?.hostnames[1] ?? tailnet?.ip}), port ${PASEO_PORT}, SSL off.`
-				: "2. Pair over the relay: run `paseo daemon pair` (or Paseo → Settings → host → Pair device) and scan the QR code.",
-			password ? `3. Password: ${password}   ← save it now; it is not shown again.` : "",
-			"4. New workspace → pick a project → agent \"Oh My Pi\".",
-		]
-			.filter(Boolean)
-			.join("\n"),
-	);
-	return "done";
-}
-
 // ── Wiring ──────────────────────────────────────────────────────────────────
 
 interface Steps {
 	skills: boolean;
 	models: boolean;
 	kb: boolean;
-	remote: boolean;
 }
 
 export default function ompStarter(pi: ExtensionAPI): void {
@@ -352,14 +242,13 @@ export default function ompStarter(pi: ExtensionAPI): void {
 				ui.notify(`Could not point agent-skills at the vault: ${String(error)}`, "warning");
 			}
 		}
-		if (steps.remote) updateState({ remote: { status: await setupRemote(ui, exec) } });
 	}
 
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.agent?.kind === "sub" || ctx.mode !== "tui" || !ctx.hasUI) return;
 		const state = readState();
-		const steps = { skills: !state.agentSkills, models: !state.models, kb: !state.kb, remote: !state.remote };
-		if (!steps.skills && !steps.models && !steps.kb && !steps.remote) return;
+		const steps = { skills: !state.agentSkills, models: !state.models, kb: !state.kb };
+		if (!steps.skills && !steps.models && !steps.kb) return;
 		void run(ctx.ui, steps).catch((error: unknown) => ctx.ui.notify(`Setup failed: ${String(error)}`, "error"));
 	});
 
@@ -374,14 +263,13 @@ export default function ompStarter(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("starter", {
-		description: "Rerun omp-starter setup. Args: skills | models | kb | remote (default: all)",
+		description: "Rerun omp-starter setup. Args: skills | models | kb (default: all)",
 		handler: async (args, ctx) => {
 			const which = args.trim();
 			await run(ctx.ui, {
 				skills: !which || which === "skills",
 				models: !which || which === "models",
 				kb: !which || which === "kb",
-				remote: !which || which === "remote",
 			});
 		},
 	});

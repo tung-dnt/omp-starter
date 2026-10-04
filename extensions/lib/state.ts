@@ -16,15 +16,10 @@ export interface KbState {
 	gateDir?: string;
 }
 
-export interface RemoteState {
-	status: "done" | "skipped";
-}
-
 export interface SetupState {
 	agentSkills?: "done" | "skipped";
 	models?: "done" | "skipped";
 	kb?: KbState;
-	remote?: RemoteState;
 }
 
 export const HOME = os.homedir();

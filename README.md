@@ -7,7 +7,6 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 | **agent-skills** *(optional)* | Installs [tung-dnt/agent-skills](https://github.com/tung-dnt/agent-skills): engineering-workflow skills, agents and `/spec` `/plan` `/build` `/review` `/ship` commands. |
 | **Model routing** *(Claude)* | Routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels. Needs a Claude login. |
 | **Knowledge base** | Uses an Obsidian vault as omp's knowledge base and long-term memory. Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that loads the memory index into every session, and optionally adds a commit gate. |
-| **Remote access** | Sets up [Paseo](https://paseo.sh) so you can start and drive omp sessions from your phone: installs it if missing, enables its omp provider, binds it to your Tailscale address, sets a daemon password, and starts it at login. |
 
 Every step can be skipped.
 
@@ -19,7 +18,7 @@ omp plugin install starter@omp-starter
 omp
 ```
 
-Before the knowledge-base step, open Obsidian once so your vault is registered (and synced, if it lives in iCloud). Before the remote step, install [Tailscale](https://tailscale.com) and sign in; without it, the wizard falls back to Paseo's end-to-end-encrypted relay.
+Before the knowledge-base step, open Obsidian once so your vault is registered (and synced, if it lives in iCloud).
 
 ## Model routing
 
@@ -58,22 +57,12 @@ Every Fable spawn counts toward a daily cap: `FABLE_ROUTER_DAILY_CAP`, default 5
 
 The plugin also ships a `knowledge-base` skill for searching and creating notes in the knowledge base.
 
-## Remote access
-
-After setup, on your phone:
-
-1. Install **Paseo – Pocket Engineer**.
-2. With Tailscale on: Paseo → Settings → Add host → Direct connection → your Mac's Tailscale name, port `6767`, SSL off, and the password the wizard showed you.
-3. New workspace → pick a project → agent **Oh My Pi**.
-
-Paseo runs your installed `omp`, so your config, plugins, skills and `AGENTS.md` all apply.
-
 ## Commands
 
 - `/starter`: rerun every step.
-- `/starter skills`, `/starter models`, `/starter kb`, `/starter remote`: rerun one step.
+- `/starter skills`, `/starter models`, `/starter kb`: rerun one step.
 
-Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p`, Paseo sessions, or subagents.
+Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p` or subagents.
 
 ## agent-skills `/resume` hint
 
