@@ -96,6 +96,10 @@ The plugin ships an always-on rule (`rules/ask-user.md`): every question the age
 
 A second always-on rule (`rules/how-means-plan.md`): a request phrased as "how …" is treated as planning and discussion. The agent investigates read-only, presents options, trade-offs and a recommendation, and asks before building anything.
 
+A third always-on rule (`rules/lld-before-build.md`): before implementing any task from a written task breakdown, the agent writes that task's low-level design note and asks you to approve it, one task at a time. Approved tasks are built only as designed (through agent-skills' `task-builder` when installed), and run in parallel only when their notes show no shared files or generated outputs. Ad-hoc fixes, debugging and reviews are unaffected.
+
+A fourth always-on rule (`rules/ticket-tracking.md`): work tied to a ticket (an agent-skills task note, a vault or repo task file, or a tracker issue such as Jira) updates the ticket's status as the work changes state, and records every final decision (approved designs, your `ask` answers, deviations, the outcome with its evidence) in the ticket when it is made. agent-skills task notes are updated through `work-state.sh`; one writer per ticket.
+
 ## License
 
 MIT
