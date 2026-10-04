@@ -1,14 +1,15 @@
 {
   "name": "omp-starter",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "First-run setup for omp: an Obsidian vault as knowledge base + memory, Paseo phone access over Tailscale, optional agent-skills",
+  "description": "First-run setup for omp: Claude model/effort routing with capped Fable escalation, an Obsidian vault as knowledge base + memory, Paseo phone access over Tailscale, optional agent-skills",
   "license": "MIT",
   "omp": {
     "extensions": [
       "./extensions/setup.ts",
       "./extensions/kb-commit-gate.ts",
-      "./extensions/agent-skills-hint.ts"
+      "./extensions/agent-skills-hint.ts",
+      "./extensions/fable-router.ts"
     ]
   }
 }

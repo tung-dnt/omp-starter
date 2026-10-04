@@ -5,6 +5,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 | Step | What it does |
 |---|---|
 | **agent-skills** *(optional)* | Installs [tung-dnt/agent-skills](https://github.com/tung-dnt/agent-skills): engineering-workflow skills, agents and `/spec` `/plan` `/build` `/review` `/ship` commands. |
+| **Model routing** *(Claude)* | Routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels. Needs a Claude login. |
 | **Knowledge base** | Uses an Obsidian vault as omp's knowledge base and long-term memory. Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that loads the memory index into every session, and optionally adds a commit gate. |
 | **Remote access** | Sets up [Paseo](https://paseo.sh) so you can start and drive omp sessions from your phone: installs it if missing, enables its omp provider, binds it to your Tailscale address, sets a daemon password, and starts it at login. |
 
@@ -19,6 +20,31 @@ omp
 ```
 
 Before the knowledge-base step, open Obsidian once so your vault is registered (and synced, if it lives in iCloud). Before the remote step, install [Tailscale](https://tailscale.com) and sign in; without it, the wizard falls back to Paseo's end-to-end-encrypted relay.
+
+## Model routing
+
+Applied with `omp config set` after you confirm. Role assignments and per-agent overrides are merged into your existing settings; same-named entries are replaced.
+
+| Work | Model | Effort |
+|---|---|---|
+| Main session | Opus 5.5 | `auto` (Haiku classifies each prompt; `ultrathink` forces `max`) |
+| Plan mode, `reviewer` | Opus 5.5 | `high` |
+| Coding subagents (`task`, agent-skills builders/testers) | Sonnet 5.5 | `high`; the parent can raise a slice to `max` |
+| Exploration (`scout`), commits, `code-reviewer` | Sonnet 5.5 | default |
+| Mechanical edits (`sonic`), titles, classifiers | Haiku 4.5 | default |
+| Security agents | Opus 5.5 | `high` (never Fable) |
+| `deep` agent, Ctrl+P `deep` role | Fable 5.1 | `high` |
+
+The idea: spend effort on the plan, since it runs once and feeds every coding slice. Keep coders at a `high` floor and use `max` only for concurrency, migrations and shared contracts. Fallbacks run Fable → Opus → Sonnet for outages; a subscription limit stops the session instead of switching to paid API usage.
+
+### Fable escalation
+
+Fable is never the default. The `fable-router` extension escalates to it only when:
+
+- **Stuck:** the same command fails twice in one run (searches like `grep` that just find nothing don't count). The agent is told it may delegate to the read-only `deep` agent. The notice is advisory: expected failures, such as a red test, and "don't spawn agents" instructions take precedence.
+- **Risky review:** a `reviewer` or `code-reviewer` starts while the git diff touches migrations, `*.sql`, auth/RBAC, infra or CI workflows.
+
+Every Fable spawn counts toward a daily cap: `FABLE_ROUTER_DAILY_CAP`, default 5, tracked in `~/.omp/agent/fable-router.json`. Past the cap, the spawn runs on Opus and the task panel shows a note saying so.
 
 ## Knowledge base
 
@@ -45,7 +71,7 @@ Paseo runs your installed `omp`, so your config, plugins, skills and `AGENTS.md`
 ## Commands
 
 - `/starter`: rerun every step.
-- `/starter skills`, `/starter kb`, `/starter remote`: rerun one step.
+- `/starter skills`, `/starter models`, `/starter kb`, `/starter remote`: rerun one step.
 
 Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p`, Paseo sessions, or subagents.
 

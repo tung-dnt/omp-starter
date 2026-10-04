@@ -20,6 +20,7 @@ export interface RemoteState {
 
 export interface SetupState {
 	agentSkills?: "done" | "skipped";
+	models?: "done" | "skipped";
 	kb?: KbState;
 	remote?: RemoteState;
 }

@@ -1,9 +1,10 @@
-// First-run setup wizard: optional agent-skills install, an Obsidian vault as omp's knowledge
-// base and memory, and Paseo for phone access over Tailscale.
+// First-run setup wizard: optional agent-skills install, Claude model routing, an Obsidian vault
+// as omp's knowledge base and memory, and Paseo for phone access over Tailscale.
 // Runs automatically in the TUI until each step is done or skipped; `/starter` reruns it.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { setupModels } from "./lib/routing";
 import { HOME, expandHome, readState, tildify, updateState, type KbState } from "./lib/state";
 
 export interface WizardUi {
@@ -327,6 +328,7 @@ export async function setupRemote(ui: WizardUi, exec: Exec, paseoHome = path.joi
 
 interface Steps {
 	skills: boolean;
+	models: boolean;
 	kb: boolean;
 	remote: boolean;
 }
@@ -339,6 +341,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 
 	async function run(ui: WizardUi, steps: Steps): Promise<void> {
 		if (steps.skills) updateState({ agentSkills: await setupAgentSkills(ui, exec) });
+		if (steps.models) updateState({ models: await setupModels(ui, exec) });
 		if (steps.kb) updateState({ kb: await setupKnowledgeBase(ui) });
 		if (steps.remote) updateState({ remote: { status: await setupRemote(ui, exec) } });
 	}
@@ -346,17 +349,18 @@ export default function ompStarter(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.agent?.kind === "sub" || ctx.mode !== "tui" || !ctx.hasUI) return;
 		const state = readState();
-		const steps = { skills: !state.agentSkills, kb: !state.kb, remote: !state.remote };
-		if (!steps.skills && !steps.kb && !steps.remote) return;
+		const steps = { skills: !state.agentSkills, models: !state.models, kb: !state.kb, remote: !state.remote };
+		if (!steps.skills && !steps.models && !steps.kb && !steps.remote) return;
 		void run(ctx.ui, steps).catch((error: unknown) => ctx.ui.notify(`Setup failed: ${String(error)}`, "error"));
 	});
 
 	pi.registerCommand("starter", {
-		description: "Rerun omp-starter setup. Args: skills | kb | remote (default: all)",
+		description: "Rerun omp-starter setup. Args: skills | models | kb | remote (default: all)",
 		handler: async (args, ctx) => {
 			const which = args.trim();
 			await run(ctx.ui, {
 				skills: !which || which === "skills",
+				models: !which || which === "models",
 				kb: !which || which === "kb",
 				remote: !which || which === "remote",
 			});
