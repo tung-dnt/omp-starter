@@ -1,6 +1,6 @@
 {
   "name": "omp-starter",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "First-run setup for omp: Claude model/effort routing with capped Fable escalation, an Obsidian vault as knowledge base + memory, optional agent-skills",
   "license": "MIT",

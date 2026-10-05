@@ -225,6 +225,16 @@ interface Steps {
 	kb: boolean;
 }
 
+/** Whether omp's own first-run setup has not finished yet: it records `setupVersion` in config.yml when done. */
+function ompSetupPending(): boolean {
+	try {
+		const match = /^setupVersion:\s*(\d+)/m.exec(fs.readFileSync(path.join(HOME, ".omp", "agent", "config.yml"), "utf8"));
+		return !match || Number(match[1]) === 0;
+	} catch {
+		return true;
+	}
+}
+
 export default function ompStarter(pi: ExtensionAPI): void {
 	const exec: Exec = async (command, args, options) => {
 		const result = await pi.exec(command, args, { timeout: options?.timeout ?? 30_000 });
@@ -244,12 +254,33 @@ export default function ompStarter(pi: ExtensionAPI): void {
 		}
 	}
 
+	// Wizard waiting for omp's own first-run setup to finish.
+	let deferred: (() => Promise<void>) | undefined;
+
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.agent?.kind === "sub" || ctx.mode !== "tui" || !ctx.hasUI) return;
 		const state = readState();
 		const steps = { skills: !state.agentSkills, models: !state.models, kb: !state.kb };
 		if (!steps.skills && !steps.models && !steps.kb) return;
-		void run(ctx.ui, steps).catch((error: unknown) => ctx.ui.notify(`Setup failed: ${String(error)}`, "error"));
+		if (!ompSetupPending()) {
+			void run(ctx.ui, steps).catch((error: unknown) => ctx.ui.notify(`Setup failed: ${String(error)}`, "error"));
+			return;
+		}
+		// omp shows its own setup screens after session_start, and a dialog opened before them stays on
+		// screen without keyboard focus. Start once omp records its setup as done, or at the first prompt.
+		const fire = () => {
+			deferred = undefined;
+			ctx.clearTimer(timer);
+			return run(ctx.ui, steps).catch((error: unknown) => ctx.ui.notify(`Setup failed: ${String(error)}`, "error"));
+		};
+		const timer = ctx.setInterval(() => {
+			if (!ompSetupPending()) void fire();
+		}, 1_000);
+		deferred = fire;
+	});
+
+	pi.on("input", async () => {
+		await deferred?.();
 	});
 
 	// Cheap sync so installs that predate the vault key pick it up without rerunning the wizard.
