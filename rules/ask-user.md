@@ -7,6 +7,8 @@ alwaysApply: true
 
 Every question to the user goes through the `ask` tool as a one-question dialog with multiple-choice answers. This covers interviews (interview-me), grill rounds (grill-me), approval gates, setup confirmations, and clarifications.
 
+**Ask, don't decide for the user.** Put every real decision to the user: workflow gates, grill rounds, design and interview choices, approach choices, and scope changes. Never pick silently and continue. Look up facts yourself; put only the decision to the user, with your recommendation. Decide alone only for trivial mechanics with one sensible answer (naming a temp file, ordering independent reads), and say what you chose.
+
 - One question per `ask` call, one call per turn. Never several questions in one turn, and never a question asked only in prose.
 - Never add an "Other" option: the UI adds one.
 - `multi: true` only when the choices really aren't mutually exclusive.

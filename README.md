@@ -81,7 +81,7 @@ Two optional keys in a repo's committed `.agent-skills.json` override this:
 
 ## Asking questions
 
-The plugin ships an always-on rule (`rules/ask-user.md`): every question the agent asks you goes through omp's `ask` dialog, one question at a time, with 2–5 multiple-choice answers and a recommended pick. Each dialog carries its own context: what is being decided, why it matters now, and what it hinges on, and every option lists how it works, pros, cons, effort, and reversibility, with a preview for anything longer. That includes approval gates and setup confirmations; the agent never asks in plain prose.
+The plugin ships an always-on rule (`rules/ask-user.md`): the agent puts every real decision to you (gates, grill rounds, design and approach choices, scope) instead of deciding itself, and every question goes through omp's `ask` dialog, one question at a time, with 2–5 multiple-choice answers and a recommended pick. Each dialog carries its own context: what is being decided, why it matters now, and what it hinges on, and every option lists how it works, pros, cons, effort, and reversibility, with a preview for anything longer. That includes approval gates and setup confirmations; the agent never asks in plain prose.
 
 A second always-on rule (`rules/how-means-plan.md`): a request phrased as "how …" is treated as planning and discussion. The agent investigates read-only, presents options, trade-offs and a recommendation, and asks before building anything.
 
