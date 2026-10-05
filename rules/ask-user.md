@@ -1,5 +1,5 @@
 ---
-description: Every question to the user goes through the ask tool as a one-question multiple-choice dialog.
+description: Every question to the user goes through the ask tool as a one-question dialog that carries its own context and trade-offs.
 alwaysApply: true
 ---
 
@@ -8,8 +8,20 @@ alwaysApply: true
 Every question to the user goes through the `ask` tool as a one-question dialog with multiple-choice answers. This covers interviews (interview-me), grill rounds (grill-me), approval gates, setup confirmations, and clarifications.
 
 - One question per `ask` call, one call per turn. Never several questions in one turn, and never a question asked only in prose.
-- 2–5 real options with short labels. Put the trade-offs in each option's `description`. Set `recommended` to your best guess; this takes the place of a written `GUESS:` line.
 - Never add an "Other" option: the UI adds one.
-- Before the call, keep any context to a few prose lines: the evidence, plus a hypothesis/confidence line or a decision-brief table where the workflow requires one. The question itself goes only in the `ask` call.
-- Approval gates still ask: use options like "Proceed" / "Revise …", never treat them as yes/no in prose.
 - `multi: true` only when the choices really aren't mutually exclusive.
+
+## The dialog must stand on its own
+
+The user may see only the dialog, so it carries the whole decision brief. A terse question like "Which approach?" or "Proceed?" with one-word options is never enough.
+
+- `header`: a short chip naming the decision, e.g. `Q2 · Cache scope`.
+- `question`: 2–4 sentences: what is being decided, why it matters now, and what it hinges on (the fact, requirement, or priority that settles it). Name the concrete thing (file, API, table, ticket), not "this" or "the approach".
+- 2–5 options. `label`: a short name. `description`, every time, in this shape:
+  `How: <what this option does>. Pros: <…>. Cons: <risks, cost>. Effort: S/M/L. Reversible: easy/hard.`
+  Back each pro and con with evidence; mark guesses "(est.)".
+- `preview`: when an option needs more than a line to judge (code shape, schema, file list, a before/after), put that detail there.
+- `recommended`: your pick. Start that option's description with `Recommended: <why it wins on what it hinges on>; choose <other> instead if <condition that would flip it>.`
+- Approval gates name what is being approved and what proceeding does next. Use options like "Proceed" / "Revise <what>", each with a description; never ask yes/no in prose.
+
+In the message before the call, show anything longer than the dialog can hold: the step's output, or the decision-brief table a workflow (grill-me, approval gate) requires. Prose there supplements the dialog; it never replaces the context the dialog itself must carry.
