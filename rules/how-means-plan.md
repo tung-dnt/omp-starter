@@ -1,6 +1,7 @@
 ---
 description: A request phrased as "how …" means plan and discuss; never build, edit, or run state-changing commands.
 alwaysApply: true
+agents: main
 ---
 
 # "How" means plan, don't build

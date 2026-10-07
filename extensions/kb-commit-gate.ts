@@ -5,7 +5,8 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { readState, tildify } from "./lib/state";
 
-const GIT_COMMIT = /\bgit\b[^;&|\n]*\bcommit\b/;
+// `git [global opts] commit`, not commit-tree or "commit" as an argument of another subcommand.
+const GIT_COMMIT = /\bgit(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+commit(?=[\s;&|)]|$)/;
 const WRITE_TOOLS: Record<string, true> = { write: true, edit: true, ast_edit: true };
 
 // Module-level: shared by the main session and its subagents, so a subagent's KB write

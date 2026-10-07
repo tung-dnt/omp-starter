@@ -12,6 +12,9 @@ import { expandHome, HOME, readState, tildify } from "./lib/state";
 // (and its prompt-cache prefix) unchanged until the next session.
 const cache = new Map<string, string | undefined>();
 
+// Subagents that write code get the index (repo gotchas); read-only ones (scout, reviewers, sonic, …) skip it.
+const MEMORY_SUBAGENTS: Record<string, true> = { task: true, "task-builder": true, "test-engineer": true };
+
 function git(cwd: string, args: string[]): string | undefined {
 	const result = Bun.spawnSync({ cmd: ["git", "-C", cwd, ...args], stdout: "pipe", stderr: "ignore", timeout: 2000 });
 	return result.exitCode === 0 ? result.stdout.toString().trim() || undefined : undefined;
@@ -48,6 +51,8 @@ export default function kbMemory(pi: ExtensionAPI): void {
 	pi.on("session_switch", (_event, ctx) => reset(ctx));
 
 	pi.on("before_agent_start", (event, ctx) => {
+		const agent = ctx.agent;
+		if (agent && agent.kind !== "main" && !MEMORY_SUBAGENTS[agent.name.toLowerCase()]) return;
 		const kb = readState().kb;
 		if (kb?.status !== "done" || !kb.kbRef || !kb.contextFile) return;
 		const root = path.dirname(kb.contextFile);

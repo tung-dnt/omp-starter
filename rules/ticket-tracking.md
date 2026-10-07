@@ -1,6 +1,7 @@
 ---
 description: Work tied to a ticket updates the ticket's status as it happens and records every final decision in the ticket.
 alwaysApply: true
+agents: [main, task-builder]
 ---
 
 # Keep the ticket current

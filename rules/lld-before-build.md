@@ -1,6 +1,7 @@
 ---
 description: Every task from a written task breakdown needs an approved low-level design note before implementation.
 alwaysApply: true
+agents: [main, task-builder]
 ---
 
 # Low-level design before building planned tasks
