@@ -1,6 +1,6 @@
 {
   "name": "omp-starter",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "private": true,
   "description": "First-run setup for omp: Claude model/effort routing with capped Fable escalation, an Obsidian vault as knowledge base + memory, optional agent-skills",
   "license": "MIT",
@@ -8,6 +8,7 @@
     "extensions": [
       "./extensions/setup.ts",
       "./extensions/kb-commit-gate.ts",
+      "./extensions/kb-memory.ts",
       "./extensions/agent-skills-hint.ts",
       "./extensions/fable-router.ts"
     ]

@@ -6,7 +6,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 |---|---|
 | **agent-skills** *(optional)* | Installs [tung-dnt/agent-skills](https://github.com/tung-dnt/agent-skills): engineering-workflow skills, agents and `/spec` `/plan` `/build` `/review` `/ship` commands. |
 | **Model routing** *(Claude)* | Routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels. Needs a Claude login. |
-| **Knowledge base** | Uses an Obsidian vault as omp's knowledge base and long-term memory. Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that loads the memory index into every session, and optionally adds a commit gate. |
+| **Knowledge base** | Uses an Obsidian vault as omp's knowledge base and long-term memory. Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that points sessions at the knowledge base, injects the part of the memory index that applies to the current repo, and optionally adds a commit gate. |
 
 Every step can be skipped.
 
@@ -48,11 +48,11 @@ Every Fable spawn counts toward a daily cap: `FABLE_ROUTER_DAILY_CAP`, default 5
 ## Knowledge base
 
 - **Vault:** chosen from Obsidian's own vault list, or any folder you type.
-- **Knowledge-base folder:** a folder inside the vault (default `KnowledgeBase`). It is created with an empty `_memory/MEMORY.md` if missing.
+- **Knowledge-base folder:** a folder inside the vault (default `KnowledgeBase`). It is created with a `_memory/MEMORY.md` holding an empty `## Global` section if missing.
 - **Space-free link:** omp's `@` imports stop at spaces, so a vault path containing spaces gets a `~/.omp-kb` symlink.
 - **Always-loaded notes:** optional list of notes (relative paths) imported into every session, e.g. your coding standards.
 - **Scope:** every omp session (`~/.omp/agent/AGENTS.md`) or only sessions under one folder (`<folder>/AGENTS.md`). An existing file is backed up before it's replaced.
-- **Memory:** the generated `AGENTS.md` imports `_memory/MEMORY.md` (one line per note) and tells the agent how to save new memories as notes in `_memory/`.
+- **Memory:** the `kb-memory` extension injects the memory index `_memory/MEMORY.md` (one line per note) into each session, scoped to the current repo. `## <Scope>` headings split the index; a section applies to the repos listed in a `<!-- repos: a, b -->` comment under its heading, or to the repo named by the heading itself. `## Global` (and any lines before the first heading) always loads; the other sections are listed by name with their note counts. The repo name comes from the `origin` remote, so worktrees and suffixed clones match too. The index is read once per session. The generated `AGENTS.md` tells the agent how to save new memories as notes in `_memory/` and which section to file them under.
 - **Commit gate (optional):** blocks the agent's `git commit` under the chosen folder until it has written a knowledge-base note in that session. `[skip-mem]` in the commit message bypasses it.
 
 The plugin also ships a `knowledge-base` skill for searching and creating notes in the knowledge base.

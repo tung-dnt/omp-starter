@@ -81,6 +81,7 @@ export function renderContextFile(kbRef: string, kbAbs: string, pinned: string[]
 			`- Before working a repo, read \`${kbRef}/projects/<repo>.md\` if it exists and follow its \`[[wikilinks]]\` (a link \`[[name]]\` resolves to \`name.md\` anywhere in the vault).`,
 		kbAbs.includes("Mobile Documents") &&
 			"- The vault syncs through iCloud, which may evict files to placeholders; a first read can stall briefly. Ignore \"conflicted copy\" duplicates.",
+		"- Read KB files by plain path; `vault://…?op=` graph queries (backlinks, tags, search) need the Obsidian app running.",
 	].filter(Boolean);
 	const pinnedSection = pinned.length
 		? `\n## Always-loaded notes\n\n${pinned.map(rel => `@${kbRef}/${rel}`).join("\n\n")}\n`
@@ -94,9 +95,7 @@ KB root: \`${kbRef}/\`. Single source of truth for project context, conventions,
 ${pointers.length ? `\n${pointers.join("\n")}\n` : ""}${pinnedSection}
 ## Memory
 
-Per-fact memory notes live in \`${kbRef}/_memory/<slug>.md\`. Index (one line per note; read the note before relying on it, and verify against the current repo):
-
-@${kbRef}/_memory/MEMORY.md
+Per-fact memory notes live in \`${kbRef}/_memory/<slug>.md\`. The \`kb-memory\` extension injects the \`## Global\` section of \`${kbRef}/_memory/MEMORY.md\` plus the section for the current repo as a "Memory index" block; read the file for other scopes.
 
 ### Saving a memory
 
@@ -113,7 +112,7 @@ When you learn a durable fact (decision, gotcha, convention, user preference, re
 
    <fact>. **Why:** <reason>. **How to apply:** <rule>. Link related notes with [[wikilinks]].
    \`\`\`
-2. Add or update its line in \`${kbRef}/_memory/MEMORY.md\`: \`- [Title](<slug>.md) — <hook, ≤ ~60 chars>\`.
+2. Add or update its line in \`${kbRef}/_memory/MEMORY.md\` under the \`## <Scope>\` section whose heading or \`<!-- repos: … -->\` list names the current repo (add a \`## <repo>\` section if none matches); facts that apply across projects go under \`## Global\`. Line format: \`- [Title](<slug>.md) — <hook, ≤ ~60 chars>\`.
 
 Update stale memories instead of adding contradicting ones.
 ${commitGate}`;
@@ -172,7 +171,7 @@ export async function setupKnowledgeBase(ui: WizardUi): Promise<KbState> {
 	const memoryIndex = path.join(kbAbs, "_memory", "MEMORY.md");
 	if (!fs.existsSync(memoryIndex)) {
 		fs.mkdirSync(path.dirname(memoryIndex), { recursive: true });
-		fs.writeFileSync(memoryIndex, "");
+		fs.writeFileSync(memoryIndex, "## Global\n");
 	}
 
 	const pinnedInput = await ui.input(
