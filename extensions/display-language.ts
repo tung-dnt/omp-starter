@@ -37,6 +37,7 @@ interface Active {
 	model: string;
 	/** Voice instruction for text shown to the user; "" for neutral. */
 	voice: string;
+	translateInput: boolean;
 }
 
 interface Ui {
@@ -70,7 +71,13 @@ function readActive(): Active | undefined {
 			voice = "";
 		}
 	}
-	return { code: language.code, lang: LANGUAGES[language.code], model: language.model ?? DEFAULT_AGY_MODEL, voice };
+	return {
+		code: language.code,
+		lang: LANGUAGES[language.code],
+		model: language.model ?? DEFAULT_AGY_MODEL,
+		voice,
+		translateInput: language.translateInput === true,
+	};
 }
 
 function toDisplay(active: Active): string {
@@ -248,7 +255,7 @@ export default function displayLanguage(pi: ExtensionAPI): void {
 	pi.on("input", (event, ctx) => {
 		active = readActive(); // picks up a language chosen by the wizard mid-session
 		const text = event.text.trim();
-		if (!active || !text || "/!".includes(text[0]) || !active.lang.detect.test(text)) return;
+		if (!active?.translateInput || !text || "/!".includes(text[0]) || !active.lang.detect.test(text)) return;
 		if (english.has(text) || inflight.has(text)) return;
 		// Not awaited: translation overlaps prompt dispatch; the context hook waits for it.
 		const job = withStatus(ctx.ui, active.lang.busy, translateText(toEnglish(active.lang), text, active.model, HOOK_TIMEOUT_MS)).then(

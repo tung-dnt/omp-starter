@@ -26,6 +26,8 @@ export interface LanguageState {
 	model?: string;
 	/** How translated text addresses the user; absent means neutral. */
 	voice?: VoiceId;
+	/** Translate prompts written in the display language into English before the model sees them. Default off. */
+	translateInput?: boolean;
 }
 
 export interface SetupState {
