@@ -2,6 +2,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { LanguageCode } from "./languages";
 
 export interface KbState {
 	status: "done" | "skipped";
@@ -16,10 +17,19 @@ export interface KbState {
 	gateDir?: string;
 }
 
+export interface LanguageState {
+	status: "done" | "skipped";
+	/** Display language; absent means English (no translation layer). */
+	code?: LanguageCode;
+	/** agy model slug verified at setup; "" uses agy's default model. */
+	model?: string;
+}
+
 export interface SetupState {
 	agentSkills?: "done" | "skipped";
 	models?: "done" | "skipped";
 	kb?: KbState;
+	language?: LanguageState;
 }
 
 export const HOME = os.homedir();

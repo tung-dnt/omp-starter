@@ -6,7 +6,9 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { syncAgentSkillsStore } from "./lib/agent-skills-store";
 import { setupModels } from "./lib/routing";
-import { HOME, expandHome, readState, tildify, updateState, type KbState } from "./lib/state";
+import { AGY, installAgy, loginAgy } from "./lib/agy";
+import { LANGUAGE_CODES, LANGUAGES } from "./lib/languages";
+import { HOME, expandHome, readState, tildify, updateState, type KbState, type LanguageState } from "./lib/state";
 
 export interface WizardUi {
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -216,12 +218,45 @@ export async function setupKnowledgeBase(ui: WizardUi): Promise<KbState> {
 	};
 }
 
+// ── Display language ────────────────────────────────────────────────────────
+
+const ENGLISH = "English (no translation)";
+
+/** Picks a display language, then installs and signs in Google's Antigravity CLI that translates it. */
+export async function setupDisplayLanguage(ui: WizardUi): Promise<LanguageState> {
+	const choice = await ui.select("Display language for questions, plans and your prompts", [
+		ENGLISH,
+		...LANGUAGE_CODES.map(code => LANGUAGES[code].label),
+	]);
+	if (!choice) return { status: "skipped" };
+	const code = LANGUAGE_CODES.find(c => LANGUAGES[c].label === choice);
+	if (!code) return { status: "done" };
+
+	if (!fs.existsSync(AGY)) {
+		const ok = await ui.confirm(
+			"Antigravity CLI",
+			"Translation runs on your Google AI Pro/Ultra plan through Google's Antigravity CLI (agy). Install it now? Google's installer puts it in ~/.local/bin and adds that to your shell profile.",
+		);
+		if (!ok) return { status: "skipped" };
+		await installAgy();
+	}
+	for (;;) {
+		const result = await loginAgy(ui);
+		if (result.ok) {
+			ui.notify(`${LANGUAGES[code].english} display is on. It applies from your next prompt.`, "info");
+			return { status: "done", code, model: result.model };
+		}
+		if (!(await ui.confirm("Antigravity sign-in failed", `${result.error}. Try again?`))) return { status: "skipped" };
+	}
+}
+
 // ── Wiring ──────────────────────────────────────────────────────────────────
 
 interface Steps {
 	skills: boolean;
 	models: boolean;
 	kb: boolean;
+	language: boolean;
 }
 
 /** Whether omp's own first-run setup has not finished yet: it records `setupVersion` in config.yml when done. */
@@ -251,6 +286,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 				ui.notify(`Could not point agent-skills at the vault: ${String(error)}`, "warning");
 			}
 		}
+		if (steps.language) updateState({ language: await setupDisplayLanguage(ui) });
 	}
 
 	// Wizard waiting for omp's own first-run setup to finish.
@@ -259,8 +295,8 @@ export default function ompStarter(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.agent?.kind === "sub" || ctx.mode !== "tui" || !ctx.hasUI) return;
 		const state = readState();
-		const steps = { skills: !state.agentSkills, models: !state.models, kb: !state.kb };
-		if (!steps.skills && !steps.models && !steps.kb) return;
+		const steps = { skills: !state.agentSkills, models: !state.models, kb: !state.kb, language: !state.language };
+		if (!steps.skills && !steps.models && !steps.kb && !steps.language) return;
 		if (!ompSetupPending()) {
 			void run(ctx.ui, steps).catch((error: unknown) => ctx.ui.notify(`Setup failed: ${String(error)}`, "error"));
 			return;
@@ -293,13 +329,14 @@ export default function ompStarter(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("starter", {
-		description: "Rerun omp-starter setup. Args: skills | models | kb (default: all)",
+		description: "Rerun omp-starter setup. Args: skills | models | kb | language (default: all)",
 		handler: async (args, ctx) => {
 			const which = args.trim();
 			await run(ctx.ui, {
 				skills: !which || which === "skills",
 				models: !which || which === "models",
 				kb: !which || which === "kb",
+				language: !which || which === "language",
 			});
 		},
 	});

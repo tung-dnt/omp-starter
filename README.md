@@ -7,6 +7,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 | **agent-skills** *(optional)* | Installs [tung-dnt/agent-skills](https://github.com/tung-dnt/agent-skills): engineering-workflow skills, agents and `/spec` `/plan` `/build` `/review` `/ship` commands. |
 | **Model routing** *(Claude)* | Routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels. Needs a Claude login. |
 | **Knowledge base** | Uses an Obsidian vault as omp's knowledge base and long-term memory. Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that points sessions at the knowledge base, injects the part of the memory index that applies to the current repo, and optionally adds a commit gate. |
+| **Display language** *(optional)* | Lets you read questions and plans, and write prompts, in Vietnamese, Chinese, Japanese, Korean, Thai or Russian while the agent keeps working in English. Installs Google's Antigravity CLI and signs it in to your Google AI Pro/Ultra plan. |
 
 Every step can be skipped.
 
@@ -57,10 +58,21 @@ Every Fable spawn counts toward a daily cap: `FABLE_ROUTER_DAILY_CAP`, default 5
 
 The plugin also ships a `knowledge-base` skill for searching and creating notes in the knowledge base.
 
+## Display language
+
+The step asks for a display language (or English, which turns the layer off). Translation runs on Google's [Antigravity CLI](https://antigravity.google/docs/cli/headless/) (`agy`), so it uses your Google AI Pro/Ultra plan. Google's terms forbid using Gemini CLI or Antigravity sign-in tokens from third-party tools, and accounts have been suspended for it. Running Google's own CLI in headless mode is the allowed route.
+
+- **Setup:** if `agy` is missing, the step asks first, then runs Google's installer (`~/.local/bin/agy`; the installer also adds that folder to your shell profile). It then opens Google sign-in in your browser. Paste the code the page shows into the dialog within 60 seconds. The step ends with a test translation, which checks that the default model `gemini-3.8-flash-low` (about 7s per call) is available on your account. If it isn't, agy's default model is used.
+- **Your prompts:** a prompt containing the language's own letters (Vietnamese diacritics, Han, kana, Hangul, Thai or Cyrillic script) stays as you typed it in the transcript. The model request gets an English translation, which is cached in the session so prompt caching still works. Vietnamese translation also repairs common speech-to-text slips.
+- **`ask` dialogs:** the question, labels, descriptions and previews are translated before the dialog opens. Labels that would collide stay in English.
+- **Plan mode:** a submitted plan is translated to `local://<slug>-plan.<code>.md` and shown in a viewer before the approval screen. Plans that take more than 25 seconds finish in the background, and a notice tells you when the file is saved.
+- **Failures:** any failure or timeout falls back to English, and `agy` runs with `--sandbox` from an empty scratch folder. Every translated text goes to Google; check your data-handling rules before using it on confidential work.
+- **Overrides:** `OMP_STARTER_AGY` sets the path to the `agy` binary. The model is stored as `language.model` in `omp-starter.json`.
+
 ## Commands
 
 - `/starter`: rerun every step.
-- `/starter skills`, `/starter models`, `/starter kb`: rerun one step.
+- `/starter skills`, `/starter models`, `/starter kb`, `/starter language`: rerun one step.
 
 Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p` or subagents.
 
