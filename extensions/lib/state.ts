@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { LanguageCode } from "./languages";
+import type { VoiceId } from "./voices";
 
 export interface KbState {
 	status: "done" | "skipped";
@@ -23,6 +24,8 @@ export interface LanguageState {
 	code?: LanguageCode;
 	/** agy model slug verified at setup; "" uses agy's default model. */
 	model?: string;
+	/** How translated text addresses the user; absent means neutral. */
+	voice?: VoiceId;
 }
 
 export interface SetupState {

@@ -7,8 +7,16 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { syncAgentSkillsStore } from "./lib/agent-skills-store";
 import { setupModels } from "./lib/routing";
 import { AGY, installAgy, loginAgy } from "./lib/agy";
-import { LANGUAGE_CODES, LANGUAGES } from "./lib/languages";
+import { LANGUAGE_CODES, LANGUAGES, type LanguageCode } from "./lib/languages";
 import { HOME, expandHome, readState, tildify, updateState, type KbState, type LanguageState } from "./lib/state";
+import {
+	PERSONALITY_FILE,
+	PERSONALITY_TEMPLATE,
+	VOICE_FILE,
+	VOICE_FILE_TEMPLATE,
+	voicesFor,
+	type VoiceId,
+} from "./lib/voices";
 
 export interface WizardUi {
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -243,11 +251,33 @@ export async function setupDisplayLanguage(ui: WizardUi): Promise<LanguageState>
 	for (;;) {
 		const result = await loginAgy(ui);
 		if (result.ok) {
+			const voice = await setupVoice(ui, code);
 			ui.notify(`${LANGUAGES[code].english} display is on. It applies from your next prompt.`, "info");
-			return { status: "done", code, model: result.model };
+			return { status: "done", code, model: result.model, voice };
 		}
 		if (!(await ui.confirm("Antigravity sign-in failed", `${result.error}. Try again?`))) return { status: "skipped" };
 	}
+}
+
+/** Picks how translated text addresses the user, and offers a PERSONALITY.md for the agent itself. */
+export async function setupVoice(ui: WizardUi, code: LanguageCode): Promise<VoiceId> {
+	const options = Object.entries(voicesFor(code)).flatMap(([id, voice]) => (voice ? [{ id: id as VoiceId, label: voice.label }] : []));
+	const choice = await ui.select("Tone and form of address for translated questions and plans", options.map(o => o.label));
+	const voice = options.find(o => o.label === choice)?.id ?? "neutral";
+	if (voice === "custom" && !fs.existsSync(VOICE_FILE)) {
+		fs.writeFileSync(VOICE_FILE, VOICE_FILE_TEMPLATE);
+		ui.notify(`Edit ${tildify(VOICE_FILE)} to describe the voice; it applies on the next translation.`, "info");
+	}
+	if (
+		!fs.existsSync(PERSONALITY_FILE) &&
+		(await ui.confirm(
+			"Agent personality",
+			`Write ${tildify(PERSONALITY_FILE)}? It replaces omp's default personality block: the agent debates plans, lists edge cases and keeps objecting until you settle it (e.g. "chốt"). Edit or delete the file any time.`,
+		))
+	) {
+		fs.writeFileSync(PERSONALITY_FILE, PERSONALITY_TEMPLATE);
+	}
+	return voice;
 }
 
 // ── Wiring ──────────────────────────────────────────────────────────────────
@@ -329,9 +359,18 @@ export default function ompStarter(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("starter", {
-		description: "Rerun omp-starter setup. Args: skills | models | kb | language (default: all)",
+		description: "Rerun omp-starter setup. Args: skills | models | kb | language | voice (default: all)",
 		handler: async (args, ctx) => {
 			const which = args.trim();
+			if (which === "voice") {
+				const language = readState().language;
+				if (language?.status !== "done" || !language.code) {
+					ctx.ui.notify("Pick a display language first: /starter language", "warning");
+					return;
+				}
+				updateState({ language: { ...language, voice: await setupVoice(ctx.ui, language.code) } });
+				return;
+			}
 			await run(ctx.ui, {
 				skills: !which || which === "skills",
 				models: !which || which === "models",

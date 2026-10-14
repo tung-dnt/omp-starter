@@ -66,13 +66,16 @@ The step asks for a display language (or English, which turns the layer off). Tr
 - **Your prompts:** a prompt containing the language's own letters (Vietnamese diacritics, Han, kana, Hangul, Thai or Cyrillic script) stays as you typed it in the transcript. The model request gets an English translation, which is cached in the session so prompt caching still works. Vietnamese translation also repairs common speech-to-text slips.
 - **`ask` dialogs:** the question, labels, descriptions and previews are translated before the dialog opens. Labels that would collide stay in English.
 - **Plan mode:** a submitted plan is translated to `local://<slug>-plan.<code>.md` and shown in a viewer before the approval screen. Plans that take more than 25 seconds finish in the background, and a notice tells you when the file is saved.
-- **Failures:** any failure or timeout falls back to English, and `agy` runs with `--sandbox` from an empty scratch folder. Every translated text goes to Google; check your data-handling rules before using it on confidential work.
+- **Failures:** any failure or timeout falls back to English, and `agy` runs with `--sandbox` from an empty scratch folder. Every translated text goes to Google; check your data-handling rules before using it on confidential work. A slow `agy` run gets a parallel second run after 9 seconds, and the first result wins.
+- **Voice (form of address):** after sign-in the step asks how translated text addresses you. Vietnamese has presets: `tôi–bạn` (neutral), `em–anh/chị` (polite), and `Tèo` (em–đại ca, playful Hà Nội street style). Other languages get neutral. Every language can pick custom, which writes `~/.omp/agent/VOICE.md` for you to edit. The voice only changes wording: code, paths, numbers and warnings stay exact. Stored as `language.voice`.
+- **Personality:** the same step offers to write `~/.omp/agent/PERSONALITY.md`, which replaces omp's default personality block for the main session. The agent debates plans, lists edge cases and keeps objecting until you settle it (e.g. "chốt"). An existing file is never overwritten. Pronouns live in the voice, because English has no "em/đại ca"; the personality stays in English so the agent keeps working in English.
 - **Overrides:** `OMP_STARTER_AGY` sets the path to the `agy` binary. The model is stored as `language.model` in `omp-starter.json`.
 
 ## Commands
 
 - `/starter`: rerun every step.
 - `/starter skills`, `/starter models`, `/starter kb`, `/starter language`: rerun one step.
+- `/starter voice`: change only the voice (and offer `PERSONALITY.md` if missing).
 
 Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p` or subagents.
 
