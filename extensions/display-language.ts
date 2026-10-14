@@ -13,7 +13,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { AGY, DEFAULT_AGY_MODEL, translateList, translateText } from "./lib/agy";
-import { LANGUAGES, type Language, type LanguageCode } from "./lib/languages";
+import { LANGUAGE_CODES, LANGUAGES, type Language, type LanguageCode } from "./lib/languages";
 import { readState } from "./lib/state";
 import { VOICE_FILE, voicesFor } from "./lib/voices";
 
@@ -147,16 +147,23 @@ async function translateAsk(active: Active, input: unknown, ui: Ui): Promise<{ i
 	return { input: clone };
 }
 
-/** local:// maps to `<session file without .jsonl>/local/`; falls back to the newest plan there. */
+/** local:// maps to `<session file without .jsonl>/local/`. */
+function localDir(sessionFile: string | undefined): string | undefined {
+	return sessionFile?.endsWith(".jsonl") ? path.join(sessionFile.slice(0, -".jsonl".length), "local") : undefined;
+}
+
+const isPlanFile = (name: string) => name.endsWith("-plan.md") || name === "PLAN.md";
+
+/** Finds the proposed plan, falling back to the newest plan in local://. */
 function findPlanFile(sessionFile: string | undefined, slug: string): string | undefined {
-	if (!sessionFile?.endsWith(".jsonl") || !slug) return undefined;
-	const dir = path.join(sessionFile.slice(0, -".jsonl".length), "local");
+	const dir = localDir(sessionFile);
+	if (!dir || !slug) return undefined;
 	const exact = path.join(dir, `${slug}-plan.md`);
 	if (fs.existsSync(exact)) return exact;
 	if (!fs.existsSync(dir)) return undefined;
 	return fs
 		.readdirSync(dir)
-		.filter(f => f.endsWith("-plan.md") || f === "PLAN.md")
+		.filter(isPlanFile)
 		.map(f => path.join(dir, f))
 		.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
 }
@@ -183,6 +190,39 @@ async function showTranslatedPlan(active: Active, planFile: string, ui: Ui, show
 		return;
 	}
 	if (showViewer) await ui.editor(`${active.lang.planTitle} — ${outUrl}`, text);
+}
+
+/**
+ * Markdown artifacts in local:// written or changed since `since`, minus plans (translated at
+ * propose time), existing translations, and files whose translation is already newer.
+ */
+function changedArtifacts(dir: string, code: LanguageCode, since: number): string[] {
+	if (!fs.existsSync(dir)) return [];
+	const translation = new RegExp(`\\.(?:${LANGUAGE_CODES.join("|")})\\.md$`);
+	return fs
+		.readdirSync(dir)
+		.filter(name => name.endsWith(".md") && !isPlanFile(name) && !translation.test(name))
+		.map(name => path.join(dir, name))
+		.filter(file => {
+			const mtime = fs.statSync(file).mtimeMs;
+			if (mtime < since) return false;
+			const out = file.replace(/\.md$/, `.${code}.md`);
+			return !fs.existsSync(out) || fs.statSync(out).mtimeMs < mtime;
+		});
+}
+
+/** Translates each artifact to `<name>.<code>.md` beside it, one agy run per file, in sequence. */
+async function translateArtifacts(active: Active, files: string[], ui: Ui): Promise<void> {
+	for (const file of files) {
+		const outFile = file.replace(/\.md$/, `.${active.code}.md`);
+		const text = await translateText(toDisplay(active), await fs.promises.readFile(file, "utf8"), active.model, BACKGROUND_TIMEOUT_MS);
+		if (text) {
+			await fs.promises.writeFile(outFile, text);
+			ui.notify(`Translated: local://${path.basename(outFile)}`, "info");
+		} else {
+			ui.notify(`Translation failed: local://${path.basename(file)}`, "warning");
+		}
+	}
 }
 
 export default function displayLanguage(pi: ExtensionAPI): void {
@@ -272,5 +312,21 @@ export default function displayLanguage(pi: ExtensionAPI): void {
 			ctx.ui.notify(`Translation skipped: ${String(error)}`, "warning");
 		}
 		return undefined;
+	});
+
+	// Artifacts: markdown the run wrote to local:// is translated once the run ends, in the
+	// background, so operational replies stay untouched and no hook waits on agy.
+	let runStart = Date.now();
+	pi.on("agent_start", (_event, ctx) => {
+		if (ctx.agent?.kind !== "sub") runStart = Date.now();
+	});
+	pi.on("agent_end", (_event, ctx) => {
+		if (!active || ctx.agent?.kind === "sub") return;
+		const dir = localDir(ctx.sessionManager.getSessionFile());
+		const files = dir ? changedArtifacts(dir, active.code, runStart) : [];
+		if (!files.length) return;
+		void translateArtifacts(active, files, ctx.ui).catch((error: unknown) =>
+			ctx.ui.notify(`Artifact translation failed: ${String(error)}`, "warning"),
+		);
 	});
 }
