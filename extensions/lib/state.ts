@@ -2,7 +2,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { LanguageCode } from "./languages";
 import type { VoiceId } from "./voices";
 
 export interface KbState {
@@ -20,14 +19,14 @@ export interface KbState {
 
 export interface LanguageState {
 	status: "done" | "skipped";
-	/** Display language; absent means English (no translation layer). */
-	code?: LanguageCode;
+	/** Display language for /trans, any language name (e.g. "Vietnamese"); absent means English. */
+	name?: string;
+	/** Preset code written before 0.11 (e.g. "vi"); read only when `name` is absent. */
+	code?: string;
 	/** agy model slug verified at setup; "" uses agy's default model. */
 	model?: string;
-	/** How translated text addresses the user; absent means neutral. */
+	/** How text translated into the display language addresses the user; absent means neutral. */
 	voice?: VoiceId;
-	/** Translate prompts written in the display language into English before the model sees them. Default off. */
-	translateInput?: boolean;
 }
 
 export interface SetupState {

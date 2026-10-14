@@ -7,7 +7,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 | **agent-skills** *(optional)* | Installs [tung-dnt/agent-skills](https://github.com/tung-dnt/agent-skills): engineering-workflow skills, agents and `/spec` `/plan` `/build` `/review` `/ship` commands. |
 | **Model routing** *(Claude)* | Routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels. Needs a Claude login. |
 | **Knowledge base** | Uses an Obsidian vault as omp's knowledge base and long-term memory. Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that points sessions at the knowledge base, injects the part of the memory index that applies to the current repo, and optionally adds a commit gate. |
-| **Display language** *(optional)* | Lets you read questions and plans, and write prompts, in Vietnamese, Chinese, Japanese, Korean, Thai or Russian while the agent keeps working in English. Installs Google's Antigravity CLI and signs it in to your Google AI Pro/Ultra plan. |
+| **Display language** *(optional)* | Sets the target language of the `/trans` command, which translates on demand between any languages while the agent keeps working in English. Installs Google's Antigravity CLI and signs it in to your Google AI Pro/Ultra plan. |
 
 Every step can be skipped.
 
@@ -58,26 +58,29 @@ Every Fable spawn counts toward a daily cap: `FABLE_ROUTER_DAILY_CAP`, default 5
 
 The plugin also ships a `knowledge-base` skill for searching and creating notes in the knowledge base.
 
-## Display language
+## Display language and `/trans`
 
-The step asks for a display language (or English, which turns the layer off). Translation runs on Google's [Antigravity CLI](https://antigravity.google/docs/cli/headless/) (`agy`), so it uses your Google AI Pro/Ultra plan. Google's terms forbid using Gemini CLI or Antigravity sign-in tokens from third-party tools, and accounts have been suspended for it. Running Google's own CLI in headless mode is the allowed route.
+Nothing is translated automatically. You translate on demand with `/trans`; the result opens in a viewer or goes into the prompt editor, and never enters the model's context, so it costs no Claude tokens and the agent keeps working in English. The source text can be in any language (agy detects it), and the target can be any language.
 
-- **Setup:** if `agy` is missing, the step asks first, then runs Google's installer (`~/.local/bin/agy`; the installer also adds that folder to your shell profile). It then opens Google sign-in in your browser. Paste the code the page shows into the dialog within 60 seconds. The step ends with a test translation, which checks that the default model `gemini-3.8-flash-low` (about 7s per call) is available on your account. If it isn't, agy's default model is used.
-- **Your prompts (opt-in):** by default prompts reach the model exactly as typed; current models read these languages well, and translating each prompt adds 5–18 seconds. Set `"translateInput": true` under `language` in `omp-starter.json` to translate prompts that contain the language's own letters (Vietnamese diacritics, Han, kana, Hangul, Thai or Cyrillic script) into English first. The transcript keeps what you typed, and the translation is cached in the session so prompt caching still works. Vietnamese translation also repairs common speech-to-text slips.
-- **`ask` dialogs:** the question, labels, descriptions and previews are translated before the dialog opens. Labels that would collide stay in English.
-- **Plan mode:** a submitted plan is translated to `local://<slug>-plan.<code>.md` and shown in a viewer before the approval screen. Plans that take more than 25 seconds finish in the background, and a notice tells you when the file is saved.
-- **Artifacts:** when a run ends, every markdown file it wrote or changed in `local://` (other than plans) is translated in the background to `local://<name>.<code>.md`, and a notice names the file. Each file is translated once per change. Files in your repo or vault are never translated.
-- **Operational content stays as is:** normal replies, progress updates and tool output are not translated. Translation is only for what you read and approve: questions, plans and artifacts.
-- **Failures:** any failure or timeout falls back to English, and `agy` runs with `--sandbox` from an empty scratch folder. Every translated text goes to Google; check your data-handling rules before using it on confidential work. A slow `agy` run gets a parallel second run after 9 seconds, and the first result wins.
-- **Voice (form of address):** after sign-in the step asks how translated text addresses you. Vietnamese has presets: `tôi–bạn` (neutral), `em–anh/chị` (polite), and `Tèo` (em–đại ca, playful Hà Nội street style). Other languages get neutral. Every language can pick custom, which writes `~/.omp/agent/VOICE.md` for you to edit. The voice only changes wording: code, paths, numbers and warnings stay exact. Stored as `language.voice`.
+- `/trans <text>`: text that is not in your display language is translated into it and shown in a viewer. Text already in your display language is translated into English and put in the prompt editor, for you to check and send.
+- `/trans`: translates the last assistant reply into the display language.
+- `/trans <file>` or `/trans local://<name>.md`: translates a file into the display language. A `local://` file is also saved beside the original as `<name>.<suffix>.md` (`notes.vi.md`, `notes.brazilian-portuguese.md`). Repo and vault files are only shown and never written.
+- `/trans --to <language> …`: translates into any language instead, e.g. `/trans --to Japanese deploy tonight` or `/trans --to "Brazilian Portuguese" local://notes.md`.
+
+The step asks for the display language: a preset (Vietnamese, Chinese, Japanese, Korean, Thai, Russian), any language name under **Other language…**, or English (no display language; `/trans --to` still works). Translation runs on Google's [Antigravity CLI](https://antigravity.google/docs/cli/headless/) (`agy`), so it uses your Google AI Pro/Ultra plan. Google's terms forbid using Gemini CLI or Antigravity sign-in tokens from third-party tools, and accounts have been suspended for it. Running Google's own CLI in headless mode is the allowed route.
+
+- **Setup:** if `agy` is missing, the step asks first, then runs Google's installer (`~/.local/bin/agy`; the installer also adds that folder to your shell profile). It then opens Google sign-in in your browser. Paste the code the page shows into the dialog within 60 seconds. The step ends with a test call, which checks that the default model `gemini-3.8-flash-low` is available on your account. If it isn't, agy's default model is used.
+- **Speed and failures:** a call takes about 5–15 seconds while the footer shows the status. A slow `agy` run gets a parallel second run after 9 seconds, the first result wins, and the command gives up after 3 minutes with a warning. `agy` runs with `--sandbox` from an empty scratch folder. Every translated text goes to Google; check your data-handling rules before using it on confidential work. Translating Vietnamese into English also repairs common speech-to-text slips.
+- **Voice (form of address):** after sign-in the step asks how text translated into your display language addresses you. Vietnamese has presets: `tôi–bạn` (neutral), `em–anh/chị` (polite), and `Tèo` (em–đại ca, playful Hà Nội street style). Other languages get neutral. Every language can pick custom, which writes `~/.omp/agent/VOICE.md` for you to edit. The voice only changes wording: code, paths, numbers and warnings stay exact. Stored as `language.voice`.
 - **Personality:** the same step offers to write `~/.omp/agent/PERSONALITY.md`, which replaces omp's default personality block for the main session. The agent debates plans, lists edge cases and keeps objecting until you settle it (e.g. "chốt"). An existing file is never overwritten. Pronouns live in the voice, because English has no "em/đại ca"; the personality stays in English so the agent keeps working in English.
-- **Overrides:** `OMP_STARTER_AGY` sets the path to the `agy` binary. The model is stored as `language.model` in `omp-starter.json`.
+- **Overrides:** `OMP_STARTER_AGY` sets the path to the `agy` binary. The language and model are stored as `language.name` and `language.model` in `omp-starter.json` (installs from before 0.11 that stored a preset `language.code` keep working).
 
 ## Commands
 
 - `/starter`: rerun every step.
 - `/starter skills`, `/starter models`, `/starter kb`, `/starter language`: rerun one step.
 - `/starter voice`: change only the voice (and offer `PERSONALITY.md` if missing).
+- `/trans [--to <language>] [text | file | local://name.md]`: translate on demand (see above).
 
 Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p` or subagents.
 

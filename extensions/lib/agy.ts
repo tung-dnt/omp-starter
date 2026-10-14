@@ -74,26 +74,6 @@ export async function translateText(instruction: string, text: string, model: st
 	return out ? out.replace(/^<text>\s*|\s*<\/text>$/g, "") : undefined;
 }
 
-/** Translates independent strings in one call; undefined unless every item came back. */
-export async function translateList(
-	instruction: string,
-	items: string[],
-	model: string,
-	timeoutMs: number,
-): Promise<string[] | undefined> {
-	const prompt = `${instruction}\nThe input is a JSON array of ${items.length} independent strings. Output only a JSON array of exactly ${items.length} translated strings in the same order: no prose, no code fence.\n\n${JSON.stringify(items)}`;
-	const response = (await runAgy(prompt, model, timeoutMs))?.response?.trim();
-	if (!response) return undefined;
-	let t: unknown;
-	try {
-		t = JSON.parse(response.replace(/^```(?:json)?\s*|\s*```$/g, ""));
-	} catch {
-		return undefined;
-	}
-	if (!Array.isArray(t) || t.length !== items.length) return undefined;
-	return t.every((s): s is string => typeof s === "string" && s.trim() !== "") ? t : undefined;
-}
-
 // ── Setup: install + login ──────────────────────────────────────────────────
 
 export interface AgyLoginUi {

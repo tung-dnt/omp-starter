@@ -7,7 +7,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { syncAgentSkillsStore } from "./lib/agent-skills-store";
 import { setupModels } from "./lib/routing";
 import { AGY, installAgy, loginAgy } from "./lib/agy";
-import { LANGUAGE_CODES, LANGUAGES, type LanguageCode } from "./lib/languages";
+import { languageName, PRESETS } from "./lib/languages";
 import { HOME, expandHome, readState, tildify, updateState, type KbState, type LanguageState } from "./lib/state";
 import {
 	PERSONALITY_FILE,
@@ -229,16 +229,18 @@ export async function setupKnowledgeBase(ui: WizardUi): Promise<KbState> {
 // ── Display language ────────────────────────────────────────────────────────
 
 const ENGLISH = "English (no translation)";
+const OTHER_LANGUAGE = "Other language…";
 
-/** Picks a display language, then installs and signs in Google's Antigravity CLI that translates it. */
+/** Picks the /trans display language, then installs and signs in Google's Antigravity CLI that translates it. */
 export async function setupDisplayLanguage(ui: WizardUi): Promise<LanguageState> {
-	const choice = await ui.select("Display language for questions, plans and your prompts", [
-		ENGLISH,
-		...LANGUAGE_CODES.map(code => LANGUAGES[code].label),
-	]);
+	const choice = await ui.select("Display language for /trans", [ENGLISH, ...PRESETS.map(p => p.label), OTHER_LANGUAGE]);
 	if (!choice) return { status: "skipped" };
-	const code = LANGUAGE_CODES.find(c => LANGUAGES[c].label === choice);
-	if (!code) return { status: "done" };
+	if (choice === ENGLISH) return { status: "done" };
+	const name =
+		choice === OTHER_LANGUAGE
+			? (await ui.input("Language name in English", "e.g. Indonesian, German, Brazilian Portuguese"))?.trim()
+			: PRESETS.find(p => p.label === choice)?.english;
+	if (!name) return { status: "skipped" };
 
 	if (!fs.existsSync(AGY)) {
 		const ok = await ui.confirm(
@@ -251,18 +253,18 @@ export async function setupDisplayLanguage(ui: WizardUi): Promise<LanguageState>
 	for (;;) {
 		const result = await loginAgy(ui);
 		if (result.ok) {
-			const voice = await setupVoice(ui, code);
-			ui.notify(`${LANGUAGES[code].english} display is on. It applies from your next prompt.`, "info");
-			return { status: "done", code, model: result.model, voice };
+			const voice = await setupVoice(ui, name);
+			ui.notify(`/trans now translates into ${name}. Run /trans with text, a file, or nothing for the last reply.`, "info");
+			return { status: "done", name, model: result.model, voice };
 		}
 		if (!(await ui.confirm("Antigravity sign-in failed", `${result.error}. Try again?`))) return { status: "skipped" };
 	}
 }
 
 /** Picks how translated text addresses the user, and offers a PERSONALITY.md for the agent itself. */
-export async function setupVoice(ui: WizardUi, code: LanguageCode): Promise<VoiceId> {
-	const options = Object.entries(voicesFor(code)).flatMap(([id, voice]) => (voice ? [{ id: id as VoiceId, label: voice.label }] : []));
-	const choice = await ui.select("Tone and form of address for translated questions and plans", options.map(o => o.label));
+export async function setupVoice(ui: WizardUi, language: string): Promise<VoiceId> {
+	const options = Object.entries(voicesFor(language)).flatMap(([id, voice]) => (voice ? [{ id: id as VoiceId, label: voice.label }] : []));
+	const choice = await ui.select(`Tone and form of address for text translated into ${language}`, options.map(o => o.label));
 	const voice = options.find(o => o.label === choice)?.id ?? "neutral";
 	if (voice === "custom" && !fs.existsSync(VOICE_FILE)) {
 		fs.writeFileSync(VOICE_FILE, VOICE_FILE_TEMPLATE);
@@ -364,11 +366,12 @@ export default function ompStarter(pi: ExtensionAPI): void {
 			const which = args.trim();
 			if (which === "voice") {
 				const language = readState().language;
-				if (language?.status !== "done" || !language.code) {
+				const name = languageName(language);
+				if (!language || !name) {
 					ctx.ui.notify("Pick a display language first: /starter language", "warning");
 					return;
 				}
-				updateState({ language: { ...language, voice: await setupVoice(ctx.ui, language.code) } });
+				updateState({ language: { ...language, name, voice: await setupVoice(ctx.ui, name) } });
 				return;
 			}
 			await run(ctx.ui, {

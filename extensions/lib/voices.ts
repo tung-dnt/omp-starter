@@ -2,7 +2,7 @@
 // language, so the voice lives in the translation prompt; the agent's own personality (English)
 // lives in ~/.omp/agent/PERSONALITY.md.
 import * as path from "node:path";
-import type { LanguageCode } from "./languages";
+import { presetFor } from "./languages";
 import { HOME } from "./state";
 
 export type VoiceId = "neutral" | "toi-ban" | "em-anh" | "teo" | "custom";
@@ -39,11 +39,11 @@ const VIETNAMESE_VOICES: Partial<Record<VoiceId, Voice>> = {
 };
 
 /** Voices offered for a display language; non-Vietnamese languages get neutral or custom. */
-export function voicesFor(code: LanguageCode): Partial<Record<VoiceId, Voice>> {
-	return code === "vi" ? { ...VIETNAMESE_VOICES, custom: CUSTOM } : { neutral: NEUTRAL, custom: CUSTOM };
+export function voicesFor(language: string): Partial<Record<VoiceId, Voice>> {
+	return presetFor(language)?.code === "vi" ? { ...VIETNAMESE_VOICES, custom: CUSTOM } : { neutral: NEUTRAL, custom: CUSTOM };
 }
 
-export const VOICE_FILE_TEMPLATE = `Voice instructions for translated text (questions, plans). Write in English or the display language.
+export const VOICE_FILE_TEMPLATE = `Voice instructions for text /trans translates into your display language. Write in English or the display language.
 Example: The assistant refers to itself as "em" and addresses the reader as "sếp". Friendly, concise, no emojis.
 `;
 
