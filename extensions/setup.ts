@@ -203,7 +203,12 @@ export async function setupKnowledgeBase(ui: WizardUi): Promise<KbState> {
 	let contextFile = path.join(HOME, ".omp", "agent", "AGENTS.md");
 	let gateDir = HOME;
 	if (scope === "Sessions under one folder") {
-		const dir = expandHome((await ui.input("Folder", "~/projects"))?.trim() || "~/projects");
+		const rawDir = expandHome((await ui.input("Folder", "~/projects"))?.trim() || "~/projects");
+		if (!path.isAbsolute(rawDir) || !fs.statSync(rawDir, { throwIfNoEntry: false })?.isDirectory()) {
+			ui.notify(`${rawDir} is not an existing absolute folder. Use a path like ~/projects.`, "error");
+			return { status: "skipped" };
+		}
+		const dir = path.resolve(rawDir);
 		contextFile = path.join(dir, "AGENTS.md");
 		gateDir = dir;
 	}
@@ -308,17 +313,26 @@ export default function ompStarter(pi: ExtensionAPI): void {
 	};
 
 	async function run(ui: WizardUi, steps: Steps): Promise<void> {
-		if (steps.skills) updateState({ agentSkills: await setupAgentSkills(ui, exec) });
-		if (steps.models) updateState({ models: await setupModels(ui, exec) });
+		// A cancelled rerun must not overwrite a step that was already done.
+		const keep = <T extends { status: "done" | "skipped" }>(previous: T | undefined, next: T): T =>
+			previous?.status === "done" && next.status === "skipped" ? previous : next;
+		if (steps.skills) {
+			const next = await setupAgentSkills(ui, exec);
+			updateState({ agentSkills: readState().agentSkills === "done" && next === "skipped" ? "done" : next });
+		}
+		if (steps.models) {
+			const next = await setupModels(ui, exec);
+			updateState({ models: readState().models === "done" && next === "skipped" ? "done" : next });
+		}
 		if (steps.kb) {
-			const next = updateState({ kb: await setupKnowledgeBase(ui) });
+			const next = updateState({ kb: keep(readState().kb, await setupKnowledgeBase(ui)) });
 			try {
 				syncAgentSkillsStore(next);
 			} catch (error) {
 				ui.notify(`Could not point agent-skills at the vault: ${String(error)}`, "warning");
 			}
 		}
-		if (steps.language) updateState({ language: await setupDisplayLanguage(ui) });
+		if (steps.language) updateState({ language: keep(readState().language, await setupDisplayLanguage(ui)) });
 	}
 
 	// Wizard waiting for omp's own first-run setup to finish.

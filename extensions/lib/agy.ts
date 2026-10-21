@@ -13,6 +13,8 @@ export const DEFAULT_AGY_MODEL = "gemini-3.8-flash-low";
 const INSTALL_SCRIPT = "https://antigravity.google/cli/install.sh";
 const WORKDIR = path.join(os.tmpdir(), "omp-starter-agy");
 const HEDGE_AFTER_MS = 9_000;
+/** Hard cap on the whole sign-in: agy's own 120s timeout plus time to open the browser and paste the code. */
+const LOGIN_DEADLINE_MS = 180_000;
 
 /** agy's `--output-format json` envelope (antigravity.google/docs/cli/headless). */
 interface AgyEnvelope {
@@ -116,16 +118,34 @@ export async function loginAgy(ui: AgyLoginUi, model = DEFAULT_AGY_MODEL): Promi
 		stderr: "pipe",
 	});
 	const stdoutText = new Response(proc.stdout).text();
-	const url = await findLoginUrl(proc.stderr);
-	if (url) {
-		Bun.spawn(["open", url], { stdout: "ignore", stderr: "ignore" });
-		ui.notify("Opened Google sign-in for Antigravity CLI in your browser.", "info");
-		const code = (await ui.input("Paste the code shown after Google sign-in (within 60s)", "4/0A…"))?.trim();
-		if (code) proc.stdin.write(`${code}\n`);
-		else proc.kill();
+	// Same pattern as runAgy: the deadline is enforced here, not by agy, so a stuck sign-in cannot hang the wizard.
+	const { promise: deadline, resolve: expire } = Promise.withResolvers<undefined>();
+	const timer = setTimeout(() => {
+		proc.kill("SIGKILL");
+		expire(undefined);
+	}, LOGIN_DEADLINE_MS);
+	let stdout: string;
+	try {
+		const url = await Promise.race([findLoginUrl(proc.stderr), deadline]);
+		if (url) {
+			try {
+				Bun.spawn(["open", url], { stdout: "ignore", stderr: "ignore" });
+			} catch {
+				// No browser launcher (headless box): the URL is in the messages below.
+			}
+			ui.notify(`Sign in to Antigravity CLI with Google: ${url}`, "info");
+			const code = (
+				await Promise.race([ui.input(`Open ${url} and paste the code shown after sign-in (within 60s)`, "4/0A…"), deadline])
+			)?.trim();
+			if (code) proc.stdin.write(`${code}\n`);
+			else proc.kill();
+		}
+		proc.stdin.end();
+		stdout = await stdoutText;
+	} finally {
+		clearTimeout(timer);
+		proc.kill("SIGKILL");
 	}
-	proc.stdin.end();
-	const [stdout] = await Promise.all([stdoutText, proc.exited]);
 	const envelope = parseEnvelope(stdout);
 	if (envelope?.status === "SUCCESS") return { ok: true, model };
 	const error = envelope?.error ?? "agy sign-in was cancelled or failed";
