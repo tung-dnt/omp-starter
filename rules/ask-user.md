@@ -1,5 +1,5 @@
 ---
-description: Every question to the user goes through the ask tool as a one-question dialog that carries its own context and trade-offs.
+description: Every question to the user goes through the ask tool as a dialog that carries its own context and trade-offs.
 alwaysApply: true
 agents: main
 ---
@@ -10,7 +10,7 @@ agents: main
 
 Every question goes through the `ask` tool:
 
-- One question per call, one call per turn; never a question asked only in prose.
+- One `ask` call per turn. A grill, interview or approval round is one call whose `questions[]` holds the round's independent questions; a single decision stays one question. Never a question asked only in prose.
 - 2–5 multiple-choice options. Never add "Other": the UI adds one. `multi: true` only when the choices really aren't mutually exclusive.
 
 ## The dialog must stand on its own
@@ -19,7 +19,7 @@ The user may see only the dialog, so it carries the whole decision brief. "Which
 
 - `header`: a short chip naming the decision, e.g. `Q2 · Cache scope`.
 - `question`: 2–4 sentences: what is being decided, why it matters now, and what it hinges on (the fact, requirement, or priority that settles it). Name the concrete thing (file, API, table, ticket), not "this" or "the approach".
-- Each option: a short `label`, and a `description` always shaped `How: <what this option does>. Pros: <…>. Cons: <risks, cost>. Effort: S/M/L. Reversible: easy/hard.` Back each pro and con with evidence; mark guesses "(est.)".
+- Each option: a short `label`, and a `description` always shaped `How: <what this option does>. Pros: <…>. Cons: <risks, cost>. Effort: S/M/L. Reversible: easy/hard.` Back each pro and con with evidence; mark guesses "(est.)". Two exceptions: Proceed/Continue confirmations get one-line descriptions, and interview-me rounds ask the question with your guess as the recommended option and need no trade-off description.
 - `preview`: detail an option needs beyond one line (code shape, schema, file list, a before/after).
 - `recommended`: your pick. Its description starts `Recommended: <why it wins on what it hinges on>; choose <other> instead if <condition that would flip it>.`
 - Approval gates name what is being approved and what proceeding does next, with options like "Proceed" / "Revise <what>".

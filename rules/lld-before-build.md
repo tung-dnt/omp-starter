@@ -8,9 +8,11 @@ agents: [main, task-builder]
 
 High-level design is done before tasks are broken down; low-level design is not. Before implementing any task from a written task breakdown (vault or repo plan), close that gap first.
 
+**As `task-builder`:** the note is already approved. Build only what it says; if the build must depart from it, stop and report `blocked`. The rest of this rule is for the main session.
+
 - Write the task's low-level design note before any code: signatures, invariants, failure branches, authorization, tests. Use the `low-level-design` skill when installed (agent-skills). Record the note in the task file.
-- Get approval for each note through the `ask` tool, one task per call ("Proceed" / "Revise …"). Notes may be drafted in parallel; a task's implementation waits for its own approval.
+- Get approval through the `ask` tool: one approval per task note by default ("Proceed" / "Revise …"). Notes may be drafted in parallel; a task's implementation waits for its own approval. Exception: under `/build auto` and the approval gate's "Don't stop" batch mode (agent-skills `references/approval-gate.md`), show every note and ask once for all of them.
 - Implement only what the approved note describes. When agent-skills is installed, delegate through the `task-builder` agent, one task per worktree.
-- Run tasks in parallel only when their notes show no shared files or shared generated outputs (e.g. sqlc `querier.go`); otherwise run them in order.
+- Run tasks in parallel only when their notes show no shared files or shared generated outputs (e.g. sqlc `querier.go`); otherwise run them in order. `/build` (build.toml) enforces this when it fills a wave.
 - If implementation needs to depart from the approved note, stop that task and ask before continuing.
 - This gate wins over any default to decide on your own. Ad-hoc requests (fixes, debugging, reviews, investigations) are not planned tasks and are unaffected.
