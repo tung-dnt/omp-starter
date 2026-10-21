@@ -24,4 +24,4 @@ The user may see only the dialog, so it carries the whole decision brief. "Which
 - `recommended`: your pick. Its description starts `Recommended: <why it wins on what it hinges on>; choose <other> instead if <condition that would flip it>.`
 - Approval gates name what is being approved and what proceeding does next, with options like "Proceed" / "Revise <what>".
 
-Anything longer than the dialog can hold (the step's output, the decision-brief table a workflow such as grill-me requires) goes in the message before the call. That prose supplements the dialog; it never replaces the dialog's own context.
+Anything longer than the dialog can hold (the step's output, the decision-brief table a workflow such as grill-me requires, file paths the user should open) goes in a chat reply that **ends your turn**; call `ask` on the next turn. Text written in the same turn just before an `ask` call is not shown in herdr web, and nothing inside the dialog is clickable (verified 2026-10-21). That reply supplements the dialog; it never replaces the dialog's own context.
