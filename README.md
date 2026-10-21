@@ -109,6 +109,8 @@ A third always-on rule (`rules/lld-before-build.md`): before implementing any ta
 
 A fourth always-on rule (`rules/ticket-tracking.md`): work tied to a ticket (an agent-skills task note, a vault or repo task file, or a tracker issue such as Jira) updates the ticket's status as the work changes state, and records every final decision (approved designs, your `ask` answers, deviations, the outcome with its evidence) in the ticket when it is made. agent-skills task notes are updated through `work-state.sh`; one writer per ticket.
 
+A fifth always-on rule (`rules/say-it-in-chat.md`): herdr web's Chat view collapses tool calls to their one-line intent, so the agent says in chat what a subagent will do (task, files, limits like "no push") and puts paths, branches and results in its prose, not only in tool arguments.
+
 The rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## License
