@@ -5,7 +5,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 | Step | What it does |
 |---|---|
 | **agent-skills** *(optional)* | Installs [tung-dnt/agent-skills](https://github.com/tung-dnt/agent-skills): engineering-workflow skills, agents and `/spec` `/plan` `/build` `/review` `/ship` commands. |
-| **Model routing** *(Claude)* | Routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels. Needs a Claude login. |
+| **Model routing** *(Claude-first)* | Routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels. Saves `claude` and `codex` subscription presets. Setup needs a Claude login; switching to Codex needs a separate Codex login. |
 | **Knowledge base** | Uses an Obsidian vault as omp's knowledge base and long-term memory. Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that points sessions at the knowledge base, injects the part of the memory index that applies to the current repo, and optionally adds a commit gate. |
 | **Display language** *(optional)* | Sets the target language of the `/trans` command, which translates on demand between any languages while the agent keeps working in English. Installs Google's Antigravity CLI and signs it in to your Google AI Pro/Ultra plan. |
 
@@ -23,7 +23,7 @@ Before the knowledge-base step, open Obsidian once so your vault is registered (
 
 ## Model routing
 
-Applied with `omp config set` after you confirm. Role assignments and per-agent overrides are merged into your existing settings; same-named entries are replaced.
+Applied with `omp config set` after you confirm. Setup still requires Claude and activates Claude routing. Role assignments, named presets and per-agent overrides are merged into your existing settings; same-named entries are replaced.
 
 | Work | Model | Effort |
 |---|---|---|
@@ -37,9 +37,30 @@ Applied with `omp config set` after you confirm. Role assignments and per-agent 
 
 The idea: spend effort on the plan, since it runs once and feeds every coding slice. Keep coders at a `high` floor and use `max` only for concurrency, migrations and shared contracts. Fallbacks run Fable → Opus → Sonnet for outages; a subscription limit stops the session instead of switching to paid API usage.
 
+### Subscription presets
+
+The model step saves two complete role setups:
+
+| Preset | Main session | Planning / deep consultation | Helpers |
+|---|---|---|---|
+| `claude` | Opus 5.5 (`auto`) | Opus 5.5 / Fable 5.1 (`high`) | Sonnet 5.5; Haiku 4.5 for tiny work and judgments |
+| `codex` | GPT-6.1 Sol (`auto`) | GPT-6.1 Sol (`high`) | GPT-6 Luna; `high` for tasks, `low` for tiny work and judgments |
+
+Existing installs: update the plugin and run `/starter models` to save the presets. Restart open sessions to load the routing changes, then switch inside omp:
+
+```text
+/modelpreset switch codex
+/modelpreset switch claude
+```
+
+`/modelpreset` opens the picker. Switching replaces the model-role setup, not just the main conversation model; the security agents follow `@slow` rather than staying pinned to Claude. Other agent overrides and explicitly requested models are not part of a preset.
+
+Both presets save `defaultThinkingLevel: auto`; the advisor uses Luna or Sonnet at `medium`. Presets do not change authentication, enable the advisor, or bypass subscription quotas. Use `/login openai-codex` for the Codex subscription and `/login anthropic` for Claude. No API key is installed by this step. The Fable router does not escalate or consume its local daily allowance while the active model is outside Anthropic, so the Codex preset stays on Codex for its deep/review paths.
+
+
 ### Fable escalation
 
-Fable is never the default. The `fable-router` extension escalates to it only when:
+Fable is never the default. While the active model is Anthropic, the `fable-router` extension escalates to it only when:
 
 - **Stuck:** the same command fails twice in one run (searches like `grep` that just find nothing don't count). The agent is told it may delegate to the read-only `deep` agent. The notice is advisory: expected failures, such as a red test, and "don't spawn agents" instructions take precedence.
 - **Risky review:** a `reviewer` or `code-reviewer` starts while the git diff touches migrations, `*.sql`, auth/RBAC, infra or CI workflows.
@@ -112,6 +133,13 @@ A fourth always-on rule (`rules/ticket-tracking.md`): work tied to an agent-skil
 A fifth always-on rule (`rules/say-it-in-chat.md`): herdr web's Chat view collapses tool calls to their one-line intent, so the agent says in chat what a subagent will do (task, files, limits like "no push") and puts paths, branches and results in its prose, not only in tool arguments.
 
 The rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
+
+## Release notes
+
+### 0.12.0 — 2026-10-22
+
+- **Added:** complete `codex` and `claude` subscription presets; rerun `/starter models` after upgrading to save them. Setup remains Claude-first.
+- **Fixed:** security agents follow the selected preset, and the Fable router no longer escalates Codex sessions to Claude.
 
 ## License
 

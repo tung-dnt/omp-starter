@@ -1,5 +1,5 @@
-// Claude model + effort routing profile: written to omp settings by the setup wizard's
-// "models" step, and read by the Fable router so both agree on model ids.
+// Subscription model + effort presets, written by the setup wizard's Claude-first "models"
+// step. The Fable router shares the Claude model ids.
 import type { Exec, WizardUi } from "../setup";
 
 export const MODELS = {
@@ -7,6 +7,39 @@ export const MODELS = {
 	sonnet: "anthropic/claude-sonnet-5-5",
 	haiku: "anthropic/claude-haiku-4-5",
 	fable: "anthropic/claude-fable-5-1",
+} as const;
+
+export const MODEL_PRESETS = {
+	codex: {
+		modelRoles: {
+			default: "openai-codex/gpt-6.1-sol",
+			slow: "openai-codex/gpt-6.1-sol:high",
+			plan: "@slow",
+			deep: "openai-codex/gpt-6.1-sol:high",
+			task: "openai-codex/gpt-6-luna:high",
+			smol: "openai-codex/gpt-6-luna",
+			tiny: "openai-codex/gpt-6-luna:low",
+			judge: "openai-codex/gpt-6-luna:low",
+			commit: "@smol",
+			advisor: "openai-codex/gpt-6-luna:medium",
+		},
+		defaultThinkingLevel: "auto",
+	},
+	claude: {
+		modelRoles: {
+			default: `${MODELS.opus}:auto`,
+			slow: `${MODELS.opus}:high`,
+			plan: "@slow",
+			deep: `${MODELS.fable}:high`,
+			task: `${MODELS.sonnet}:high`,
+			smol: MODELS.sonnet,
+			tiny: MODELS.haiku,
+			judge: MODELS.haiku,
+			commit: "@smol",
+			advisor: `${MODELS.sonnet}:medium`,
+		},
+		defaultThinkingLevel: "auto",
+	},
 } as const;
 
 interface Setting {
@@ -23,18 +56,9 @@ export const PROFILE: Setting[] = [
 	{
 		key: "modelRoles",
 		merge: true,
-		value: {
-			default: `${MODELS.opus}:auto`,
-			slow: `${MODELS.opus}:high`,
-			plan: "@slow",
-			deep: `${MODELS.fable}:high`,
-			task: `${MODELS.sonnet}:high`,
-			smol: MODELS.sonnet,
-			tiny: MODELS.haiku,
-			judge: MODELS.haiku,
-			commit: "@smol",
-		},
+		value: MODEL_PRESETS.claude.modelRoles,
 	},
+	{ key: "modelPresets", merge: true, value: MODEL_PRESETS },
 	{ key: "cycleOrder", value: ["smol", "default", "slow", "deep"] },
 	{ key: "task.enableEffort", value: true },
 	{ key: "task.maxEffort", value: "max" },
@@ -50,8 +74,8 @@ export const PROFILE: Setting[] = [
 			"test-engineer": "@task",
 			"web-performance-auditor": "@task",
 			// Fable's safety classifier may refuse security work.
-			"security-reviewer": `${MODELS.opus}:high`,
-			"security-auditor": `${MODELS.opus}:high`,
+			"security-reviewer": "@slow",
+			"security-auditor": "@slow",
 		},
 	},
 	{
@@ -80,7 +104,8 @@ export async function setupModels(ui: WizardUi, exec: Exec): Promise<"done" | "s
 		"Route work by model tier? Main session: Opus (auto effort). Planning and review: Opus at high effort. " +
 			"Coding subagents: Sonnet at high effort, raised to max for risky slices. Exploration: Sonnet. " +
 			"Mechanical work and classifiers: Haiku. Fable: only for the `deep` agent and the capped auto-router. " +
-			"Existing role assignments with the same names are replaced; others are kept.",
+			"Save `claude` and `codex` subscription presets for /modelpreset switch; Claude stays active. " +
+			"Existing roles and presets with the same names are replaced; others are kept.",
 	);
 	if (!ok) return "skipped";
 	for (const { key, value, merge } of PROFILE) {
@@ -91,6 +116,6 @@ export async function setupModels(ui: WizardUi, exec: Exec): Promise<"done" | "s
 		}
 		await omp(exec, ["config", "set", key, typeof next === "string" ? next : JSON.stringify(next)]);
 	}
-	ui.notify("Model routing applied. Restart open sessions to pick it up.", "info");
+	ui.notify("Claude routing applied; claude/codex presets saved. Restart open sessions, then use /modelpreset switch codex or claude.", "info");
 	return "done";
 }

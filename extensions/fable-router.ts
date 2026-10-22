@@ -86,6 +86,7 @@ function changedFiles(cwd: string): string[] {
 
 export default function fableRouter(pi: ExtensionAPI): void {
 	pi.on("before_subagent_spawn", (event, ctx) => {
+		if (ctx.model?.provider !== "anthropic") return;
 		const agent = typeof event.agent === "string" ? event.agent : String(event.agent?.name ?? "");
 		let reason: string;
 		if (agent === "deep") {
@@ -114,6 +115,7 @@ export default function fableRouter(pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_result", (event, ctx) => {
+		if (ctx.model?.provider !== "anthropic") return;
 		if (event.toolName !== "bash" || !event.isError || ctx.agent?.name === "deep") return;
 		const command = String(event.input?.command ?? "").replace(/\s+/g, " ").trim();
 		if (!command || PROBE.test(command)) return;

@@ -1,5 +1,5 @@
-// First-run setup wizard: optional agent-skills install, Claude model routing, and an Obsidian
-// vault as omp's knowledge base and memory.
+// First-run setup wizard: optional agent-skills install, Claude-first subscription presets,
+// and an Obsidian vault as omp's knowledge base and memory.
 // Runs automatically in the TUI until each step is done or skipped; `/starter` reruns it.
 import * as fs from "node:fs";
 import * as path from "node:path";
