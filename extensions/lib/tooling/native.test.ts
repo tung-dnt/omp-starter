@@ -500,4 +500,4 @@ test.skipIf(!hasCompilers)("the C and C++ fixtures build with the host compilers
 		// The binary the debugger will launch exists and exits 0 only when answer is 42.
 		expect(cp.spawnSync(path.join(dir, fixture.dap.program), { timeout: 30_000 }).status).toBe(0);
 	}
-});
+}, 60_000); // Real compiler startup on a cold Intel Mac can exceed Bun's default five-second deadline.
