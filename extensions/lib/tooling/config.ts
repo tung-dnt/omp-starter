@@ -89,11 +89,13 @@ const SCOPE_LABEL: Readonly<Record<ConfigScope, string>> = {
 
 type YamlParser = (text: string) => unknown;
 
-/** An installed plugin whose root omp reads `lsp.*`/`dap.*` (and, for LSP, its marketplace `lspServers`) from. */
+/** A plugin whose root omp reads `lsp.*`/`dap.*` (and, for LSP, its marketplace `lspServers`) from: installed, or passed with `--plugin-dir`. */
 interface PluginRoot {
 	readonly id: string;
 	readonly name: string;
 	readonly path: string;
+	/** Passed to omp with `--plugin-dir` for this launch. */
+	readonly launch?: true;
 }
 
 interface Candidate {
@@ -194,9 +196,10 @@ function resolveContext(context: ConfigContext): ResolvedConfigContext {
 		if (value !== undefined) env[name] = value;
 	}
 	const home = path.resolve(context.home ?? os.homedir());
+	const cwd = path.resolve(context.cwd);
 	const override = env.CLAUDE_CONFIG_DIR?.trim();
 	return {
-		cwd: path.resolve(context.cwd),
+		cwd,
 		agentDir: path.resolve(context.agentDir),
 		nativeDir: nativeConfigDir(home, env),
 		home,
@@ -204,6 +207,8 @@ function resolveContext(context: ConfigContext): ResolvedConfigContext {
 		claudeDir: override ? path.resolve(override) : path.join(home, ".claude"),
 		env,
 		foreignUserSources: { ...context.foreignUserSources },
+		// Only the directories are kept: the rest of the process arguments can hold credentials.
+		pluginDirs: [...new Set((context.pluginDirs ?? pluginDirsFromArgv(process.argv)).map(dir => path.resolve(cwd, dir)))],
 	};
 }
 
@@ -292,24 +297,84 @@ function readPluginRegistry(file: string): { roots: PluginRoot[]; fingerprint: s
 	return { roots, fingerprint };
 }
 
+/**
+ * The roots omp was launched with `--plugin-dir`, in order. This follows omp's parser for that one flag:
+ * `--plugin-dir <path>` takes the next token whatever it looks like, `--plugin-dir=<path>` is the same,
+ * `--` ends option parsing, and a trailing flag without a value adds nothing.
+ */
+export function pluginDirsFromArgv(argv: readonly string[]): string[] {
+	const dirs: string[] = [];
+	for (let index = 0; index < argv.length; index++) {
+		const arg = argv[index]!;
+		if (arg === "--") break;
+		if (arg === "--plugin-dir") {
+			if (index + 1 < argv.length) dirs.push(argv[++index]!);
+		} else if (arg.startsWith("--plugin-dir=")) {
+			dirs.push(arg.slice("--plugin-dir=".length));
+		}
+	}
+	return dirs;
+}
+
+/** A `--plugin-dir` root as omp builds it: the plugin name comes from a manifest inside the directory, else from the directory name. */
+function launchPluginRoot(dir: string): { root: PluginRoot; fingerprints: string[] } {
+	const fingerprints = [`${dir}\tlaunch`];
+	let name = path.basename(dir);
+	const real = realpathOrUndefined(dir);
+	const manifests = real === undefined ? [] : [path.join(real, ".claude-plugin", "plugin.json"), path.join(real, "plugin.json")];
+	for (const manifest of manifests) {
+		const resolved = realpathOrUndefined(manifest);
+		if (resolved === undefined || !isWithin(real!, resolved)) continue;
+		let bytes: Buffer;
+		try {
+			const stat = fs.statSync(resolved);
+			if (!stat.isFile() || stat.size > MAX_CONFIG_BYTES) continue;
+			bytes = fs.readFileSync(resolved);
+		} catch {
+			continue;
+		}
+		fingerprints.push(`${resolved}\t${sha256Hex(bytes)}`);
+		try {
+			const parsed: unknown = JSON.parse(bytes.toString("utf8"));
+			if (isRecord(parsed) && typeof parsed.name === "string" && parsed.name !== "") {
+				name = parsed.name;
+				break;
+			}
+		} catch {
+			// An unparsable manifest falls through to the next one and then to the directory name, as in omp.
+		}
+	}
+	return { root: { id: `${name}@__local__`, name, path: dir, launch: true }, fingerprints };
+}
+
 function scanPlugins(context: ResolvedConfigContext): PluginScan {
 	const roots: PluginRoot[] = [];
 	const known = new Set<string>();
 	const fingerprints: string[] = [];
 	const blind: { path: string; detail: string }[] = [];
+	// False once the cap is hit: the remaining roots were not inspected, which is reported as unresolved.
+	const add = (root: PluginRoot, origin: string): boolean => {
+		const identity = `${root.path}\0${root.name}`;
+		if (known.has(identity)) return true;
+		if (roots.length >= MAX_PLUGIN_ROOTS) {
+			blind.push({ path: origin, detail: `more than ${MAX_PLUGIN_ROOTS} plugin roots are installed, so their configuration was not inspected` });
+			return false;
+		}
+		known.add(identity);
+		roots.push(root);
+		return true;
+	};
+	for (const dir of context.pluginDirs) {
+		const launched = launchPluginRoot(dir);
+		fingerprints.push(...launched.fingerprints);
+		if (!add(launched.root, dir)) return { roots, fingerprints, blind };
+	}
 	for (const file of pluginRegistryFiles(context)) {
 		const registry = readPluginRegistry(file);
 		fingerprints.push(registry.fingerprint);
 		if (registry.blind !== undefined) blind.push({ path: file, detail: registry.blind });
 		for (const root of registry.roots) {
-			const identity = `${root.path}\0${root.name}`;
-			if (known.has(identity)) continue;
-			if (roots.length >= MAX_PLUGIN_ROOTS) {
-				blind.push({ path: file, detail: `more than ${MAX_PLUGIN_ROOTS} plugin roots are installed, so their configuration was not inspected` });
-				return { roots, fingerprints, blind };
-			}
-			known.add(identity);
-			roots.push(root);
+			if (!add(root, file)) return { roots, fingerprints, blind };
 		}
 	}
 	return { roots, fingerprints, blind };
@@ -666,13 +731,14 @@ export async function inspectConfig(context: ConfigContext): Promise<ConfigSnaps
 	const lsp = inspectKind("lsp", resolved, parseYaml, plugins, catalogs);
 	const dap = inspectKind("dap", resolved, parseYaml, plugins, catalogs);
 	const sources = [...lsp.sources, ...dap.sources];
-	const notes = [
-		"omp's built-in server and adapter definitions are the base layer; they are not listed here.",
-		"Roots passed to omp with --plugin-dir at launch cannot be seen from here and are not inspected.",
-	];
-	if (plugins.roots.length > 0) {
+	const notes = ["omp's built-in server and adapter definitions are the base layer; they are not listed here."];
+	const launched = plugins.roots.filter(root => root.launch === true).length;
+	if (launched > 0) {
+		notes.push(`${launched} root(s) passed to omp with --plugin-dir were inspected. They last for this launch only, so they can block a write but never make an entry ready.`);
+	}
+	if (plugins.roots.length > launched) {
 		notes.push(
-			`${plugins.roots.length} installed plugin root(s) were checked for lsp/dap configuration. Whether omp enables each one cannot be determined statically, so their configuration is treated as possibly effective: it can block a write but never counts as ready.`,
+			`${plugins.roots.length - launched} installed plugin root(s) were checked for lsp/dap configuration. Whether omp enables each one cannot be determined statically, so their configuration is treated as possibly effective: it can block a write but never counts as ready.`,
 		);
 	}
 	for (const source of sources) {

@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { applyConfig, effectiveEntry, inspectConfig } from "./config";
+import { applyConfig, effectiveEntry, inspectConfig, pluginDirsFromArgv } from "./config";
 import { acquireLock, ensureToolingRoots } from "./runtime";
 import type { ApplyResult, ConfigContext, ConfigEntry } from "./types";
 
@@ -29,7 +29,7 @@ function sandbox(extra: Partial<ConfigContext> = {}): Box {
 	const cwd = path.join(root, "project");
 	fs.mkdirSync(agentDir, { recursive: true });
 	fs.mkdirSync(cwd, { recursive: true });
-	return { root, home, agentDir, cwd, context: { cwd, agentDir, home, env: {}, ...extra } };
+	return { root, home, agentDir, cwd, context: { cwd, agentDir, home, env: {}, pluginDirs: [], ...extra } };
 }
 
 function put(file: string, content: string | object): void {
@@ -822,6 +822,73 @@ test("a marketplace lspServers path is read only while it stays inside the plugi
 
 	expect(result.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [path.join(inside, "servers.json")] });
 	expect(result.outcomes[1]?.status).toBe("applied");
+});
+
+test("a root passed to omp with --plugin-dir is inspected: a conflicting entry blocks and an identical one is never counted as ready", async () => {
+	const box = sandbox();
+	const root = path.join(box.root, "dev-plugin");
+	const file = path.join(root, "lsp.json");
+	put(file, { servers: { gopls: { command: "/dev/gopls" } } });
+
+	const snapshot = await inspectConfig({ ...box.context, pluginDirs: [root] });
+	const result = await applyConfig(snapshot, { entries: [GOPLS] });
+
+	expect(snapshot.sources.find(source => source.path === file)).toMatchObject({ scope: "plugin", enablement: "unknown", pluginId: "dev-plugin@__local__" });
+	expect(result.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [file] });
+	expect(result.outcomes[0]?.detail).toContain("replace or bypass");
+	expect(result.snapshot.notes.join("\n")).toContain("--plugin-dir were inspected");
+	expect(fs.existsSync(lspFile(box))).toBe(false);
+
+	const same = sandbox();
+	const sameRoot = path.join(same.root, "same-plugin");
+	put(path.join(sameRoot, "lsp.json"), { gopls: GOPLS.value });
+	const written = await apply(same, [GOPLS], { ...same.context, pluginDirs: [sameRoot] });
+	expect(written.outcomes[0]).toMatchObject({ status: "applied", path: lspFile(same) });
+	expect(effectiveEntry(written.snapshot, "lsp", "gopls")?.unverified.map(source => source.path)).toEqual([path.join(sameRoot, "lsp.json")]);
+});
+
+test("a --plugin-dir root takes its plugin name from its manifest to find its marketplace servers", async () => {
+	const box = sandbox();
+	const root = path.join(box.root, "catalog", "plugins", "dir-name");
+	put(path.join(root, ".claude-plugin", "plugin.json"), { name: "manifest-name" });
+	const catalog = path.join(box.root, "catalog", "marketplace.json");
+	put(catalog, {
+		plugins: [
+			{ name: "dir-name", lspServers: { clangd: { command: "/wrong/clangd" } } },
+			{ name: "manifest-name", lspServers: { gopls: { command: "/cat/gopls" } } },
+		],
+	});
+
+	const result = await apply(box, [GOPLS, CLANGD], { ...box.context, pluginDirs: [root] });
+
+	expect(result.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [`${catalog}#plugins/manifest-name`] });
+	expect(result.outcomes[1]?.status).toBe("applied");
+});
+
+test("pluginDirsFromArgv follows omp's parser for --plugin-dir", () => {
+	expect(pluginDirsFromArgv(["omp", "--plugin-dir", "a", "-p", "--plugin-dir=b", "--plugin-dir", "--odd", "--", "--plugin-dir", "ignored"])).toEqual(["a", "b", "--odd"]);
+	expect(pluginDirsFromArgv(["omp", "--plugin-dir"])).toEqual([]);
+	expect(pluginDirsFromArgv([])).toEqual([]);
+});
+
+test("without an explicit list the roots come from this process's own arguments, and an explicit list replaces them", async () => {
+	const box = sandbox();
+	const root = path.join(box.root, "argv-plugin");
+	put(path.join(root, "lsp.json"), { gopls: { command: "/argv/gopls" } });
+	const { pluginDirs: _explicit, ...bare } = box.context;
+	const saved = process.argv;
+	process.argv = ["omp", "--api-key", "sk-test-secret", "--plugin-dir", root];
+	try {
+		const fromArgv = await apply(box, [GOPLS], bare);
+		expect(fromArgv.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [path.join(root, "lsp.json")] });
+		expect(fromArgv.snapshot.context.pluginDirs).toEqual([root]);
+		expect(JSON.stringify(fromArgv.snapshot.context)).not.toContain("sk-test-secret");
+
+		const none = await apply(box, [GOPLS], { ...bare, pluginDirs: [] });
+		expect(none.outcomes[0]?.status).toBe("applied");
+	} finally {
+		process.argv = saved;
+	}
 });
 
 // ── Wrapper semantics and loader failures ───────────────────────────────────────────────────────

@@ -430,6 +430,12 @@ export interface ConfigContext {
 	 * (they can block a write) but never count as effective, unchanged or ready.
 	 */
 	readonly foreignUserSources?: Readonly<Partial<Record<ForeignProvider, boolean>>>;
+	/**
+	 * Roots omp was launched with (`--plugin-dir <path>`, repeatable); relative paths resolve against `cwd`. The default is
+	 * parsed from this process's own `process.argv` (the wizard runs inside omp); pass `[]` to say there are none. They are
+	 * read like installed plugin roots and last for one launch only, so they can block a write but never make an entry ready.
+	 */
+	readonly pluginDirs?: readonly string[];
 }
 
 export interface ResolvedConfigContext {
@@ -442,6 +448,8 @@ export interface ResolvedConfigContext {
 	readonly claudeDir: string;
 	readonly env: ConfigEnv;
 	readonly foreignUserSources: Readonly<Partial<Record<ForeignProvider, boolean>>>;
+	/** Absolute `--plugin-dir` roots. Only these paths are kept from the process arguments, never the arguments themselves. */
+	readonly pluginDirs: readonly string[];
 }
 
 /** Where a config file sits in omp's precedence ladder. */
@@ -451,8 +459,9 @@ export type ConfigSourceState = "ok" | "invalid" | "unreadable" | "not-regular" 
 
 /**
  * Whether omp reads a source: `enabled` always (project files, the native directory, the home directory,
- * opted-in providers), `disabled` never, `unknown` when that depends on settings or plugin gating this module
- * cannot see. Unknown sources can block a write but are never treated as effective.
+ * opted-in providers), `disabled` never, `unknown` when that depends on settings, plugin gating or a launch option
+ * (`--plugin-dir` lasts one launch) this module cannot rely on. Unknown sources can block a write but are never
+ * treated as effective.
  */
 export type ConfigEnablement = "enabled" | "disabled" | "unknown";
 
