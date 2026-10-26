@@ -6,43 +6,26 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { doneSources, forms, resolveKb, servesEverySession, sourceFolder } from "./lib/kb-sources";
+import { doneSources, forms } from "./lib/kb-sources";
+import { memoryDir, recall, type RecallParams } from "./lib/kb-store";
 import { markKbWritten } from "./lib/kb-write-flag";
 import {
-	excerpt,
 	findEntry,
 	frontmatterDescription,
 	indexLine,
 	MEMORY_TYPES,
 	type MemoryType,
-	queryTerms,
 	renderNote,
-	scoreNote,
-	sectionSlugs,
 	SLUG,
 	splitNote,
 	updateNote,
 	upsertIndex,
 } from "./lib/memory-notes";
 import { resolveRepoName } from "./lib/repo";
-import { expandHome, readState, tildify, type KbSource } from "./lib/state";
+import { readState, tildify, type KbSource } from "./lib/state";
 
 const LOCK_WAIT_MS = 5_000;
 const STALE_LOCK_MS = 30_000;
-
-function memoryDir(cwd: string): { source: KbSource; dir: string } {
-	const kb = readState().kb;
-	const source = resolveKb(cwd, kb);
-	if (!source) {
-		const served = doneSources(kb).map(s => (servesEverySession(s) ? "every session" : tildify(sourceFolder(s))));
-		throw new Error(
-			`No knowledge base serves ${tildify(cwd)}` +
-				(served.length ? ` (configured for: ${served.join(", ")})` : "") +
-				". Run /starter kb to add one for this folder.",
-		);
-	}
-	return { source, dir: path.join(expandHome(source.kbRef), "_memory") };
-}
 
 /** Writes through a temp file in the same folder and renames it, so readers never see half a file. */
 function atomicWrite(file: string, content: string): void {
@@ -161,51 +144,6 @@ function remember(p: RememberParams, cwd: string, dir: string, source: KbSource)
 		`${p.mode === "create" ? "Created" : "Updated"} ${tildify(notePath)}; ${indexNote} in ${tildify(indexPath)}. ` +
 		"The injected memory index refreshes in the next session."
 	);
-}
-
-interface RecallParams {
-	query: string;
-	scope?: string;
-	limit?: number;
-}
-
-function recall(p: RecallParams, dir: string, source: KbSource): string {
-	const terms = queryTerms(p.query);
-	if (!terms.length) throw new Error("query needs at least one word of two or more characters");
-	const indexPath = path.join(dir, "MEMORY.md");
-	const indexText = fs.existsSync(indexPath) ? fs.readFileSync(indexPath, "utf8") : "";
-	const allowed = p.scope ? sectionSlugs(indexText, p.scope) : undefined;
-	let evicted = 0;
-	const hits: { slug: string; description: string; body: string; matched: number; score: number }[] = [];
-	for (const name of fs.readdirSync(dir)) {
-		if (name.endsWith(".md.icloud")) {
-			evicted++;
-			continue;
-		}
-		// Skips the index, temp files and sync duplicates such as "note 2.md" / "note (conflicted copy).md".
-		if (!name.endsWith(".md") || name === "MEMORY.md" || name.startsWith(".") || /\s/.test(name)) continue;
-		const slug = name.slice(0, -3);
-		if (allowed && !allowed.has(slug)) continue;
-		const { frontmatter, body } = splitNote(fs.readFileSync(path.join(dir, name), "utf8"));
-		const description = frontmatterDescription(frontmatter);
-		const { matched, score } = scoreNote(terms, { slug, description, body });
-		if (matched) hits.push({ slug, description, body, matched, score });
-	}
-	hits.sort((a, b) => b.matched - a.matched || b.score - a.score || a.slug.localeCompare(b.slug));
-	const limit = Math.min(Math.max(Math.trunc(p.limit ?? 8), 1), 20);
-	const lines = hits.slice(0, limit).map(h => {
-		const section = findEntry(indexText, h.slug)?.section ?? "not indexed";
-		const quote = excerpt(h.body, terms);
-		return `- ${tildify(path.join(dir, `${h.slug}.md`))} [${section}] (${h.matched}/${terms.length} terms) — ${h.description}${quote ? `\n  > ${quote}` : ""}`;
-	});
-	const full = hits.filter(h => h.matched === terms.length).length;
-	const header =
-		`In ${source.kbRef}/_memory, ${full} note(s) match every word of "${p.query}" and ${hits.length - full} match some` +
-		(p.scope ? ` (within "## ${p.scope}")` : "") +
-		(hits.length > limit ? `; showing the best ${limit}` : "") +
-		(evicted ? `; ${evicted} note(s) evicted to iCloud were not searched` : "") +
-		".";
-	return lines.length ? `${header} Read a note before relying on it.\n${lines.join("\n")}` : header;
 }
 
 export default function kbMemoryTools(pi: ExtensionAPI): void {

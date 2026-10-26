@@ -1,6 +1,6 @@
 {
   "name": "omp-starter",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "private": true,
   "description": "First-run setup for omp: Claude-first routing with Codex/Claude subscription presets and capped Fable escalation, Obsidian vaults as knowledge base + memory per folder with kb_remember/kb_recall tools, optional agent-skills, optional guided LSP/debugger tooling for JavaScript/TypeScript, Python, Go, Rust and C/C++, and an on-demand /trans command (any language) on Google's Antigravity CLI",
   "license": "MIT",
@@ -10,6 +10,7 @@
       "./extensions/kb-commit-gate.ts",
       "./extensions/kb-memory.ts",
       "./extensions/kb-memory-tools.ts",
+      "./extensions/kb-command.ts",
       "./extensions/agent-skills-hint.ts",
       "./extensions/fable-router.ts",
       "./extensions/display-language.ts"

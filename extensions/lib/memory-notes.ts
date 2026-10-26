@@ -155,6 +155,19 @@ export function findEntry(text: string, slug: string): IndexEntry | undefined {
 	return undefined;
 }
 
+/** Every index line, in file order, with the section it sits under. */
+export function listEntries(text: string): ({ slug: string } & IndexEntry)[] {
+	const lines = text.split("\n");
+	const out: ({ slug: string } & IndexEntry)[] = [];
+	for (const g of scan(lines)) {
+		for (let i = g.start; i < g.end; i++) {
+			const m = ENTRY.exec(lines[i]);
+			if (m) out.push({ slug: m[2], line: i, title: m[1], hook: m[3] ?? "", section: g.name });
+		}
+	}
+	return out;
+}
+
 /** Slugs listed under `section` (case-insensitive; `Global` includes the lines before the first heading). */
 export function sectionSlugs(text: string, section: string): Set<string> {
 	const lines = text.split("\n");

@@ -80,6 +80,14 @@ Every Fable spawn counts toward a daily cap: `FABLE_ROUTER_DAILY_CAP`, default 5
 - **Memory:** the `kb-memory` extension injects the memory index `_memory/MEMORY.md` (one line per note) into each session, scoped to the current repo. `## <Scope>` headings split the index; a section applies to the repos listed in a `<!-- repos: a, b -->` comment under its heading, or to the repo named by the heading itself. `## Global` (and any lines before the first heading) always loads; the other sections are listed by name with their note counts. A section with an empty `<!-- repos: -->` comment never loads, which suits long per-ticket lists. The repo name comes from the `origin` remote, so worktrees and suffixed clones match too. The index is read once per session. Subagents get it only when they write code (`task`, `task-builder`, `test-engineer`); read-only ones such as `scout` and reviewers skip it. The generated `AGENTS.md` tells the agent how to save new memories as notes in `_memory/` and which section to file them under.
 - **Commit gate (optional):** blocks the agent's `git commit` under the chosen folder until it has written a note in that folder's knowledge base in that session. `[skip-mem]` in the commit message bypasses it. Only the `commit` subcommand is gated: `git commit-tree` or `git log --grep commit` pass. The gate checks the folder the commit really runs in (bash `cwd`, a leading `cd <dir> &&`, `git -C <dir>`). A KB write counts when `kb_remember` succeeds, or when a `write`/`edit` target is inside that knowledge base (symlinked or real path) or a `vault://` path; mentioning the KB path in a file's content doesn't count, and a note written to another folder's knowledge base doesn't either. The folder must be an existing absolute path such as `~/projects`. Cancelling a step while rerunning `/starter` keeps that step's saved result.
 
+**Read-only `/kb` commands** inspect the knowledge base serving the current session's folder; they do not change notes:
+
+- `/kb` or `/kb status`: show the active knowledge base, memory index and session status.
+- `/kb search <words>`: search note names, descriptions and bodies.
+- `/kb scopes`: list index scopes and mark those loaded for the current repo.
+- `/kb view [scope]`: show the memory index prepared for this session, or the current on-disk section for a named scope.
+- `/kb check`: check indexed notes for consistency problems.
+
 The plugin also ships a `knowledge-base` skill for searching and creating notes in the knowledge base.
 
 ## Display language and `/trans`
@@ -171,6 +179,11 @@ A fifth always-on rule (`rules/say-it-in-chat.md`): herdr web's Chat view collap
 The rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Release notes
+
+### 0.15.0 — 2026-10-26
+
+- **Added:** read-only `/kb` commands to inspect knowledge-base status, search notes, list scopes, view memory and check index consistency.
+
 
 ### 0.14.0 — 2026-10-27
 
