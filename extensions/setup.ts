@@ -8,7 +8,8 @@ import { syncAgentSkillsStore } from "./lib/agent-skills-store";
 import { setupModels } from "./lib/routing";
 import { AGY, installAgy, loginAgy } from "./lib/agy";
 import { languageName, PRESETS } from "./lib/languages";
-import { HOME, expandHome, readState, tildify, updateState, type KbState, type LanguageState } from "./lib/state";
+import { HOME, STATE_FILE, expandHome, readState, readTooling, saveTooling, tildify, updateState, type KbState, type LanguageState, type SetupState } from "./lib/state";
+import type { ToolsUi } from "./lib/tooling";
 import {
 	PERSONALITY_FILE,
 	PERSONALITY_TEMPLATE,
@@ -289,11 +290,27 @@ export async function setupVoice(ui: WizardUi, language: string): Promise<VoiceI
 
 // ── Wiring ──────────────────────────────────────────────────────────────────
 
-interface Steps {
+export interface Steps {
 	skills: boolean;
 	models: boolean;
 	kb: boolean;
 	language: boolean;
+	tools: boolean;
+}
+
+/**
+ * Steps the automatic wizard offers. Language tooling is offered only to a brand-new install (no state file
+ * existed before the wizard began); existing installs opt in with `/starter tools`, so a new field never re-prompts them.
+ */
+export function startupSteps(state: SetupState, stateFileExisted: boolean): Steps | undefined {
+	const steps: Steps = {
+		skills: !state.agentSkills,
+		models: !state.models,
+		kb: !state.kb,
+		language: !state.language,
+		tools: !stateFileExisted,
+	};
+	return steps.skills || steps.models || steps.kb || steps.language || steps.tools ? steps : undefined;
 }
 
 /** Whether omp's own first-run setup has not finished yet: it records `setupVersion` in config.yml when done. */
@@ -312,7 +329,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 		return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", code: result.code ?? 1 };
 	};
 
-	async function run(ui: WizardUi, steps: Steps): Promise<void> {
+	async function run(ui: ToolsUi, steps: Steps, cwd: string): Promise<void> {
 		// A cancelled rerun must not overwrite a step that was already done.
 		const keep = <T extends { status: "done" | "skipped" }>(previous: T | undefined, next: T): T =>
 			previous?.status === "done" && next.status === "skipped" ? previous : next;
@@ -333,6 +350,20 @@ export default function ompStarter(pi: ExtensionAPI): void {
 			}
 		}
 		if (steps.language) updateState({ language: keep(readState().language, await setupDisplayLanguage(ui)) });
+		if (steps.tools) {
+			try {
+				// Dynamic on purpose: omp loads this extension on every start (and for subagents), and a failure to
+				// load the large tooling modules must stay inside this step instead of breaking the other wizard steps.
+				const { setupTools, resolveToolingEnvironment } = await import("./lib/tooling");
+				// A corrupt state file stops here, before anything is offered or installed.
+				const { tooling, problems } = readTooling();
+				for (const problem of problems) ui.notify(problem, "warning");
+				const environment = await resolveToolingEnvironment(cwd);
+				await setupTools(ui, { cwd, ...environment, prior: tooling, persist: next => saveTooling(next) });
+			} catch (error) {
+				ui.notify(`Language tooling setup failed: ${String(error)}`, "error");
+			}
+		}
 	}
 
 	// Wizard waiting for omp's own first-run setup to finish.
@@ -340,11 +371,10 @@ export default function ompStarter(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.agent?.kind === "sub" || ctx.mode !== "tui" || !ctx.hasUI) return;
-		const state = readState();
-		const steps = { skills: !state.agentSkills, models: !state.models, kb: !state.kb, language: !state.language };
-		if (!steps.skills && !steps.models && !steps.kb && !steps.language) return;
+		const steps = startupSteps(readState(), fs.existsSync(STATE_FILE));
+		if (!steps) return;
 		if (!ompSetupPending()) {
-			void run(ctx.ui, steps).catch((error: unknown) => ctx.ui.notify(`Setup failed: ${String(error)}`, "error"));
+			void run(ctx.ui, steps, ctx.cwd).catch((error: unknown) => ctx.ui.notify(`Setup failed: ${String(error)}`, "error"));
 			return;
 		}
 		// omp shows its own setup screens after session_start, and a dialog opened before them stays on
@@ -352,7 +382,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 		const fire = () => {
 			deferred = undefined;
 			ctx.clearTimer(timer);
-			return run(ctx.ui, steps).catch((error: unknown) => ctx.ui.notify(`Setup failed: ${String(error)}`, "error"));
+			return run(ctx.ui, steps, ctx.cwd).catch((error: unknown) => ctx.ui.notify(`Setup failed: ${String(error)}`, "error"));
 		};
 		const timer = ctx.setInterval(() => {
 			if (!ompSetupPending()) void fire();
@@ -375,7 +405,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("starter", {
-		description: "Rerun omp-starter setup. Args: skills | models | kb | language | voice (default: all)",
+		description: "Rerun omp-starter setup. Args: skills | models | kb | language | voice | tools (default: all)",
 		handler: async (args, ctx) => {
 			const which = args.trim();
 			if (which === "voice") {
@@ -388,12 +418,17 @@ export default function ompStarter(pi: ExtensionAPI): void {
 				updateState({ language: { ...language, name, voice: await setupVoice(ctx.ui, name) } });
 				return;
 			}
-			await run(ctx.ui, {
-				skills: !which || which === "skills",
-				models: !which || which === "models",
-				kb: !which || which === "kb",
-				language: !which || which === "language",
-			});
+			await run(
+				ctx.ui,
+				{
+					skills: !which || which === "skills",
+					models: !which || which === "models",
+					kb: !which || which === "kb",
+					language: !which || which === "language",
+					tools: !which || which === "tools",
+				},
+				ctx.cwd,
+			);
 		},
 	});
 }
