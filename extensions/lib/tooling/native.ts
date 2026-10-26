@@ -376,31 +376,74 @@ function pinNote(release: NativeRelease, pin: NativePin): string {
 	return `Pinned ${release.tool} ${release.version}: ${pin.artifact.url} (SHA-256 ${pin.artifact.sha256}, GitHub release digest reviewed ${pin.artifact.reviewed}; no upstream signature verification is claimed).`;
 }
 
-type Configured = { readonly problem: string } | { readonly entry: EffectiveEntry; readonly command: ResolvedCommand };
+type Configured =
+	| { readonly problem: string }
+	| { readonly entry: EffectiveEntry; readonly command: ResolvedCommand; /** Project-supplied or project-local: must not run while planning. */ readonly deferred: boolean };
 
 /**
  * The tool an existing effective entry selects, or why it cannot be used as it is. Undefined when no entry
  * chooses a tool, so a plain install may be proposed (the config merge still refuses real conflicts).
- * Nothing here ever replaces, shadows or runs a project-supplied entry.
+ * Entries that come from the project, or whose program lives in it, are usable but deferred: planning
+ * never executes them, it discloses them so the wizard can ask for consent before verification runs them.
  */
-function selectConfigured(effective: EffectiveEntry | undefined, key: string): Configured | undefined {
+function selectConfigured(runtime: Runtime, effective: EffectiveEntry | undefined, key: string): Configured | undefined {
 	if (effective === undefined) return undefined;
 	const where = effective.source.path;
 	if (effective.disabled) return { problem: `\`${key}\` is disabled in ${where}. Re-enable it yourself; this setup never overrides an explicit disable.` };
 	if (typeof effective.value.command !== "string") return undefined;
-	if (effective.projectSupplied) {
-		return {
-			problem: `Project configuration (${where}) defines \`${key}\` and takes precedence over user-level config, so it is neither run nor replaced by this setup. Remove or align that entry, or work from another project.`,
-		};
-	}
 	const command = effective.command;
 	if (command === undefined) {
 		return { problem: `The command \`${effective.value.command}\` configured for \`${key}\` in ${where} does not resolve to an executable. Fix or remove that entry yourself; it is not replaced.` };
 	}
-	if (command.origin === "project-local") {
-		return { problem: `The command configured for \`${key}\` in ${where} resolves to ${command.path} inside your project; running it needs your explicit approval and this setup does not run it.` };
+	const deferred = effective.projectSupplied || command.origin === "project-local" || isWithin(runtime.cwd, command.path);
+	return { entry: effective, command, deferred };
+}
+
+/** Reuse of a tool an existing entry selects: run a bounded probe, unless it must wait for the user's consent. */
+async function reuseConfigured(
+	runtime: Runtime,
+	kind: ConfigKind,
+	name: string,
+	selected: Extract<Configured, { entry: EffectiveEntry }>,
+	args: string[],
+	probeArgs: readonly string[],
+	tool: ToolDescription,
+	prerequisites: readonly Prerequisite[],
+	notes: readonly string[],
+): Promise<IntegrationPlan> {
+	const { entry, command, deferred } = selected;
+	const where = entry.source.path;
+	if (deferred) {
+		return {
+			kind,
+			status: "reuse",
+			source: "project-local",
+			launch: { command: command.path, args },
+			tool: { name, sources: [] },
+			prerequisites,
+			entries: [],
+			notes: [
+				...notes,
+				`Reusing ${name} at ${command.path} (configured in ${where}). It comes from your project, so it was not run while planning and stays unverified until you approve running it; its configuration is left unchanged.`,
+			],
+		};
 	}
-	return { entry: effective, command };
+	const probed = await probe(runtime, command.path, probeArgs);
+	if (!probed.ok) {
+		return blocked(kind, tool, prerequisites, "failed", `The configured ${name} at ${command.path} did not run (${probed.detail}); it is not replaced. Fix or remove that entry yourself.`, notes);
+	}
+	const managed = isWithin(runtime.toolingRoot, command.path);
+	const version = versionOf(firstLine(probed.output));
+	return {
+		kind,
+		status: "reuse",
+		source: managed ? "managed" : "configured",
+		launch: { command: command.path, args },
+		tool: { name, ...(version === undefined ? {} : { version }), sources: [] },
+		prerequisites,
+		entries: [],
+		notes: [...notes, `Using the ${managed ? "managed" : "already configured"} ${name} at ${command.path}; its configuration is left unchanged.`],
+	};
 }
 
 // ── Language servers ────────────────────────────────────────────────────────────────────────────
@@ -422,40 +465,27 @@ async function planLsp(context: PlanContext, spec: LspSpec, prerequisites: reado
 	if ("stopped" in gated) return gated.stopped;
 	const notes = [...spec.notes, ...unverifiedNotes(config, "lsp", spec.key)];
 
-	const configured = selectConfigured(effectiveEntry(config, "lsp", spec.key), spec.key);
+	const configured = selectConfigured(runtime, effectiveEntry(config, "lsp", spec.key), spec.key);
 	if (configured !== undefined) {
 		if ("problem" in configured) return blocked("lsp", tool, prerequisites, "failed", configured.problem, notes);
-		const { entry, command } = configured;
+		const { entry } = configured;
 		const fileTypes = entry.value.fileTypes;
 		const missing = Array.isArray(fileTypes) ? spec.mustCover.filter(type => !fileTypes.includes(type)) : [];
 		if (missing.length > 0) {
 			return blocked("lsp", tool, prerequisites, "failed", `\`${spec.key}\` in ${entry.source.path} does not cover ${missing.join(", ")}; it is not replaced. Align its fileTypes or remove the entry yourself.`, notes);
 		}
-		const probed = await probe(runtime, command.path, ["--version"]);
-		if (!probed.ok) {
-			return blocked("lsp", tool, prerequisites, "failed", `The configured ${spec.key} at ${command.path} did not run (${probed.detail}); it is not replaced. Fix or remove that entry yourself.`, notes);
-		}
-		const managed = isWithin(runtime.toolingRoot, command.path);
-		const version = versionOf(firstLine(probed.output));
-		return {
-			kind: "lsp",
-			status: "reuse",
-			source: managed ? "managed" : "configured",
-			launch: { command: command.path, args: stringList(entry.value.args) },
-			tool: { name: spec.key, ...(version === undefined ? {} : { version }), sources: [] },
-			prerequisites,
-			entries: [],
-			notes: [...notes, `Using the ${managed ? "managed" : "already configured"} ${spec.key} at ${command.path}; its configuration is left unchanged.`],
-		};
+		// An omitted `args` inherits omp's built-in arguments for this server.
+		const args = Array.isArray(entry.value.args) ? stringList(entry.value.args) : [...spec.args];
+		return reuseConfigured(runtime, "lsp", spec.key, configured, args, ["--version"], tool, prerequisites, notes);
 	}
 
 	const onPath = runtime.resolveExecutable(spec.key);
 	const pathNotes: string[] = [];
+	// omp resolves its built-in command through project-local bin directories first; a PATH tool is pinned by path when that would differ.
+	const resolvedByOmp = resolveEntryCommand("lsp", spec.key, config.context);
 	if (onPath?.origin === "path") {
 		const probed = await probe(runtime, onPath.path, ["--version"]);
 		if (probed.ok) {
-			// omp resolves its built-in command through project-local bin directories first; pin the PATH tool when that would differ.
-			const resolvedByOmp = resolveEntryCommand("lsp", spec.key, config.context);
 			const needsEntry = resolvedByOmp?.path !== onPath.path;
 			const version = versionOf(firstLine(probed.output));
 			return {
@@ -475,7 +505,19 @@ async function planLsp(context: PlanContext, spec: LspSpec, prerequisites: reado
 		}
 		pathNotes.push(`The ${spec.key} on PATH (${onPath.path}) did not run (${probed.detail}); the pinned release is installed instead.`);
 	} else if (onPath !== undefined) {
-		pathNotes.push(`The ${spec.key} at ${onPath.path} is inside your project and is never run without your explicit approval; the pinned release is installed instead.`);
+		if (resolvedByOmp?.path === onPath.path) {
+			return {
+				kind: "lsp",
+				status: "reuse",
+				source: "project-local",
+				launch: { command: onPath.path, args: [...spec.args] },
+				tool: { name: spec.key, sources: [] },
+				prerequisites,
+				entries: [],
+				notes: [...notes, `${spec.key} at ${onPath.path} is inside your project and is what omp already runs. It was not run while planning and stays unverified until you approve running it.`],
+			};
+		}
+		pathNotes.push(`The ${spec.key} at ${onPath.path} is inside your project and omp would not use it, so it is not run; the pinned release is installed instead.`);
 	}
 
 	const pin = spec.release.pins[gated.platform.id];
@@ -499,6 +541,26 @@ const CODELLDB_NOTES: readonly string[] = [
 	"Debugging needs OS permission: on Linux ptrace of your own processes (kernel.yama.ptrace_scope), on macOS Developer Tools access. When the OS denies it the debugger is reported not ready; nothing is changed on your behalf.",
 ];
 
+/**
+ * Why an existing codelldb entry does not give omp the stdio transport, or undefined when it does. omp starts
+ * stdio unless `connectMode` says otherwise, but an entry that omits `args` inherits the built-in `--port 0`.
+ */
+function transportProblem(entry: EffectiveEntry): string | undefined {
+	const where = entry.source.path;
+	const mode = entry.value.connectMode;
+	if (mode !== undefined && mode !== "stdio") {
+		return `\`codelldb\` in ${where} uses connectMode ${JSON.stringify(mode)}, not the verified stdio mode; it is not replaced and no other debugger is substituted. Set stdio with \`args: []\`, or remove the entry yourself.`;
+	}
+	const args = entry.value.args;
+	if (!Array.isArray(args)) {
+		return `\`codelldb\` in ${where} omits \`args\`, so it inherits omp's built-in \`--port 0\` and would open a TCP listener instead of stdio; it is not replaced. Add \`"args": []\` yourself.`;
+	}
+	if (stringList(args).some(arg => arg === "--port" || arg.startsWith("--port=") || arg === "--connect" || arg.startsWith("--connect="))) {
+		return `\`codelldb\` in ${where} passes --port/--connect, which is not the verified stdio mode; it is not replaced. Set \`"args": []\` yourself.`;
+	}
+	return undefined;
+}
+
 async function planCodeLldb(context: PlanContext, prerequisites: readonly Prerequisite[]): Promise<IntegrationPlan> {
 	const { runtime, config } = context;
 	const tool = describe(runtime, CODELLDB_RELEASE, "codelldb");
@@ -506,42 +568,36 @@ async function planCodeLldb(context: PlanContext, prerequisites: readonly Prereq
 	if ("stopped" in gated) return gated.stopped;
 	const notes = [...CODELLDB_NOTES, ...unverifiedNotes(config, "dap", "codelldb")];
 
-	const configured = selectConfigured(effectiveEntry(config, "dap", "codelldb"), "codelldb");
+	const configured = selectConfigured(runtime, effectiveEntry(config, "dap", "codelldb"), "codelldb");
 	if (configured !== undefined) {
 		if ("problem" in configured) return blocked("dap", tool, prerequisites, "failed", configured.problem, notes);
-		const { entry, command } = configured;
-		const args = stringList(entry.value.args);
-		const listens = args.some(arg => arg === "--port" || arg.startsWith("--port=") || arg === "--connect" || arg.startsWith("--connect="));
-		if (entry.value.connectMode !== "stdio" || listens) {
-			return blocked(
-				"dap",
-				tool,
-				prerequisites,
-				"failed",
-				`\`codelldb\` in ${entry.source.path} does not use the verified stdio mode (connectMode "stdio" without --port/--connect); it is not replaced and no other debugger is substituted. Align or remove that entry yourself.`,
-				notes,
-			);
-		}
-		const probed = await probe(runtime, command.path, ["--help"]);
-		if (!probed.ok) {
-			return blocked("dap", tool, prerequisites, "failed", `The configured codelldb at ${command.path} did not run (${probed.detail}); it is not replaced. Fix or remove that entry yourself.`, notes);
-		}
-		const managed = isWithin(runtime.toolingRoot, command.path);
-		return {
-			kind: "dap",
-			status: "reuse",
-			source: managed ? "managed" : "configured",
-			launch: { command: command.path, args },
-			tool: { name: "codelldb", sources: [] },
-			prerequisites,
-			entries: [],
-			notes: [...notes, `Using the ${managed ? "managed" : "already configured"} codelldb at ${command.path} in stdio mode; its configuration is left unchanged.`],
-		};
+		const problem = transportProblem(configured.entry);
+		if (problem !== undefined) return blocked("dap", tool, prerequisites, "failed", problem, notes);
+		return reuseConfigured(runtime, "dap", "codelldb", configured, stringList(configured.entry.value.args), ["--help"], tool, prerequisites, notes);
 	}
 
-	// A codelldb on PATH is not reused: omp's default for it listens on a TCP port, and its version and transport cannot be verified.
+	// A working codelldb on PATH is reused with an explicit stdio entry: omp's built-in entry would add `--port 0`.
+	// Whether it really speaks DAP over stdio is decided by the verification that follows, not assumed here.
 	const onPath = runtime.resolveExecutable("codelldb");
-	const pathNotes = onPath === undefined ? [] : [`The codelldb at ${onPath.path} is not used: its version and transport cannot be verified, and no unrelated debugger stands in for the pinned one.`];
+	const pathNotes: string[] = [];
+	if (onPath?.origin === "path") {
+		const probed = await probe(runtime, onPath.path, ["--help"]);
+		if (probed.ok) {
+			return {
+				kind: "dap",
+				status: "reuse",
+				source: "path",
+				launch: { command: onPath.path, args: [] },
+				tool: { name: "codelldb", sources: [] },
+				prerequisites,
+				entries: [codelldbEntry(onPath.path)],
+				notes: [...notes, `Using the existing codelldb at ${onPath.path}; nothing is installed. Its version is not pinned, so the debugger counts as ready only after the verification passes.`],
+			};
+		}
+		pathNotes.push(`The codelldb on PATH (${onPath.path}) did not run (${probed.detail}); the pinned release is installed instead.`);
+	} else if (onPath !== undefined) {
+		pathNotes.push(`The codelldb at ${onPath.path} is inside your project, so it is not run or written into your user configuration; the pinned release is installed instead.`);
+	}
 	const pin = CODELLDB_RELEASE.pins[gated.platform.id];
 	const destination = runtime.installDirectory(CODELLDB_RELEASE.tool, CODELLDB_RELEASE.version, gated.platform.id);
 	const launch: ToolLaunch = { command: path.join(destination, pin.executable), args: [] };
@@ -758,13 +814,19 @@ function pathOf(prerequisite: Prerequisite, fallback: string): string {
 	return prerequisite.found?.path ?? fallback;
 }
 
+/** Programs a plan would run that come from the user's project: disclosed now, run only after the wizard's consent. */
+function projectLocalOf(...plans: readonly IntegrationPlan[]): string[] {
+	const commands = plans.flatMap(plan => (plan.status === "reuse" && plan.source === "project-local" ? [plan.launch.command] : []));
+	return [...new Set(commands)];
+}
+
 /** Rust: rust-analyzer (reused when present, else pinned) and the shared CodeLLDB, both over the existing toolchain. */
 export async function planRust(context: PlanContext): Promise<LanguagePlan> {
 	const sdk = await inspectRust(context.runtime);
 	const lsp = await planLsp(context, RUST_LSP, [sdk.cargo, sdk.rustc, sdk.rustSrc]);
 	// rust-src only helps the language server; debugging a compiled fixture needs just cargo and rustc.
 	const dap = await planCodeLldb(context, [sdk.cargo, sdk.rustc]);
-	return { language: "rust", lsp, dap, fixtures: [rustFixture(pathOf(sdk.cargo, "cargo"))], projectLocalExecutables: [] };
+	return { language: "rust", lsp, dap, fixtures: [rustFixture(pathOf(sdk.cargo, "cargo"))], projectLocalExecutables: projectLocalOf(lsp, dap) };
 }
 
 /** C/C++: clangd (reused when present, else pinned) and the shared CodeLLDB, with separate C and C++ fixtures. */
@@ -777,7 +839,7 @@ export async function planCpp(context: PlanContext): Promise<LanguagePlan> {
 		lsp,
 		dap,
 		fixtures: [cFixture(pathOf(sdk.c, "cc")), cppFixture(pathOf(sdk.cpp, "c++"))],
-		projectLocalExecutables: [],
+		projectLocalExecutables: projectLocalOf(lsp, dap),
 	};
 }
 
