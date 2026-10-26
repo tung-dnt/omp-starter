@@ -440,6 +440,7 @@ export async function observeDefinition(spec: LspSpec, tools: ToolLike, context:
 	let attempts = 0;
 	let server: string | undefined;
 	let last = "the server returned no definition yet";
+	let lastLocations: LocationObservation[] = [];
 	const finish = (status: LspObservation["status"], detail: string | undefined, locations: LocationObservation[]): LspObservation => ({
 		status,
 		attempts,
@@ -478,9 +479,17 @@ export async function observeDefinition(spec: LspSpec, tools: ToolLike, context:
 		}
 		const parsed = locationsFromText(text, context.cwd);
 		if (!parsed.ok) return finish("error", parsed.reason, []);
-		if (parsed.locations.length > 0) return finish("observed", undefined, parsed.locations);
+		if (parsed.locations.length > 0) {
+			// tsserver can return the local import alias until its semantic project is loaded.
+			// Keep the same readiness deadline and require the actual cross-file definition.
+			lastLocations = parsed.locations;
+			if (parsed.locations.some(location => location.file === spec.definition.file && location.line === spec.definition.line)) {
+				return finish("observed", undefined, parsed.locations);
+			}
+		}
 		await context.clock.sleep(POLL_MS);
 	}
+	if (lastLocations.length > 0) return finish("observed", `the expected definition did not become available within ${context.readinessMs}ms`, lastLocations);
 	return finish("error", `no definition within ${context.readinessMs}ms: ${last}`, []);
 }
 

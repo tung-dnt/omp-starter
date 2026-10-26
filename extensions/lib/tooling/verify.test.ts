@@ -695,6 +695,27 @@ test("definition polling waits for a server that is still loading, then reads th
 	expect(calls[0]).toMatchObject({ action: "request", query: "textDocument/definition", line: 1, symbol: "call", file: `${FIXTURE}/main.src` });
 });
 
+test("definition readiness does not mistake a temporary import alias for the cross-file target", async () => {
+	const { tool } = scripted([
+		() => lspAnswer("srv", location("main.src", 1)),
+		() => lspAnswer("srv", location("main.src", 1)),
+		() => lspAnswer("srv", location("util.src", 1)),
+	]);
+	const observation = await observeDefinition(SPEC, tool, phase());
+	expect(observation).toMatchObject({ status: "observed", attempts: 3, locations: [{ file: "util.src", line: 1 }] });
+	expect(observation.elapsedMs).toBeGreaterThan(0);
+});
+
+test("an import alias that never resolves stays a bounded wrong-location observation", async () => {
+	const { tool, calls } = scripted(Array.from({ length: 50 }, () => () => lspAnswer("srv", location("main.src", 1))));
+	const observation = await observeDefinition(SPEC, tool, phase());
+	expect(observation).toMatchObject({ status: "observed", locations: [{ file: "main.src", line: 1 }] });
+	expect(observation.detail).toContain("3000ms");
+	expect(observation.elapsedMs).toBeGreaterThanOrEqual(3_000);
+	expect(observation.elapsedMs).toBeLessThan(3_500);
+	expect(calls.length).toBeLessThan(20);
+});
+
 test("definition polling stops at a real failure and is bounded when nothing ever answers", async () => {
 	const failing = scripted([() => lspAnswer("srv", "No language server found for this file", false)]);
 	expect(await observeDefinition(SPEC, failing.tool, phase())).toMatchObject({ status: "error", attempts: 1, detail: expect.stringContaining("No language server") });

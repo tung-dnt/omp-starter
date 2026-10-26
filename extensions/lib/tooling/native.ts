@@ -634,7 +634,8 @@ function lineOf(content: string, needle: string, occurrence = 1): number {
 
 const UTIL_FILE = "src/util.rs";
 const MAIN_FILE = "src/main.rs";
-const RUST_UTIL = lines("pub fn compute_answer(a: i32, b: i32) -> i32 {", "    let answer = a * b;", "    return answer;", "}");
+// A real call gives the debugger an executable stop with `answer` live; a bare return can map to the closing brace.
+const RUST_UTIL = lines("pub fn compute_answer(a: i32, b: i32) -> i32 {", "    let answer = a * b;", '    println!("{}", answer);', "    return answer;", "}");
 const RUST_MAIN = lines("mod util;", "", "fn main() {", "    std::process::exit(if util::compute_answer(6, 7) == 42 { 0 } else { 1 });", "}");
 const CARGO_TOML = lines(
 	"[package]",
@@ -670,7 +671,7 @@ function rustFixture(cargo: string): FixtureCase {
 		dap: {
 			adapter: "codelldb",
 			program: "target/debug/answer-rust",
-			breakpoint: { file: UTIL_FILE, line: lineOf(RUST_UTIL, "return answer") },
+			breakpoint: { file: UTIL_FILE, line: lineOf(RUST_UTIL, "println!") },
 			variable: { name: "answer", value: "42" },
 		},
 	};
