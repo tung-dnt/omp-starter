@@ -2430,7 +2430,7 @@ class RuntimeImpl implements Runtime {
 	private async developerToolsPresent(): Promise<boolean> {
 		if (this.developerTools !== undefined) return this.developerTools;
 		const { promise, resolve } = Promise.withResolvers<boolean>();
-		cp.execFile("/usr/bin/xcode-select", ["-p"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } }, (error, stdout) => {
+		cp.execFile("/usr/bin/xcode-select", ["-p"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" }, timeout: 5_000, killSignal: "SIGKILL", signal: this.signal }, (error, stdout) => {
 			resolve(!error && stdout.trim() !== "" && isDirectory(stdout.trim()));
 		});
 		this.developerTools = await promise;
