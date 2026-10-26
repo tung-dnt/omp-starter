@@ -8,6 +8,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 | **Model routing** *(Claude-first)* | Saves `claude` and `codex` subscription presets without requiring a login. When the required Claude models are available, also routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels; otherwise keeps the current routing. Using a preset requires its provider login. |
 | **Knowledge base** | Uses an Obsidian vault as omp's knowledge base and long-term memory. Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that points sessions at the knowledge base, injects the part of the memory index that applies to the current repo, and optionally adds a commit gate. |
 | **Display language** *(optional)* | Sets the target language of the `/trans` command, which translates on demand between any languages while the agent keeps working in English. Installs Google's Antigravity CLI and signs it in to your Google AI Pro/Ultra plan. |
+| **Developer tools** *(optional)* | Sets up a language server (LSP) and a debugger (DAP) for JavaScript/TypeScript, Python, Go, Rust and C/C++ with the SDKs you already have. Offered on a brand-new install; existing installs run `/starter tools`. See [Language tooling](#language-tooling-starter-tools). |
 
 Every step can be skipped.
 
@@ -96,10 +97,43 @@ The step asks for the display language: a preset (Vietnamese, Chinese, Japanese,
 - **Personality:** the same step offers to write `~/.omp/agent/PERSONALITY.md`, which replaces omp's default personality block for the main session. The agent debates plans, lists edge cases and keeps objecting until you settle it (e.g. "chốt"). An existing file is never overwritten. Pronouns live in the voice, because English has no "em/đại ca"; the personality stays in English so the agent keeps working in English.
 - **Overrides:** `OMP_STARTER_AGY` sets the path to the `agy` binary. The language and model are stored as `language.name` and `language.model` in `omp-starter.json` (installs from before 0.11 that stored a preset `language.code` keep working).
 
+## Language tooling (`/starter tools`)
+
+An optional step that gives omp a language server and a debugger for the languages you pick. It is offered once on a brand-new install (before any `omp-starter.json` exists); existing installs opt in with `/starter tools` (or a full `/starter`). A skipped or incomplete result is never re-offered at startup.
+
+1. You confirm the step, then toggle languages (none is preselected).
+2. It inspects your SDKs and configuration and shows a plan: the SDKs it found, each tool it would install with source, version and destination, and the config entries it would add. Nothing has run yet.
+3. You confirm again. Then, one language at a time, it installs, verifies and applies. Declining at either prompt writes no tool or config file.
+4. Esc or Ctrl+C cancels: owned processes are stopped, results from earlier runs are kept, and the summary lists what was already installed (installs are never rolled back).
+
+It needs no provider login, never installs or changes an SDK, and never changes a project.
+
+**Supported profiles.** macOS Apple Silicon and Intel, and Ubuntu/Debian glibc Linux x64. Anything else (other Linux, musl, Linux arm, Windows) is reported unsupported and nothing is installed. The CI workflow `.github/workflows/tooling.yml` exercises `macos-15-intel`, `macos-15` (arm64), `ubuntu-24.04` and a `debian:12` container, each with Node 24.22, TypeScript 6.0.3, Python (3.12 from setup-python; Debian 12 uses its system Python 3.11 with `python3-venv`), Go 1.27.2, Rust stable with `rust-src`, the runner's C and C++ compilers, omp 18.12.6 and Bun 1.4.3, plus a separate JavaScript/TypeScript run against TypeScript 7.0.2. Other versions that meet the minimums below are accepted but untested.
+
+**SDKs you install yourself** (a missing or too-old one is reported as `needs-sdk` with the fix):
+
+| Group | Needs |
+|---|---|
+| JavaScript / TypeScript | Node.js ≥ 22.22.2 with npm ≥ 7, and TypeScript 6 (`tsc`, regular npm install) or TypeScript 7 (native `tsc --lsp`). `tsc` also compiles the source-mapped TypeScript debug fixture. |
+| Python | Python 3.10–3.14 with `venv` and `ensurepip` (Debian/Ubuntu: `python3-venv`). |
+| Go | Go ≥ 1.27; toolchain downloads stay off (`GOTOOLCHAIN=local`). |
+| Rust | `cargo` and `rustc` ≥ 1.56 and the `rust-src` component. |
+| C / C++ | A working C compiler and a working C++ compiler (`cc`/`gcc`/`clang`, `c++`/`g++`/`clang++`); on macOS the Xcode Command Line Tools. |
+
+**What gets installed.** Tools that already work (on `PATH` or in your config) are reused, never replaced. Otherwise the step installs, under `~/.omp/agent/tooling/` (one immutable folder per tool and version): typescript-language-server 6.0.2, js-debug 1.140.0, python-lsp-server 1.15.0 and debugpy 1.8.22 (private venv), gopls v0.24.0, Delve 1.27.2, rust-analyzer 2026-10-19, clangd 23.1.0 and one CodeLLDB 1.12.3 shared by Rust and C/C++. Entries are merged into your native `lsp.json` and `dap.json` (`~/.omp/agent`, following omp's profile and `PI_CONFIG_DIR` rules).
+
+**Integrity and trust.** GitHub release assets are pinned by SHA-256 and checked before extraction. npm installs use a committed lockfile with scripts disabled, Python uses a committed hash lock with binary wheels only, and gopls is built with pinned module versions checked against the public Go checksum database. No upstream signature verification is performed, and Go-built binaries are not claimed to be bit-identical across compilers. js-debug listens on a loopback TCP port while a debug session runs.
+
+**Verification.** Each language is checked in a private temporary directory (private HOME, no credentials, no model call) with a disposable fixture: omp's own `lsp` tool must resolve a cross-file definition, and its `debug` tool must stop at a breakpoint and read `answer = 42`. JavaScript and source-mapped TypeScript, and C and C++, are checked separately; Go launches a package directory. Your project is only inspected, never run in. LSP and DAP get independent results (`ready`, `unverified`, `missing`, `needs-sdk`, `unsupported`, `failed`, `skipped`), saved as `tooling` in `omp-starter.json`. A rerun re-verifies every tool; a stored `ready` is never trusted. The step is `done` only when both are `ready` for every language you selected.
+
+**Config conflicts and switches.** Entries are only added to JSON files. A conflicting or shadowed entry (including one in another tool's config, a plugin or the project) is reported and never replaced; YAML files are not edited. A project-local executable runs only after you approve its exact path. If `lsp.enabled` or `debug.enabled` is `false`, the setting is left alone and the result stays `unverified` with the command to turn it on. omp starts a server only when the working directory itself holds a root marker (`Cargo.toml`, `compile_commands.json`, ...), so open omp at the project root.
+
+**OS permissions for debugging.** On Linux, debugging needs ptrace of your own processes (`kernel.yama.ptrace_scope`, and containers must allow it, for example `--cap-add=SYS_PTRACE` with a seccomp profile that permits it). On macOS it needs the Command Line Tools and Developer Tools access (`DevToolsSecurity -enable`, or approve the authorization prompt). When the OS refuses, the debugger is reported not ready; nothing is changed for you.
+
 ## Commands
 
 - `/starter`: rerun every step.
-- `/starter skills`, `/starter models`, `/starter kb`, `/starter language`: rerun one step.
+- `/starter skills`, `/starter models`, `/starter kb`, `/starter language`, `/starter tools`: rerun one step.
 - `/starter voice`: change only the voice (and offer `PERSONALITY.md` if missing).
 - `/trans [--to <language>] [text | file | local://name.md]`: translate on demand (see above).
 
@@ -135,6 +169,11 @@ A fifth always-on rule (`rules/say-it-in-chat.md`): herdr web's Chat view collap
 The rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Release notes
+
+### 0.13.0 — release candidate (not published)
+
+- **Added:** optional guided language tooling. `/starter tools` (offered once on a brand-new install) sets up an LSP and a debugger for JavaScript/TypeScript, Python, Go, Rust and C/C++ with your existing SDKs, after two confirmations, and proves each one with a real definition lookup and breakpoint stop before reporting it ready. Existing installs run `/starter tools` after updating.
+- **Not yet recorded:** results of the hosted platform matrix (`tooling.yml`). This note is final only once every profile has passed.
 
 ### 0.12.1 — 2026-10-26
 

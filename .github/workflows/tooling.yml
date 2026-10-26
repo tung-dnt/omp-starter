@@ -1,0 +1,261 @@
+# Guided language tooling: real LSP and debugger proof on every supported profile.
+#
+# Each job provisions its SDKs here, in a disposable runner (the product itself never installs SDKs), then runs
+# `bun scripts/tooling-smoke.ts`. That script drives the production `/starter tools` command in a private HOME and
+# exits nonzero unless all five language groups (seven fixture variants) have a ready LSP and DAP with an observed
+# definition, breakpoint stop and `answer=42`. A missing SDK, ptrace refusal or skipped check fails the job.
+#
+# A second, separate run proves JavaScript/TypeScript against an existing native TypeScript 7 `tsc`.
+#
+# This workflow only reads the repository: no secrets, no deploy, no publication.
+name: Tooling
+
+on:
+  push:
+    branches-ignore:
+      - "claim/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tooling-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Tested baselines. Exact versions found at run time are printed by "Show toolchain".
+  BUN_VERSION: "1.4.3"
+  NODE_VERSION: "24.22"
+  PYTHON_VERSION: "3.12"
+  GO_VERSION: "1.27.2"
+  TYPESCRIPT6_VERSION: "6.0.3"
+  TYPESCRIPT7_VERSION: "7.0.2"
+  # Official omp, installed with `bun install -g` at a pinned version whose registry integrity is checked first.
+  OMP_VERSION: "18.12.6"
+  OMP_INTEGRITY: "sha512-Wo+FcJ7A3RY/OFuafj4hcdIAXc/W7NMxbanwQh3Cmy8s57+ihLOLgAv+HROxHBkssEMg0MaScwkQ9xwqLPiC/g=="
+
+jobs:
+  hosted:
+    name: ${{ matrix.profile }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: macos-15-intel (x64)
+            runner: macos-15-intel
+            artifact: macos-15-intel
+          - profile: macos-15 (arm64)
+            runner: macos-15
+            artifact: macos-15-arm64
+          - profile: ubuntu-24.04 (x64)
+            runner: ubuntu-24.04
+            artifact: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up Python (with venv and ensurepip)
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Set up Rust with rust-src
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup --version
+          rustup toolchain install stable --profile minimal --component rust-src
+          rustup default stable
+
+      - name: Set up TypeScript ${{ env.TYPESCRIPT6_VERSION }}
+        run: npm install --global "typescript@${TYPESCRIPT6_VERSION}"
+
+      - name: Allow debugging on macOS
+        if: runner.os == 'macOS'
+        run: |
+          sudo DevToolsSecurity -enable
+          DevToolsSecurity -status
+          id
+
+      - name: Install omp ${{ env.OMP_VERSION }}
+        run: |
+          actual="$(npm view "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" dist.integrity)"
+          if [ "$actual" != "$OMP_INTEGRITY" ]; then
+            echo "::error::registry integrity for @oh-my-pi/pi-coding-agent@${OMP_VERSION} is ${actual}, expected ${OMP_INTEGRITY}"
+            exit 1
+          fi
+          bun install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
+          echo "$(bun pm bin --global)" >> "$GITHUB_PATH"
+
+      - name: Show toolchain
+        run: |
+          uname -a
+          for line in "omp --version" "bun --version" "node --version" "npm --version" "tsc --version" "python3 --version" "go version" "rustc --version" "cargo --version" "cc --version" "c++ --version"; do
+            echo "+ $line"
+            $line 2>&1 | sed -n 1p
+          done
+          python3 -c "import ensurepip, venv; print('ensurepip and venv available')"
+          echo "sysroot: $(rustc --print sysroot)"
+          ls "$(rustc --print sysroot)/lib/rustlib/src"
+
+      - name: Unit tests and build
+        run: |
+          bun test
+          bun build extensions/setup.ts extensions/fable-router.ts --target=bun --packages=external --outdir="$RUNNER_TEMP/omp-starter-tooling-build"
+
+      - name: Tooling smoke (five groups, seven variants)
+        if: ${{ !cancelled() }}
+        run: bun scripts/tooling-smoke.ts --report="$RUNNER_TEMP/smoke/tooling-smoke-full.json"
+
+      - name: Set up TypeScript ${{ env.TYPESCRIPT7_VERSION }} (follow-up only)
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/typescript7"
+          npm install --prefix "$RUNNER_TEMP/typescript7" "typescript@${TYPESCRIPT7_VERSION}"
+          "$RUNNER_TEMP/typescript7/node_modules/.bin/tsc" --version
+
+      - name: Tooling smoke, JavaScript/TypeScript with TypeScript 7
+        if: ${{ !cancelled() }}
+        run: PATH="$RUNNER_TEMP/typescript7/node_modules/.bin:$PATH" bun scripts/tooling-smoke.ts --typescript7 --report="$RUNNER_TEMP/smoke/tooling-smoke-typescript7.json"
+
+      - name: Upload smoke evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tooling-smoke-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/smoke/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  debian:
+    name: debian-12 container (x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # Debugging needs ptrace. The default container seccomp profile refuses it, so the disposable CI container is
+    # given the capability explicitly; nothing like this is ever done to a user's machine.
+    container:
+      image: debian:12
+      options: --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Before any JavaScript action: the actions run on the runner's Node inside this image.
+      - name: Install container prerequisites
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends build-essential ca-certificates curl git libatomic1 libpython3.11 procps python3 python3-venv unzip xz-utils
+          grep -E '^(CapEff|Seccomp):' /proc/self/status
+          cat /etc/os-release
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # The system Python 3.11 with python3-venv is a supported interpreter and avoids running an Ubuntu-built
+      # setup-python toolcache binary inside Debian 12.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Set up Rust with rust-src
+        run: |
+          cd "$RUNNER_TEMP"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --output rustup-init https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --output rustup-init.sha256 https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+          sha256sum --check rustup-init.sha256
+          chmod +x rustup-init
+          ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable --component rust-src
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Set up TypeScript ${{ env.TYPESCRIPT6_VERSION }}
+        run: npm install --global "typescript@${TYPESCRIPT6_VERSION}"
+
+      - name: Install omp ${{ env.OMP_VERSION }}
+        run: |
+          actual="$(npm view "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" dist.integrity)"
+          if [ "$actual" != "$OMP_INTEGRITY" ]; then
+            echo "::error::registry integrity for @oh-my-pi/pi-coding-agent@${OMP_VERSION} is ${actual}, expected ${OMP_INTEGRITY}"
+            exit 1
+          fi
+          bun install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
+          echo "$(bun pm bin --global)" >> "$GITHUB_PATH"
+
+      - name: Show toolchain
+        run: |
+          uname -a
+          for line in "omp --version" "bun --version" "node --version" "npm --version" "tsc --version" "python3 --version" "go version" "rustc --version" "cargo --version" "cc --version" "c++ --version"; do
+            echo "+ $line"
+            $line 2>&1 | sed -n 1p
+          done
+          python3 -c "import ensurepip, venv; print('ensurepip and venv available')"
+          echo "sysroot: $(rustc --print sysroot)"
+          ls "$(rustc --print sysroot)/lib/rustlib/src"
+          cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo "no yama ptrace_scope"
+
+      - name: Unit tests and build
+        run: |
+          bun test
+          bun build extensions/setup.ts extensions/fable-router.ts --target=bun --packages=external --outdir="$RUNNER_TEMP/omp-starter-tooling-build"
+
+      - name: Tooling smoke (five groups, seven variants)
+        if: ${{ !cancelled() }}
+        run: bun scripts/tooling-smoke.ts --report="$RUNNER_TEMP/smoke/tooling-smoke-full.json"
+
+      - name: Set up TypeScript ${{ env.TYPESCRIPT7_VERSION }} (follow-up only)
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/typescript7"
+          npm install --prefix "$RUNNER_TEMP/typescript7" "typescript@${TYPESCRIPT7_VERSION}"
+          "$RUNNER_TEMP/typescript7/node_modules/.bin/tsc" --version
+
+      - name: Tooling smoke, JavaScript/TypeScript with TypeScript 7
+        if: ${{ !cancelled() }}
+        run: PATH="$RUNNER_TEMP/typescript7/node_modules/.bin:$PATH" bun scripts/tooling-smoke.ts --typescript7 --report="$RUNNER_TEMP/smoke/tooling-smoke-typescript7.json"
+
+      - name: Upload smoke evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tooling-smoke-debian-12
+          path: ${{ runner.temp }}/smoke/*.json
+          if-no-files-found: warn
+          retention-days: 14
