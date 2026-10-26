@@ -64,6 +64,8 @@ export const ARCHIVE_LIMITS: ArchiveLimits = {
 export const MARKER_VARIABLE = "OMP_STARTER_TOOLING_OWNER";
 export const INSTALL_MANIFEST_FILE = ".omp-starter-install.json";
 
+/** The POSIX null device: pip and git read it as "no configuration file". Spelled out because `os.devnull` (wrong case) is undefined and would silently drop the setting. */
+const NULL_DEVICE = "/dev/null";
 const DEFAULT_OUTPUT_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 const TAIL_BYTES = 4096;
@@ -371,7 +373,7 @@ export function buildChildEnv(options: ChildEnvOptions): Record<string, string> 
 		npm_config_ignore_scripts: "true",
 		npm_config_update_notifier: "false",
 		// pip: no user config or startup hooks; callers pass --isolated and hash-locked requirements.
-		PIP_CONFIG_FILE: os.devnull,
+		PIP_CONFIG_FILE: NULL_DEVICE,
 		PIP_CACHE_DIR: path.join(scratch.cache, "pip"),
 		PIP_DISABLE_PIP_VERSION_CHECK: "1",
 		PIP_NO_INPUT: "1",
@@ -396,7 +398,7 @@ export function buildChildEnv(options: ChildEnvOptions): Record<string, string> 
 		CARGO_TERM_COLOR: "never",
 		GIT_TERMINAL_PROMPT: "0",
 		GIT_CONFIG_NOSYSTEM: "1",
-		GIT_CONFIG_GLOBAL: os.devnull,
+		GIT_CONFIG_GLOBAL: NULL_DEVICE,
 	});
 	Object.assign(env, options.override ?? {});
 	env[MARKER_VARIABLE] = options.marker;

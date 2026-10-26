@@ -611,13 +611,28 @@ export interface FixtureCommand {
 	readonly timeoutMs?: number;
 }
 
-/** Cross-file definition lookup. Lines are 1-based, characters 0-based (omp's `lsp` tool convention). */
+/**
+ * Cross-file definition lookup through omp's `lsp` tool (`action: "definition"`). That tool takes a
+ * file, a 1-based line and a `symbol` that locates the column on the line; it has no character
+ * parameter and no server parameter, and for project-aware servers it rejects a `line` without `symbol`.
+ */
 export interface LspExpectation {
-	/** Server key to select explicitly. */
+	/**
+	 * Key of the configured server expected to answer. The `lsp` tool routes by file type and cannot be
+	 * told which server to use, so verifiers check which server answered (for example the server name in
+	 * the result details) instead of passing this to the tool.
+	 */
 	readonly server: string;
+	/** Fixture-relative file holding the reference to resolve. */
 	readonly file: string;
+	/** 1-based line of the reference. */
 	readonly line: number;
-	readonly character: number;
+	/**
+	 * Text on `line` that locates the column: a bare identifier matches on identifier boundaries and
+	 * anything else as a substring. `name#N` selects the Nth (1-based) occurrence on that line.
+	 */
+	readonly symbol: string;
+	/** Where the definition must resolve; `line` is 1-based. */
 	readonly definition: { readonly file: string; readonly line: number };
 }
 

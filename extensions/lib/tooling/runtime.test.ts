@@ -203,6 +203,10 @@ test("the child environment is an allowlist with private locations and the owner
 	expect(env.HOME).toBe("/s/home");
 	expect(env.XDG_CACHE_HOME).toBe("/s/cache");
 	expect(env[MARKER_VARIABLE]).toBe("runtime.1");
+	expect(env.PIP_CONFIG_FILE).toBe("/dev/null");
+	expect(env.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+	// An undefined value is dropped when spawning and silently loses its isolation setting, so none may exist.
+	expect(Object.entries(env).filter(([, value]) => typeof value !== "string")).toEqual([]);
 	expect(() => buildChildEnv({ parent: {}, scratch, marker: "m", override: { [MARKER_VARIABLE]: "evil" } })).toThrow("reserved");
 	expect(() => buildChildEnv({ parent: {}, scratch, marker: "m", override: { "A=B": "x" } })).toThrow("invalid environment variable");
 });
@@ -254,7 +258,8 @@ test("real children get a private home, no inherited secrets and no hidden SDK d
 		GOTOOLCHAIN: "local",
 		GOWORK: "off",
 		RUSTUP_AUTO_INSTALL: "0",
-		PIP_CONFIG_FILE: os.devnull,
+		PIP_CONFIG_FILE: "/dev/null",
+		GIT_CONFIG_GLOBAL: "/dev/null",
 		PYTHONNOUSERSITE: "1",
 		npm_config_ignore_scripts: "true",
 		HTTPS_PROXY: "http://proxy.example:3128",
