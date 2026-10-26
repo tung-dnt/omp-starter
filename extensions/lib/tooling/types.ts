@@ -114,6 +114,7 @@ export interface RunResult {
 export interface SpawnOptions {
 	cwd: string;
 	env?: Readonly<Record<string, string>>;
+	/** Aborting terminates the whole owned process tree (SIGTERM, the grace period, then SIGKILL), even after the start. */
 	signal?: AbortSignal;
 	/** `"pipe"` exposes `stdin` for protocol traffic; default `"ignore"`. */
 	stdin?: "ignore" | "pipe";
@@ -162,7 +163,10 @@ export interface OwnedProcess {
 	readonly stderr: Readable | null;
 	/** Never rejects; a start failure resolves with `error` set. */
 	readonly exited: Promise<ExitStatus>;
-	/** SIGTERM to owned processes, wait at most the grace period (2 s), then SIGKILL survivors. Idempotent. */
+	/**
+	 * SIGTERM to owned processes, wait at most the grace period (2 s), then SIGKILL survivors. Idempotent.
+	 * Rejects with a `cleanup-failed` RuntimeError when the process table cannot be read: that is never reported as a clean result.
+	 */
 	terminate(): Promise<CleanupResult>;
 }
 
@@ -273,7 +277,13 @@ export interface InstallRequest {
 	/** Exact pinned version. */
 	readonly version: string;
 	readonly operations: readonly InstallOperation[];
-	/** Install-relative executable files that must exist (and be executable) before the install is published. */
+	/**
+	 * Install-relative launch targets that must exist and be executable before the install is published
+	 * (and again on reuse). Parent directories must be real. The final component may be a link, such as
+	 * `venv/bin/python` or `node_modules/.bin/<tool>`, but only to an executable inside the install or to an
+	 * existing executable outside the user's project (an installed SDK). Absolute links into the staging
+	 * directory are refused because they would dangle once published.
+	 */
 	readonly executables?: readonly string[];
 	/** Defaults to the host profile. */
 	readonly platform?: ProfileId;
@@ -347,7 +357,10 @@ export interface Runtime {
 	workDir(label: string): Promise<WorkDir>;
 	/** Pinned, integrity-checked, atomically published user-local install. Never replaces an existing directory. */
 	install(request: InstallRequest, options?: InstallOptions): Promise<InstallResult>;
-	/** Terminate every owned process and remove every owned directory. Idempotent. */
+	/**
+	 * Terminate every owned process and remove every owned directory. Idempotent. The scratch directory is kept when a
+	 * process survives (reported in `survivors`) or cannot be verified stopped (the call rejects with `cleanup-failed`).
+	 */
 	dispose(): Promise<CleanupResult>;
 }
 
@@ -394,50 +407,73 @@ export interface ConfigProposal {
 
 export type ForeignProvider = "claude" | "codex" | "gemini";
 
+/** The only environment variables the configuration module reads; a snapshot keeps just these. */
+export const CONFIG_ENV_NAMES = ["PATH", "CLAUDE_CONFIG_DIR", "PI_CONFIG_DIR", "OMP_PROFILE", "PI_PROFILE", "XDG_DATA_HOME"] as const;
+export type ConfigEnv = Readonly<Partial<Record<(typeof CONFIG_ENV_NAMES)[number], string>>>;
+
 export interface ConfigContext {
-	/** The user's project directory (omp's working directory). Project sources are read statically from here, never from ancestors. */
+	/** The user's project directory (omp's working directory). Project config files are read from here, never from ancestors. */
 	readonly cwd: string;
-	/** Directory omp reads user-level `lsp.*`/`dap.*` from (`~/.omp/agent` by default). It is the only place written. */
+	/**
+	 * The directory entries are written to (`~/.omp/agent` by default). omp reads user-level `lsp.*`/`dap.*` from
+	 * `<home>/<PI_CONFIG_DIR or .omp>[/profiles/<profile>]/agent` and ignores `PI_CODING_AGENT_DIR` for them, so
+	 * when this directory is elsewhere nothing is written: omp would never read the result.
+	 */
 	readonly agentDir: string;
 	/** Home directory (default `os.homedir()`). */
 	readonly home?: string;
-	/** Environment; only `CLAUDE_CONFIG_DIR` and `PATH` are read (default `process.env`). */
+	/** Environment (default `process.env`). Only the variables named in `CONFIG_ENV_NAMES` are read, and only those are kept. */
 	readonly env?: Readonly<Record<string, string | undefined>>;
 	/**
-	 * Which foreign user config directories omp has opted in. omp keeps that in its own settings, which this
-	 * module does not read, so an unlisted provider is treated as possibly effective rather than ignored.
+	 * Which foreign user config directories omp has opted in. omp keeps that in its own settings, which this module
+	 * does not read. A provider that is not listed has unknown enablement: its files take part in conflict checks
+	 * (they can block a write) but never count as effective, unchanged or ready.
 	 */
 	readonly foreignUserSources?: Readonly<Partial<Record<ForeignProvider, boolean>>>;
 }
 
-export interface ResolvedConfigContext extends ConfigContext {
+export interface ResolvedConfigContext {
+	readonly cwd: string;
+	readonly agentDir: string;
+	/** Where omp actually reads user-level `lsp.*`/`dap.*` from. */
+	readonly nativeDir: string;
 	readonly home: string;
+	/** Claude's user directory: `CLAUDE_CONFIG_DIR` when set, otherwise `~/.claude`. */
 	readonly claudeDir: string;
-	readonly env: Readonly<Record<string, string | undefined>>;
+	readonly env: ConfigEnv;
 	readonly foreignUserSources: Readonly<Partial<Record<ForeignProvider, boolean>>>;
 }
 
 /** Where a config file sits in omp's precedence ladder. */
-export type ConfigScope = "cwd-root" | "project-dir" | "native-user" | "foreign-user" | "home";
+export type ConfigScope = "cwd-root" | "project-dir" | "native-user" | "foreign-user" | "plugin" | "home";
 
 export type ConfigSourceState = "ok" | "invalid" | "unreadable" | "not-regular" | "too-large";
 
+/**
+ * Whether omp reads a source: `enabled` always (project files, the native directory, the home directory,
+ * opted-in providers), `disabled` never, `unknown` when that depends on settings or plugin gating this module
+ * cannot see. Unknown sources can block a write but are never treated as effective.
+ */
+export type ConfigEnablement = "enabled" | "disabled" | "unknown";
+
 export type ConfigEntryValue = Readonly<Record<string, unknown>>;
 
-/** One existing candidate config file. */
+/** One existing candidate config file (or, for plugins, one marketplace entry). */
 export interface ConfigSource {
 	readonly kind: ConfigKind;
+	/** The file; for an inline plugin marketplace entry `<catalog>#plugins/<name>`. */
 	readonly path: string;
 	/** Resolved path (symlinks followed); undefined when it cannot be resolved. */
 	readonly realPath?: string;
 	readonly scope: ConfigScope;
-	/** `omp` for native locations, otherwise the foreign provider; undefined for cwd-root and home. */
+	/** `omp` for native locations, otherwise the foreign provider; undefined for cwd-root, plugins and home. */
 	readonly provider?: "omp" | ForeignProvider;
+	/** Plugin id (`name@marketplace`) for plugin sources. */
+	readonly pluginId?: string;
 	readonly format: "json" | "yaml";
 	/** Precedence rank; the higher rank wins, exactly as in omp. */
 	readonly rank: number;
-	/** False for a foreign source the caller said omp has not opted in; it is listed but inert. */
-	readonly enabled: boolean;
+	readonly enablement: ConfigEnablement;
 	readonly symlink: boolean;
 	readonly state: ConfigSourceState;
 	readonly detail?: string;
@@ -446,6 +482,10 @@ export interface ConfigSource {
 	readonly sha256?: string;
 	/** Server/adapter key to its raw entry, for entries that are objects. Empty unless `state` is `ok`. */
 	readonly entries: ReadonlyMap<string, ConfigEntryValue>;
+	/** Every key at the entry level (wrapper members, or top-level keys of a flat file), including ones whose value is not an object. */
+	readonly keys: readonly string[];
+	/** True when the `servers`/`adapters` key exists but is not an object: omp then reads the whole file as a flat map. */
+	readonly wrapperIgnored: boolean;
 }
 
 /** The native JSON file entries are merged into. */
@@ -457,8 +497,13 @@ export interface ConfigTarget {
 	readonly sha256?: string;
 	readonly shape: "wrapped" | "flat" | "new";
 	readonly rank: number;
+	/** Keys already present at the entry level of the file, whatever their value. */
+	readonly keys: readonly string[];
 	/** Set when the file must not be touched; entries for this kind are then refused. */
-	readonly problem?: { readonly code: "invalid" | "symlink" | "not-regular" | "unreadable"; readonly detail: string };
+	readonly problem?: {
+		readonly code: "invalid" | "symlink" | "not-regular" | "unreadable" | "elsewhere";
+		readonly detail: string;
+	};
 }
 
 export interface ConfigIssue {
@@ -472,13 +517,13 @@ export interface ConfigSnapshot {
 	/** Existing candidate files, highest precedence first. */
 	readonly sources: readonly ConfigSource[];
 	readonly targets: Readonly<Record<ConfigKind, ConfigTarget>>;
-	/** Files omp ignores (invalid, unreadable, not regular files). Informational unless they are the target. */
+	/** Files that could not be used as written (invalid, unreadable, not regular files). Informational unless they are the target. */
 	readonly issues: readonly ConfigIssue[];
-	/** Files that could not be inspected although omp would read them (for example YAML without a parser, or oversized files): shadowing cannot be ruled out. */
+	/** Locations omp reads but that could not be inspected (oversized files, YAML without a parser, a document omp's loader would fail on): shadowing cannot be ruled out. */
 	readonly unresolved: readonly ConfigIssue[];
 	/** Disclosures about what the static inspection does not cover. */
 	readonly notes: readonly string[];
-	/** Content fingerprint of every candidate path; `applyConfig` refuses to write if it changed. */
+	/** Content fingerprint of every candidate path and plugin registry; `applyConfig` refuses to write if it changed. */
 	readonly digest: string;
 }
 
@@ -487,20 +532,24 @@ export interface ResolvedCommand {
 	readonly origin: "absolute" | "project-local" | "path";
 }
 
-/** What omp would use for a key, computed statically (no program is started). */
+/** What omp would use for a key, computed statically (no program is started). Sources of unknown enablement are not part of it. */
 export interface EffectiveEntry {
 	readonly kind: ConfigKind;
 	readonly key: string;
 	/** Shallow merge of every enabled layer in omp's order (omp's built-in defaults are not included). */
 	readonly value: ConfigEntryValue;
+	/** Enabled layers, lowest precedence first. */
 	readonly layers: readonly { readonly source: ConfigSource; readonly value: ConfigEntryValue }[];
 	/** Highest-precedence source defining the key. */
 	readonly source: ConfigSource;
 	/** True when any layer comes from the project (cwd root or project config directory): executing it needs consent. */
 	readonly projectSupplied: boolean;
+	/** LSP only: omp skips a server whose `disabled` is truthy. DAP adapters have no such switch. */
 	readonly disabled: boolean;
 	/** Executable omp would resolve for `value.command`; undefined when it does not resolve. */
 	readonly command?: ResolvedCommand;
+	/** Sources defining the key that omp may also read (unknown enablement); not part of `value`. Lowest precedence first. */
+	readonly unverified: readonly ConfigSource[];
 }
 
 export type ApplyStatus = "applied" | "unchanged" | "conflict" | "failed";

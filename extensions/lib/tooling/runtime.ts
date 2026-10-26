@@ -73,6 +73,12 @@ const ERROR_TAIL_CHARS = 600;
 const POLL_MS = 25;
 const KILL_WAIT_MS = 2_000;
 const STREAM_DRAIN_MS = 1_000;
+/** How long `run()` waits for a stopped child's exit event before reporting that it could not be confirmed stopped. */
+const EXIT_WAIT_MS = 1_000;
+/** Ceiling for the macOS `ps` calls that identify and enumerate processes. */
+const PS_TIMEOUT_MS = 5_000;
+/** `ps` could not answer (timeout, missing binary): says nothing about whether a process exists. */
+const UNVERIFIABLE = "unverifiable";
 const MAX_REDIRECTS = 5;
 const STALE_LOCK_MS = 10_000;
 /** GitHub release hosts; a host matches when equal or a subdomain. */
@@ -144,10 +150,6 @@ function isDirectory(target: string): boolean {
 	} catch {
 		return false;
 	}
-}
-
-function escapeRegExp(text: string): string {
-	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
@@ -425,7 +427,10 @@ export function findExecutable(name: string, dirs: readonly string[]): string | 
 	return undefined;
 }
 
-/** omp's root-marker check: one directory level, `*` wildcards match within a name. */
+/**
+ * omp's root-marker check (lsp/config.ts): one directory level. A marker containing `*` is a Bun glob
+ * matched against the names directly inside `cwd`; any other marker is a path that must exist.
+ */
 export function hasRootMarkers(cwd: string, markers: readonly string[]): boolean {
 	let entries: string[] | undefined;
 	for (const marker of markers) {
@@ -437,8 +442,12 @@ export function hasRootMarkers(cwd: string, markers: readonly string[]): boolean
 					entries = [];
 				}
 			}
-			const pattern = new RegExp(`^${marker.split("*").map(escapeRegExp).join("[^/]*")}$`);
-			if (entries.some(entry => pattern.test(entry))) return true;
+			try {
+				const glob = new Bun.Glob(marker);
+				if (entries.some(entry => glob.match(entry))) return true;
+			} catch {
+				// An unusable pattern matches nothing.
+			}
 			continue;
 		}
 		if (fs.existsSync(path.join(cwd, marker))) return true;
@@ -541,8 +550,9 @@ function readLinuxProcessTable(withMarkers: boolean): ProcessEntry[] {
 	let names: string[];
 	try {
 		names = fs.readdirSync("/proc");
-	} catch {
-		return [];
+	} catch (error) {
+		// An unreadable process table must never read as "nothing is running".
+		throw new Error(`cannot list /proc: ${errorMessage(error)}`, { cause: error });
 	}
 	const entries: ProcessEntry[] = [];
 	for (const name of names) {
@@ -567,7 +577,7 @@ function execPs(args: string[]): Promise<string> {
 	cp.execFile(
 		"/bin/ps",
 		args,
-		{ encoding: "utf8", maxBuffer: 256 * 1024 * 1024, env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } },
+		{ encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: PS_TIMEOUT_MS, killSignal: "SIGKILL", env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } },
 		(error, stdout) => (error ? reject(error) : resolve(stdout)),
 	);
 	return promise;
@@ -577,12 +587,8 @@ async function readDarwinProcessTable(withMarkers: boolean): Promise<ProcessEntr
 	const listing = await execPs(["-axww", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "stat=", "-o", "lstart="]);
 	const markers = new Map<number, string>();
 	if (withMarkers) {
-		let environment = "";
-		try {
-			environment = await execPs(["-axww", "-E", "-o", "pid=", "-o", "command="]);
-		} catch {
-			environment = "";
-		}
+		// A failing environment listing must fail the scan: without it the marker cannot find daemons that left their group.
+		const environment = await execPs(["-axww", "-E", "-o", "pid=", "-o", "command="]);
 		const pattern = new RegExp(`^\\s*(\\d+)\\s.*\\b${MARKER_VARIABLE}=([A-Za-z0-9._-]+)`);
 		for (const line of environment.split("\n")) {
 			const match = pattern.exec(line);
@@ -628,23 +634,36 @@ function readProcessSync(pid: number): { startId: string; zombie: boolean } | un
 			const out = cp
 				.execFileSync("/bin/ps", ["-o", "stat=", "-o", "lstart=", "-p", String(pid)], {
 					encoding: "utf8",
+					timeout: PS_TIMEOUT_MS,
+					killSignal: "SIGKILL",
 					env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
 					stdio: ["ignore", "pipe", "ignore"],
 				})
 				.trim();
 			const match = /^(\S+)\s+(.+)$/.exec(out);
 			return match ? { startId: match[2]!, zombie: match[1]!.startsWith("Z") } : undefined;
-		} catch {
-			return undefined;
+		} catch (error) {
+			// `ps -p` exits with status 1 when no such process exists; a timeout or any other failure says nothing about it.
+			const missing = typeof error === "object" && error !== null && "status" in error && error.status === 1;
+			return missing ? undefined : { startId: UNVERIFIABLE, zombie: false };
 		}
 	}
 	return undefined;
 }
 
-interface OwnerMatch {
+/** Start identity of a process for later PID-reuse checks; undefined when it is gone or `ps` could not say. */
+function processIdentity(pid: number | undefined): string | undefined {
+	if (pid === undefined) return undefined;
+	const info = readProcessSync(pid);
+	return info === undefined || info.startId === UNVERIFIABLE ? undefined : info.startId;
+}
+
+export interface OwnerMatch {
 	/** Process group leader / root of the spawn (undefined when the spawn never started). */
 	rootPid?: number;
 	rootStartId?: string;
+	/** True once the root was reaped: its PID may then belong to an unrelated process and is never signalled blindly. */
+	rootExited?: () => boolean;
 	/** Exact marker value of one spawn. */
 	marker?: string;
 	/** Marker prefix of a whole runtime. */
@@ -726,10 +745,32 @@ function signalEntries(entries: readonly ProcessEntry[], match: OwnerMatch, sign
 	}
 }
 
-/** SIGTERM owned processes, wait at most `graceMs`, SIGKILL the survivors, report any that remain. */
-async function terminateOwned(match: OwnerMatch, graceMs: number): Promise<CleanupResult> {
-	const scan = async (): Promise<ProcessEntry[]> =>
-		selectOwned(await readProcessTable(true), match).filter(entry => !entry.zombie);
+export type ProcessTableReader = typeof readProcessTable;
+
+/**
+ * With the process table unreadable nothing can be enumerated or verified gone, so the cleanup must
+ * not report success. The only thing provably ours is the live root's process group (its PID cannot
+ * have been reused while the child has not been reaped): it is sent SIGKILL, then the failure is reported.
+ */
+function failWithoutTable(match: OwnerMatch, cause: unknown): never {
+	let signalled = "";
+	if (match.rootPid !== undefined && match.rootExited?.() !== true) {
+		try {
+			process.kill(-match.rootPid, "SIGKILL");
+			signalled = " Its process group was sent SIGKILL.";
+		} catch {
+			// The group is already gone.
+		}
+	}
+	throw new RuntimeError(
+		"cleanup-failed",
+		`could not read the process table (${errorMessage(cause)}), so the processes started by the tooling runtime cannot be verified stopped.${signalled} Check for leftovers with ps and stop them manually.`,
+		{ cause },
+	);
+}
+
+async function reapOwned(match: OwnerMatch, graceMs: number, readTable: ProcessTableReader): Promise<CleanupResult> {
+	const scan = async (): Promise<ProcessEntry[]> => selectOwned(await readTable(true), match).filter(entry => !entry.zombie);
 	const observed = new Set<string>();
 	const termed = new Set<string>();
 	let live = await scan();
@@ -762,10 +803,27 @@ async function terminateOwned(match: OwnerMatch, graceMs: number): Promise<Clean
 	return { terminated: observed.size - survivors.length, survivors };
 }
 
+/**
+ * SIGTERM owned processes, wait at most `graceMs`, SIGKILL the survivors, report any that remain.
+ * Rejects with `cleanup-failed` when the process table cannot be read: that is never a clean result.
+ */
+export async function terminateOwned(
+	match: OwnerMatch,
+	graceMs: number,
+	readTable: ProcessTableReader = readProcessTable,
+): Promise<CleanupResult> {
+	try {
+		return await reapOwned(match, graceMs, readTable);
+	} catch (error) {
+		return failWithoutTable(match, error);
+	}
+}
+
 function isOwnerAlive(owner: { pid: number; startId?: string }): boolean {
 	const info = readProcessSync(owner.pid);
 	if (info === undefined || info.zombie) return false;
-	return owner.startId === undefined || info.startId === owner.startId;
+	// `ps` could not answer: the owner counts as alive rather than reclaiming what it may still be using.
+	return owner.startId === undefined || info.startId === UNVERIFIABLE || info.startId === owner.startId;
 }
 
 // ── Filesystem primitives ───────────────────────────────────────────────────────────────────────
@@ -841,37 +899,58 @@ export async function removeTree(target: string): Promise<void> {
 	await fsp.rm(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
 }
 
-async function writeOwner(dir: string): Promise<void> {
-	const owner = { pid: process.pid, startId: readProcessSync(process.pid)?.startId, createdAt: new Date().toISOString() };
+const RUNTIME_ID = /^[0-9a-f]{12}$/;
+
+async function writeOwner(dir: string, runtimeId?: string): Promise<void> {
+	const owner = { pid: process.pid, startId: processIdentity(process.pid), runtimeId, createdAt: new Date().toISOString() };
 	await fsp.writeFile(path.join(dir, "owner.json"), `${JSON.stringify(owner)}\n`, { mode: 0o600 });
 }
 
-async function readOwner(dir: string): Promise<{ pid: number; startId?: string } | undefined> {
+async function readOwner(dir: string): Promise<{ pid: number; startId?: string; runtimeId?: string } | undefined> {
 	try {
 		const parsed: unknown = JSON.parse(await fsp.readFile(path.join(dir, "owner.json"), "utf8"));
 		if (typeof parsed !== "object" || parsed === null || !("pid" in parsed)) return undefined;
 		if (typeof parsed.pid !== "number" || !Number.isInteger(parsed.pid)) return undefined;
 		const startId = "startId" in parsed && typeof parsed.startId === "string" ? parsed.startId : undefined;
-		return { pid: parsed.pid, startId };
+		const runtimeId = "runtimeId" in parsed && typeof parsed.runtimeId === "string" && RUNTIME_ID.test(parsed.runtimeId) ? parsed.runtimeId : undefined;
+		return { pid: parsed.pid, startId, runtimeId };
 	} catch {
 		return undefined;
 	}
 }
 
-/** Removes scratch/staging directories whose owning process is gone (crashed or killed runs). */
-async function sweepStale(base: string): Promise<void> {
+/**
+ * Removes scratch/staging directories whose owning process is gone. Processes such a run left behind
+ * are stopped first, matched only by its ownership marker; a directory is never removed while one
+ * survives or while that cannot be verified. Returns a description of every directory that was kept.
+ */
+async function sweepStale(base: string, graceMs: number): Promise<string[]> {
+	const kept: string[] = [];
 	let names: string[];
 	try {
 		names = await fsp.readdir(base);
 	} catch {
-		return;
+		return kept;
 	}
 	for (const name of names) {
 		const dir = path.join(base, name);
 		const owner = await readOwner(dir);
 		if (owner === undefined || isOwnerAlive(owner)) continue;
+		if (owner.runtimeId !== undefined) {
+			try {
+				const reaped = await terminateOwned({ markerPrefix: `${owner.runtimeId}.` }, graceMs);
+				if (reaped.survivors.length > 0) {
+					kept.push(`${dir} (pid ${reaped.survivors.map(survivor => survivor.pid).join(", ")} still running)`);
+					continue;
+				}
+			} catch (error) {
+				kept.push(`${dir} (${errorMessage(error)})`);
+				continue;
+			}
+		}
 		await removeTree(dir).catch(() => undefined);
 	}
+	return kept;
 }
 
 export interface LockHandle {
@@ -916,11 +995,22 @@ export async function acquireLock(lockDir: string, what: string): Promise<LockHa
 	throw new RuntimeError("busy", `${what} is already in progress in another run (lock ${lockDir}).`);
 }
 
-/** Writes a sibling temporary file, fsyncs it and renames it over `file`. */
-export async function writeFileAtomic(file: string, content: string, mode: number): Promise<void> {
+export interface AtomicWriteOptions {
+	/** Give the file exactly `mode` instead of `mode` filtered by the umask (keeps an existing file's permissions). */
+	exactMode?: boolean;
+	/** Create only: when `file` exists at publication the write fails with `EEXIST` and nothing is replaced. */
+	createOnly?: boolean;
+	/** Runs once the temporary file is durable, immediately before it is published; throw to abort and leave `file` untouched. */
+	beforePublish?: () => void;
+}
+
+/** Writes a sibling temporary file, fsyncs it and publishes it over `file` (or, with `createOnly`, only when `file` does not exist). */
+export async function writeFileAtomic(file: string, content: string, mode: number, options: AtomicWriteOptions = {}): Promise<void> {
 	const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`);
 	const fd = fs.openSync(tmp, "wx", mode);
 	try {
+		// fchmod on the descriptor rather than chmod on the path: nothing can swap a link in between.
+		if (options.exactMode === true) fs.fchmodSync(fd, mode);
 		fs.writeFileSync(fd, content);
 		fs.fsyncSync(fd);
 	} catch (error) {
@@ -930,6 +1020,22 @@ export async function writeFileAtomic(file: string, content: string, mode: numbe
 	}
 	fs.closeSync(fd);
 	try {
+		options.beforePublish?.();
+		if (options.createOnly === true) {
+			let linked = false;
+			try {
+				// A hard link fails with EEXIST instead of replacing, so a file that appeared meanwhile is never overwritten.
+				fs.linkSync(tmp, file);
+				linked = true;
+			} catch (error) {
+				if (errnoOf(error) === "EEXIST") throw error;
+				// Hard links unsupported on this file system: fall back to the rename below.
+			}
+			if (linked) {
+				fs.rmSync(tmp, { force: true });
+				return;
+			}
+		}
 		fs.renameSync(tmp, file);
 	} catch (error) {
 		fs.rmSync(tmp, { force: true });
@@ -937,8 +1043,11 @@ export async function writeFileAtomic(file: string, content: string, mode: numbe
 	}
 }
 
-/** Resolves a relative path inside `root` without escaping it and without passing through symbolic links. */
-function resolveInside(root: string, relative: string, label: string): string {
+/**
+ * Resolves a relative path inside `root` without escaping it and without passing through symbolic
+ * links. With `followFinal` the last component may itself be a link; the caller then vets its target.
+ */
+function resolveInside(root: string, relative: string, label: string, followFinal = false): string {
 	if (typeof relative !== "string" || relative === "" || relative.includes("\0") || relative.includes("\\") || path.isAbsolute(relative)) {
 		throw new RuntimeError("invalid-argument", `${label} must be a relative path inside the install directory (got ${quote(String(relative))})`);
 	}
@@ -947,8 +1056,9 @@ function resolveInside(root: string, relative: string, label: string): string {
 		throw new RuntimeError("invalid-argument", `${label} must not contain '..' (got ${quote(relative)})`);
 	}
 	let current = root;
-	for (const part of parts) {
+	for (const [index, part] of parts.entries()) {
 		current = path.join(current, part);
+		if (followFinal && index === parts.length - 1) break;
 		let stat: fs.Stats | undefined;
 		try {
 			stat = fs.lstatSync(current);
@@ -966,6 +1076,11 @@ function resolveInside(root: string, relative: string, label: string): string {
 
 function archiveError(message: string): RuntimeError {
 	return new RuntimeError("archive", message);
+}
+
+/** Cooperative cancellation for the long archive loops. It reads only `aborted`, so any signal-like object works. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted === true) throw new RuntimeError("aborted", "the operation was cancelled");
 }
 
 interface RawEntry {
@@ -1139,19 +1254,11 @@ async function writeAll(handle: fsp.FileHandle, data: Uint8Array): Promise<void>
 	}
 }
 
-function readSafeUint64(buffer: Buffer, at: number): number {
-	const value = buffer.readBigUInt64LE(at);
-	if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw archiveError("ZIP value is out of range");
-	return Number(value);
-}
-
 // ZIP ----------------------------------------------------------------------------------------------
 
 const ZIP_LOCAL = 0x04034b50;
 const ZIP_DIRECTORY = 0x02014b50;
 const ZIP_EOCD = 0x06054b50;
-const ZIP64_EOCD = 0x06064b50;
-const ZIP64_LOCATOR = 0x07064b50;
 
 interface ZipRecord extends RawEntry {
 	method: number;
@@ -1184,60 +1291,17 @@ async function locateZipDirectory(
 	const disk = tail.readUInt16LE(at + 4);
 	const directoryDisk = tail.readUInt16LE(at + 6);
 	const entriesOnDisk = tail.readUInt16LE(at + 8);
-	let count = tail.readUInt16LE(at + 10);
-	let size = tail.readUInt32LE(at + 12);
-	let offset = tail.readUInt32LE(at + 16);
-	let boundary = eocdPosition;
+	const count = tail.readUInt16LE(at + 10);
+	const size = tail.readUInt32LE(at + 12);
+	const offset = tail.readUInt32LE(at + 16);
+	// The archive limits (200 MiB, 20,000 entries) keep every supported archive inside the classic format, so ZIP64 is rejected rather than parsed.
 	if (count === 0xffff || size === 0xffffffff || offset === 0xffffffff || disk === 0xffff) {
-		if (eocdPosition < 20) throw archiveError("corrupt ZIP64 locator");
-		const locator = await readAt(handle, eocdPosition - 20, 20);
-		if (locator.readUInt32LE(0) !== ZIP64_LOCATOR) throw archiveError("corrupt ZIP64 locator");
-		const zip64Position = readSafeUint64(locator, 8);
-		const record = await readAt(handle, zip64Position, 56);
-		if (record.readUInt32LE(0) !== ZIP64_EOCD) throw archiveError("corrupt ZIP64 end-of-central-directory record");
-		if (record.readUInt32LE(16) !== 0 || record.readUInt32LE(20) !== 0) {
-			throw archiveError("multi-disk ZIP archives are not supported");
-		}
-		count = readSafeUint64(record, 32);
-		if (readSafeUint64(record, 24) !== count) throw archiveError("multi-disk ZIP archives are not supported");
-		size = readSafeUint64(record, 40);
-		offset = readSafeUint64(record, 48);
-		boundary = zip64Position;
-	} else if (disk !== 0 || directoryDisk !== 0 || entriesOnDisk !== count) {
-		throw archiveError("multi-disk ZIP archives are not supported");
+		throw archiveError("ZIP64 archives are not supported");
 	}
+	if (disk !== 0 || directoryDisk !== 0 || entriesOnDisk !== count) throw archiveError("multi-disk ZIP archives are not supported");
 	if (count > limits.entries) throw archiveError(`archive has ${count} entries; the limit is ${limits.entries}`);
-	if (size > 64 * 1024 * 1024 || offset + size > boundary) throw archiveError("corrupt ZIP central directory location");
+	if (size > 64 * 1024 * 1024 || offset + size > eocdPosition) throw archiveError("corrupt ZIP central directory location");
 	return { offset, size, count };
-}
-
-function applyZip64Extra(
-	extra: Buffer,
-	need: { size: boolean; compressed: boolean; offset: boolean },
-	values: { size: number; compressedSize: number; localOffset: number },
-): void {
-	let position = 0;
-	while (position + 4 <= extra.length) {
-		const id = extra.readUInt16LE(position);
-		const length = extra.readUInt16LE(position + 2);
-		const body = position + 4;
-		if (body + length > extra.length) break;
-		if (id === 0x0001) {
-			let at = body;
-			const take = (): number => {
-				if (at + 8 > body + length) throw archiveError("corrupt ZIP64 extra field");
-				const value = readSafeUint64(extra, at);
-				at += 8;
-				return value;
-			};
-			if (need.size) values.size = take();
-			if (need.compressed) values.compressedSize = take();
-			if (need.offset) values.localOffset = take();
-			return;
-		}
-		position = body + length;
-	}
-	if (need.size || need.compressed || need.offset) throw archiveError("missing ZIP64 extra field");
 }
 
 async function readZipBytes(handle: fsp.FileHandle, record: ZipRecord): Promise<Buffer> {
@@ -1250,7 +1314,12 @@ async function readZipBytes(handle: fsp.FileHandle, record: ZipRecord): Promise<
 	}
 }
 
-async function inspectZip(file: string, fileSize: number, limits: ArchiveLimits): Promise<{ entries: ArchiveEntry[]; records: ZipRecord[] }> {
+async function inspectZip(
+	file: string,
+	fileSize: number,
+	limits: ArchiveLimits,
+	signal: AbortSignal | undefined,
+): Promise<{ entries: ArchiveEntry[]; records: ZipRecord[] }> {
 	const handle = await fsp.open(file, "r");
 	try {
 		const location = await locateZipDirectory(handle, fileSize, limits);
@@ -1258,6 +1327,7 @@ async function inspectZip(file: string, fileSize: number, limits: ArchiveLimits)
 		const records: ZipRecord[] = [];
 		let position = 0;
 		for (let index = 0; index < location.count; index++) {
+			throwIfAborted(signal);
 			if (position + 46 > directory.length || directory.readUInt32LE(position) !== ZIP_DIRECTORY) {
 				throw archiveError("corrupt ZIP central directory");
 			}
@@ -1279,16 +1349,12 @@ async function inspectZip(file: string, fileSize: number, limits: ArchiveLimits)
 			const next = nameStart + nameLength + extraLength + commentLength;
 			if (next > directory.length) throw archiveError("corrupt ZIP central directory");
 			const nameBytes = directory.subarray(nameStart, nameStart + nameLength);
-			const extra = directory.subarray(nameStart + nameLength, nameStart + nameLength + extraLength);
 			position = next;
-			if (diskStart !== 0 && diskStart !== 0xffff) throw archiveError("multi-disk ZIP archives are not supported");
-			const need = {
-				size: values.size === 0xffffffff,
-				compressed: values.compressedSize === 0xffffffff,
-				offset: values.localOffset === 0xffffffff,
-			};
-			if (need.size || need.compressed || need.offset) applyZip64Extra(extra, need, values);
+			if (diskStart !== 0) throw archiveError("multi-disk ZIP archives are not supported");
 			const rawName = nameBytes.toString("utf8");
+			if (values.size === 0xffffffff || values.compressedSize === 0xffffffff || values.localOffset === 0xffffffff) {
+				throw archiveError(`entry ${quote(rawName)} needs ZIP64, which is not supported`);
+			}
 			if ((flags & 0x1) !== 0 || (flags & 0x40) !== 0) {
 				throw archiveError(`entry ${quote(rawName)} is encrypted; encrypted ZIP entries are not supported`);
 			}
@@ -1337,6 +1403,7 @@ async function inspectZip(file: string, fileSize: number, limits: ArchiveLimits)
 		}
 		if (position !== directory.length) throw archiveError("unexpected data after the ZIP central directory entries");
 		for (const record of records) {
+			throwIfAborted(signal);
 			if (record.localOffset + 30 > location.offset) throw archiveError("corrupt ZIP local header offset");
 			const local = await readAt(handle, record.localOffset, 30);
 			if (local.readUInt32LE(0) !== ZIP_LOCAL) throw archiveError("corrupt ZIP local header");
@@ -1400,7 +1467,7 @@ async function* zipEntryChunks(file: string, record: ZipRecord): AsyncGenerator<
 
 // gzip / tar ---------------------------------------------------------------------------------------
 
-async function* gunzipChunks(file: string, maxBytes: number): AsyncGenerator<Buffer> {
+async function* gunzipChunks(file: string, maxBytes: number, signal?: AbortSignal): AsyncGenerator<Buffer> {
 	const gunzip = zlib.createGunzip();
 	const source = fs.createReadStream(file);
 	source.on("error", error => gunzip.destroy(error));
@@ -1409,6 +1476,7 @@ async function* gunzipChunks(file: string, maxBytes: number): AsyncGenerator<Buf
 	try {
 		for await (const chunk of gunzip) {
 			const buffer: Buffer = chunk;
+			throwIfAborted(signal);
 			total += buffer.length;
 			if (total > maxBytes) throw archiveError(`archive expands beyond the ${maxBytes} byte limit`);
 			yield buffer;
@@ -1496,16 +1564,8 @@ function tarString(block: Buffer, offset: number, length: number): string {
 }
 
 function tarNumber(block: Buffer, offset: number, length: number): number {
-	const first = block[offset]!;
-	if ((first & 0x80) !== 0) {
-		if ((first & 0x40) !== 0) throw archiveError("corrupt tar header (negative number)");
-		let value = first & 0x3f;
-		for (let i = 1; i < length; i++) {
-			value = value * 256 + block[offset + i]!;
-			if (value > Number.MAX_SAFE_INTEGER) throw archiveError("corrupt tar header (number out of range)");
-		}
-		return value;
-	}
+	// Base-256 numbers only appear above 8 GiB, far beyond the archive limits.
+	if ((block[offset]! & 0x80) !== 0) throw archiveError("corrupt or unsupported tar header (base-256 numbers are not supported)");
 	const text = (block.toString("latin1", offset, offset + length).split("\0")[0] ?? "").trim();
 	if (text === "") return 0;
 	if (!/^[0-7]+$/.test(text)) throw archiveError("corrupt tar header (invalid number)");
@@ -1673,9 +1733,9 @@ function tarRawEntry(item: TarItem): RawEntry | undefined {
 	return { path: normalized, type: item.type, size: item.type === "file" ? item.size : 0, mode: item.mode & 0o777 };
 }
 
-async function inspectTar(file: string, limits: ArchiveLimits): Promise<ArchiveEntry[]> {
+async function inspectTar(file: string, limits: ArchiveLimits, signal: AbortSignal | undefined): Promise<ArchiveEntry[]> {
 	const raw: RawEntry[] = [];
-	for await (const item of tarEntries(gunzipChunks(file, limits.expandedBytes + 64 * 1024 * 1024), limits)) {
+	for await (const item of tarEntries(gunzipChunks(file, limits.expandedBytes + 64 * 1024 * 1024, signal), limits)) {
 		const entry = tarRawEntry(item);
 		if (entry !== undefined) raw.push(entry);
 	}
@@ -1688,7 +1748,7 @@ async function inspectGzip(file: string, limits: ArchiveLimits, options: Archive
 		throw new RuntimeError("invalid-argument", "gzip artifacts need a single-segment fileName");
 	}
 	let total = 0;
-	for await (const chunk of gunzipChunks(file, limits.expandedBytes)) total += chunk.length;
+	for await (const chunk of gunzipChunks(file, limits.expandedBytes, options.signal)) total += chunk.length;
 	return validateEntries([{ path: name, type: "file", size: total, mode: options.executable === true ? 0o755 : 0o644 }], limits);
 }
 
@@ -1699,6 +1759,8 @@ export interface ArchiveOptions {
 	fileName?: string;
 	/** `gzip` only: extract it executable. */
 	executable?: boolean;
+	/** Cancels validation and extraction: they stop with an `aborted` error as soon as the signal fires. */
+	signal?: AbortSignal;
 }
 
 export interface ExtractOptions extends ArchiveOptions {
@@ -1711,6 +1773,7 @@ interface Inspection {
 }
 
 async function inspect(file: string, format: ArchiveFormat, limits: ArchiveLimits, options: ArchiveOptions): Promise<Inspection> {
+	throwIfAborted(options.signal);
 	let stat: fs.Stats;
 	try {
 		stat = await fsp.stat(file);
@@ -1725,13 +1788,13 @@ async function inspect(file: string, format: ArchiveFormat, limits: ArchiveLimit
 	let zip: ZipRecord[] | undefined;
 	switch (format) {
 		case "zip": {
-			const result = await inspectZip(file, stat.size, limits);
+			const result = await inspectZip(file, stat.size, limits, options.signal);
 			entries = result.entries;
 			zip = result.records;
 			break;
 		}
 		case "tar.gz":
-			entries = await inspectTar(file, limits);
+			entries = await inspectTar(file, limits, options.signal);
 			break;
 		case "gzip":
 			entries = await inspectGzip(file, limits, options);
@@ -1761,7 +1824,8 @@ async function writeEntryFile(
 	mode: number,
 	chunks: AsyncIterable<Buffer>,
 	expectedSize: number,
-	expectedCrc?: number,
+	expectedCrc: number | undefined,
+	signal: AbortSignal | undefined,
 ): Promise<void> {
 	await fsp.mkdir(path.dirname(target), { recursive: true, mode: 0o755 });
 	const handle = await fsp.open(target, "wx", 0o600);
@@ -1769,6 +1833,7 @@ async function writeEntryFile(
 	let crc = 0;
 	try {
 		for await (const chunk of chunks) {
+			throwIfAborted(signal);
 			written += chunk.length;
 			if (written > expectedSize) throw archiveError(`entry ${quote(path.basename(target))} expands beyond its declared size`);
 			crc = crc32Update(crc, chunk);
@@ -1790,15 +1855,18 @@ function entryTarget(destination: string, entryPath: string): string {
 	return target;
 }
 
-async function extractZipRecords(file: string, records: readonly ZipRecord[], destination: string): Promise<void> {
+async function extractZipRecords(file: string, records: readonly ZipRecord[], destination: string, signal: AbortSignal | undefined): Promise<void> {
 	for (const record of records) {
+		throwIfAborted(signal);
 		if (record.type === "directory") await fsp.mkdir(entryTarget(destination, record.path), { recursive: true, mode: 0o755 });
 	}
 	for (const record of records) {
+		throwIfAborted(signal);
 		if (record.type !== "file") continue;
-		await writeEntryFile(entryTarget(destination, record.path), sanitizeMode("file", record.mode), zipEntryChunks(file, record), record.size, record.crc);
+		await writeEntryFile(entryTarget(destination, record.path), sanitizeMode("file", record.mode), zipEntryChunks(file, record), record.size, record.crc, signal);
 	}
 	for (const record of records) {
+		throwIfAborted(signal);
 		if (record.type !== "symlink" || record.target === undefined) continue;
 		const target = entryTarget(destination, record.path);
 		await fsp.mkdir(path.dirname(target), { recursive: true, mode: 0o755 });
@@ -1806,9 +1874,16 @@ async function extractZipRecords(file: string, records: readonly ZipRecord[], de
 	}
 }
 
-async function extractTarEntries(file: string, listing: ArchiveListing, destination: string, limits: ArchiveLimits): Promise<void> {
+async function extractTarEntries(
+	file: string,
+	listing: ArchiveListing,
+	destination: string,
+	limits: ArchiveLimits,
+	signal: AbortSignal | undefined,
+): Promise<void> {
 	let index = 0;
-	for await (const item of tarEntries(gunzipChunks(file, limits.expandedBytes + 64 * 1024 * 1024), limits)) {
+	for await (const item of tarEntries(gunzipChunks(file, limits.expandedBytes + 64 * 1024 * 1024, signal), limits)) {
+		throwIfAborted(signal);
 		const entry = tarRawEntry(item);
 		if (entry === undefined) continue;
 		const expected = listing.entries[index++];
@@ -1819,7 +1894,7 @@ async function extractTarEntries(file: string, listing: ArchiveListing, destinat
 		if (entry.type === "directory") {
 			await fsp.mkdir(target, { recursive: true, mode: 0o755 });
 		} else {
-			await writeEntryFile(target, expected.mode, item.body(), entry.size);
+			await writeEntryFile(target, expected.mode, item.body(), entry.size, undefined, signal);
 		}
 	}
 	if (index !== listing.entries.length) throw archiveError("archive changed between validation and extraction");
@@ -1827,7 +1902,8 @@ async function extractTarEntries(file: string, listing: ArchiveListing, destinat
 
 /**
  * Validates the whole archive first, then extracts into an empty `destination` (created if
- * missing). Regular files are created exclusively (never through a link), symlinks last.
+ * missing). Regular files are created exclusively (never through a link), symlinks last. It
+ * observes `options.signal` throughout and then stops with an `aborted` error.
  */
 export async function extractArchive(
 	file: string,
@@ -1837,6 +1913,7 @@ export async function extractArchive(
 ): Promise<ArchiveListing> {
 	const limits = options.limits ?? ARCHIVE_LIMITS;
 	const inspection = await inspect(file, format, limits, options);
+	throwIfAborted(options.signal);
 	const target = path.resolve(destination);
 	await fsp.mkdir(target, { recursive: true, mode: 0o755 });
 	if ((await fsp.readdir(target)).length > 0) {
@@ -1844,14 +1921,14 @@ export async function extractArchive(
 	}
 	switch (format) {
 		case "zip":
-			await extractZipRecords(file, inspection.zip ?? [], target);
+			await extractZipRecords(file, inspection.zip ?? [], target, options.signal);
 			break;
 		case "tar.gz":
-			await extractTarEntries(file, inspection.listing, target, limits);
+			await extractTarEntries(file, inspection.listing, target, limits, options.signal);
 			break;
 		case "gzip": {
 			const entry = inspection.listing.entries[0]!;
-			await writeEntryFile(entryTarget(target, entry.path), entry.mode, gunzipChunks(file, limits.expandedBytes), entry.size);
+			await writeEntryFile(entryTarget(target, entry.path), entry.mode, gunzipChunks(file, limits.expandedBytes, options.signal), entry.size, undefined, options.signal);
 			break;
 		}
 	}
@@ -2288,11 +2365,17 @@ class RuntimeImpl implements Runtime {
 	private async ensureScratch(): Promise<Scratch> {
 		this.scratchPromise ??= (async () => {
 			const roots = await this.ensureRoots();
-			await sweepStale(roots.work);
-			await sweepStale(roots.staging);
+			// Leftovers of dead runs go first, but never while something they started may still be running.
+			const kept = [...(await sweepStale(roots.work, this.graceMs)), ...(await sweepStale(roots.staging, this.graceMs))];
+			if (kept.length > 0) {
+				throw new RuntimeError(
+					"cleanup-failed",
+					`a previous tooling run left work that cannot be removed safely: ${kept.join("; ")}. Nothing was deleted. Stop those processes yourself (for example kill -9 <pid>), then retry.`,
+				);
+			}
 			const root = path.join(roots.work, this.id);
 			await fsp.mkdir(root, { mode: 0o700 });
-			await writeOwner(root);
+			await writeOwner(root, this.id);
 			const dirs = {
 				home: path.join(root, "home"),
 				config: path.join(root, "config"),
@@ -2306,7 +2389,11 @@ class RuntimeImpl implements Runtime {
 			await fsp.writeFile(path.join(dirs.config, "npmrc"), "", { mode: 0o600 });
 			await fsp.writeFile(path.join(dirs.config, "npmrc-global"), "", { mode: 0o600 });
 			return { ...dirs, root, workRoot };
-		})();
+		})().catch((error: unknown) => {
+			// A failed preparation can be retried (for example once the listed processes are stopped).
+			this.scratchPromise = undefined;
+			throw error;
+		});
 		return this.scratchPromise;
 	}
 
@@ -2435,6 +2522,13 @@ class RuntimeImpl implements Runtime {
 		return this.start(command, args, options);
 	}
 
+	/** PATH for children: project-local directories (node_modules/.bin, an activated .venv/bin) are dropped so helpers resolved by name never come from the project, unless it was approved. */
+	private childPath(): string {
+		return absolutePathDirs(this.parentEnv.PATH)
+			.filter(dir => !this.isProjectLocal(dir, realpathOrSelf(dir)))
+			.join(path.delimiter);
+	}
+
 	private async start(command: string, args: readonly string[], options: SpawnOptions): Promise<OwnedProcessImpl> {
 		this.assertUsable(options.signal);
 		this.requirePosix();
@@ -2445,7 +2539,8 @@ class RuntimeImpl implements Runtime {
 		const executable = await this.prepareExecutable(command, options.approvedProjectLocal === true);
 		this.assertUsable(options.signal);
 		const marker = `${this.id}.${++this.spawnSeq}`;
-		const env = buildChildEnv({ parent: this.parentEnv, scratch, marker, sdkHomes: this.sdkHomes, override: options.env });
+		const parent = options.approvedProjectLocal === true ? this.parentEnv : { ...this.parentEnv, PATH: this.childPath() };
+		const env = buildChildEnv({ parent, scratch, marker, sdkHomes: this.sdkHomes, override: options.env });
 		let child: cp.ChildProcess;
 		try {
 			child = cp.spawn(executable, [...args], {
@@ -2461,16 +2556,28 @@ class RuntimeImpl implements Runtime {
 		child.stdin?.on("error", () => undefined);
 		child.stdout?.on("error", () => undefined);
 		child.stderr?.on("error", () => undefined);
-		const startId = child.pid === undefined ? undefined : readProcessSync(child.pid)?.startId;
-		const proc = new OwnedProcessImpl(child, marker, startId, self => this.sweepOwned(self));
+		const proc = new OwnedProcessImpl(child, marker, processIdentity(child.pid), self => this.sweepOwned(self));
 		this.spawns.add(proc);
 		this.installExitHook();
+		const signal = options.signal;
+		if (signal !== undefined) {
+			// Aborting the caller's signal after the start stops the whole owned tree, not just the checks above.
+			const onAbort = (): void => {
+				void proc.terminate().catch(() => undefined);
+			};
+			if (signal.aborted) {
+				onAbort();
+			} else {
+				signal.addEventListener("abort", onAbort, { once: true });
+				void proc.exited.then(() => signal.removeEventListener("abort", onAbort));
+			}
+		}
 		return proc;
 	}
 
 	private sweepOwned(proc: OwnedProcessImpl): Promise<CleanupResult> {
 		return terminateOwned(
-			{ rootPid: proc.pid > 0 ? proc.pid : undefined, rootStartId: proc.startId, marker: proc.marker },
+			{ rootPid: proc.pid > 0 ? proc.pid : undefined, rootStartId: proc.startId, rootExited: () => proc.hasExited, marker: proc.marker },
 			this.graceMs,
 		);
 	}
@@ -2504,11 +2611,14 @@ class RuntimeImpl implements Runtime {
 		const stderr = new Collector(maxOutput);
 		proc.stdout?.on("data", chunk => stdout.push(chunk));
 		proc.stderr?.on("data", chunk => stderr.push(chunk));
-		const state: { reason?: "timeout" | "aborted"; stopping?: Promise<CleanupResult> } = {};
+		const state: { reason?: "timeout" | "aborted"; stopping?: Promise<unknown> } = {};
+		const stopRequested = Promise.withResolvers<undefined>();
 		const stop = (why: "timeout" | "aborted"): void => {
 			if (state.reason !== undefined) return;
 			state.reason = why;
-			state.stopping = proc.terminate();
+			// A failing termination is reported by the final terminate() below; it must not become an unhandled rejection here.
+			state.stopping = proc.terminate().catch(() => undefined);
+			stopRequested.resolve(undefined);
 		};
 		const signals = [options.signal, this.signal].filter((signal): signal is AbortSignal => signal !== undefined);
 		const onAbort = (): void => stop("aborted");
@@ -2516,13 +2626,17 @@ class RuntimeImpl implements Runtime {
 		const timer = setTimeout(() => stop("timeout"), timeoutMs);
 		if (signals.some(signal => signal.aborted)) stop("aborted");
 		try {
-			const status = await proc.exited;
-			if (state.stopping !== undefined) await state.stopping;
+			let status = await Promise.race([proc.exited, stopRequested.promise]);
+			if (status === undefined) {
+				// Stopped from outside the child. Its exit follows the signals, but a failing termination or a tree that will not die must not hold run() open.
+				await state.stopping;
+				status = await Promise.race([proc.exited, sleep(EXIT_WAIT_MS).then((): undefined => undefined)]);
+			}
 			const cleanup = await proc.terminate();
 			await Promise.all([streamEnded(proc.stdout, STREAM_DRAIN_MS), streamEnded(proc.stderr, STREAM_DRAIN_MS)]);
 			proc.stdout?.destroy();
 			proc.stderr?.destroy();
-			if (status.error !== undefined) {
+			if (status?.error !== undefined) {
 				throw new RuntimeError("spawn", `could not start ${label}: ${redact(status.error)}`);
 			}
 			if (cleanup.survivors.length > 0) {
@@ -2531,6 +2645,9 @@ class RuntimeImpl implements Runtime {
 					"cleanup-failed",
 					`${label} left process(es) that could not be stopped (pid ${pids}). Stop them manually, for example with kill -9.`,
 				);
+			}
+			if (status === undefined) {
+				throw new RuntimeError("cleanup-failed", `${label} did not exit after it was stopped (pid ${proc.pid}). Stop it manually, for example with kill -9 ${proc.pid}.`);
 			}
 			const outputTail = tailMessage(stderr.tailText() || stdout.tailText());
 			if (state.reason === "timeout") {
@@ -2613,7 +2730,7 @@ class RuntimeImpl implements Runtime {
 			const stagingDir = path.join(roots.staging, `${request.tool}-${crypto.randomBytes(6).toString("hex")}`);
 			await fsp.mkdir(stagingDir, { mode: 0o700 });
 			try {
-				await writeOwner(stagingDir);
+				await writeOwner(stagingDir, this.id);
 				const payload = path.join(stagingDir, "payload");
 				const downloads = path.join(stagingDir, "downloads");
 				await fsp.mkdir(payload, { mode: 0o755 });
@@ -2630,11 +2747,9 @@ class RuntimeImpl implements Runtime {
 				}
 				this.assertUsable(signal);
 				for (const executable of request.executables ?? []) {
-					if (!isExecutableFile(resolveInside(payload, executable, "executable"))) {
-						throw new RuntimeError(
-							"install",
-							`${request.tool} ${request.version} is incomplete: ${quote(executable)} is missing or not executable after installation, so nothing was published`,
-						);
+					const problem = this.launchTargetProblem(payload, executable, true);
+					if (problem !== undefined) {
+						throw new RuntimeError("install", `${request.tool} ${request.version} is incomplete: ${quote(executable)} ${problem}, so nothing was published`);
 					}
 				}
 				const manifest: InstallManifest = {
@@ -2688,11 +2803,50 @@ class RuntimeImpl implements Runtime {
 			throw new RuntimeError("collision", `${destination} holds a different install of ${request.tool} ${request.version} (different sources or recipe). ${hint}`);
 		}
 		for (const executable of manifest.executables) {
-			if (!isExecutableFile(path.join(destination, ...executable.split("/")))) {
-				throw new RuntimeError("collision", `${destination} is incomplete: ${quote(executable)} is missing. ${hint}`);
+			const problem = this.launchTargetProblem(destination, executable, false);
+			if (problem !== undefined) {
+				throw new RuntimeError("collision", `${destination} is incomplete: ${quote(executable)} ${problem}. ${hint}`);
 			}
 		}
 		return manifest;
+	}
+
+	/**
+	 * Why a declared launch target is unusable, or undefined when it is fine. Parent directories must be
+	 * real (confinement). The final component may be a link, as with `venv/bin/python` or
+	 * `node_modules/.bin/<tool>`, but only to an executable inside the install or to an existing
+	 * executable outside the user's project (an installed SDK). Publication and reuse share this rule.
+	 */
+	private launchTargetProblem(root: string, relative: string, publishing: boolean): string | undefined {
+		let file: string;
+		try {
+			file = resolveInside(root, relative, "executable", true);
+		} catch {
+			return "is not a confined install path (it must not pass through a symbolic link or contain '..')";
+		}
+		let stat: fs.Stats;
+		try {
+			stat = fs.lstatSync(file);
+		} catch {
+			return "is missing";
+		}
+		if (!stat.isSymbolicLink()) return isExecutableFile(file) ? undefined : "is not an executable file";
+		let link: string;
+		let real: string;
+		try {
+			link = fs.readlinkSync(file);
+			real = fs.realpathSync(file);
+		} catch {
+			return "is a link whose target is missing";
+		}
+		if (publishing && path.isAbsolute(link) && isWithin(root, path.resolve(path.dirname(file), link))) {
+			return "is an absolute link into the staging directory and would dangle once published; make it a relative link";
+		}
+		if (!isExecutableFile(real)) return "is a link to something that is not an executable file";
+		if (!isWithin(realpathOrSelf(root), real) && this.isProjectLocal(real, real)) {
+			return `is a link to ${real}, inside your project; only links into the install or to an installed SDK are allowed`;
+		}
+		return undefined;
 	}
 
 	/** Atomic publication: a same-filesystem rename of the finished payload; an existing destination is never replaced. */
@@ -2733,7 +2887,7 @@ class RuntimeImpl implements Runtime {
 				});
 				context.progress("Verifying and extracting archive");
 				const into = resolveInside(context.payload, operation.into ?? ".", "artifact destination");
-				await extractArchive(archive, artifact.format, into, { limits: this.limits, fileName: artifact.fileName, executable: artifact.executable });
+				await extractArchive(archive, artifact.format, into, { limits: this.limits, fileName: artifact.fileName, executable: artifact.executable, signal: context.signal });
 				await fsp.rm(archive, { force: true });
 				return;
 			}
@@ -2771,10 +2925,15 @@ class RuntimeImpl implements Runtime {
 		if (this.abortListener !== undefined) this.signal?.removeEventListener("abort", this.abortListener);
 		let terminated = 0;
 		const survivors: SurvivingProcess[] = [];
+		let unverified: unknown;
 		for (const proc of [...this.spawns]) {
-			const result = await proc.terminate();
-			terminated += result.terminated;
-			survivors.push(...result.survivors);
+			try {
+				const result = await proc.terminate();
+				terminated += result.terminated;
+				survivors.push(...result.survivors);
+			} catch (error) {
+				unverified ??= error;
+			}
 		}
 		this.spawns.clear();
 		if (this.exitHook !== undefined) process.off("exit", this.exitHook);
@@ -2787,15 +2946,25 @@ class RuntimeImpl implements Runtime {
 				scratch = undefined;
 			}
 			if (scratch !== undefined) {
-				try {
-					const stragglers = await terminateOwned({ markerPrefix: `${this.id}.` }, this.graceMs);
-					terminated += stragglers.terminated;
-					survivors.push(...stragglers.survivors);
-				} catch {
-					// Process supervision unavailable: nothing was spawned on this platform.
+				if (this.spawnSeq > 0) {
+					try {
+						const stragglers = await terminateOwned({ markerPrefix: `${this.id}.` }, this.graceMs);
+						terminated += stragglers.terminated;
+						survivors.push(...stragglers.survivors);
+					} catch (error) {
+						unverified ??= error;
+					}
 				}
-				await removeTree(scratch.root).catch(() => undefined);
+				// The scratch tree stays while anything this runtime started may still run; a later run reaps provably owned leftovers before removing it.
+				if (survivors.length === 0 && unverified === undefined) await removeTree(scratch.root).catch(() => undefined);
 			}
+		}
+		if (unverified !== undefined) {
+			throw new RuntimeError(
+				"cleanup-failed",
+				`could not verify that every process started by the tooling runtime has stopped: ${errorMessage(unverified)} Its scratch directory was kept.`,
+				{ cause: unverified },
+			);
 		}
 		return { terminated, survivors };
 	}

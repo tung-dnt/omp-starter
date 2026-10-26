@@ -13,12 +13,14 @@ import {
 	detectPlatform,
 	ensureToolingRoots,
 	extractArchive,
+	hasRootMarkers,
 	inspectArchive,
 	INSTALL_MANIFEST_FILE,
 	MARKER_VARIABLE,
 	removeTree,
 	RuntimeError,
 	sha256Hex,
+	terminateOwned,
 	writeFileAtomic,
 } from "./runtime";
 import type { ArchiveLimits, Artifact, InstallRequest, PlatformInput, Runtime, RuntimeOptions } from "./types";
@@ -771,6 +773,27 @@ const GOOD_TAR = tarGz([
 	{ name: "pkg/data.txt", data: "data", mode: 0o664 },
 ]);
 
+/** A copy of an archive with bytes changed in place; `eocd` and `directory` are the offsets of the end record and of the first central entry. */
+function patchedZip(bytes: Buffer, change: (zip: Buffer, eocd: number, directory: number) => void): Buffer {
+	const copy = Buffer.from(bytes);
+	const eocd = copy.length - 22;
+	change(copy, eocd, copy.readUInt32LE(eocd + 16));
+	return copy;
+}
+
+/** A tar.gz whose only entry declares its size as a base-256 number (with a valid checksum). */
+function base256Tar(): Buffer {
+	const tar = tarOf([{ name: "a", data: "x" }]);
+	tar[124] = 0x80;
+	tar.fill(0, 125, 135);
+	tar[135] = 1;
+	tar.fill(0x20, 148, 156);
+	let sum = 0;
+	for (const byte of tar.subarray(0, 512)) sum += byte;
+	tar.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "latin1");
+	return zlib.gzipSync(tar);
+}
+
 // ── ZIP / VSIX ──────────────────────────────────────────────────────────────────────────────────
 
 test("zip metadata is listed with sanitized modes and safe relative symlinks", async () => {
@@ -847,6 +870,13 @@ const ZIP_ATTACKS: [string, Buffer, RegExp][] = [
 	["text that is not a zip", Buffer.from("this is plainly not a zip file at all"), /not a ZIP archive/],
 	["a file that is too small", Buffer.from("PK"), /too small/],
 	["a zip cut off before its directory", GOOD_ZIP.subarray(0, GOOD_ZIP.length - 30), /not a ZIP archive/],
+	["a saturated entry count (ZIP64)", patchedZip(GOOD_ZIP, (zip, eocd) => { zip.writeUInt16LE(0xffff, eocd + 8); zip.writeUInt16LE(0xffff, eocd + 10); }), /ZIP64 archives are not supported/],
+	["a saturated directory size (ZIP64)", patchedZip(GOOD_ZIP, (zip, eocd) => zip.writeUInt32LE(0xffffffff, eocd + 12)), /ZIP64 archives are not supported/],
+	["a saturated directory offset (ZIP64)", patchedZip(GOOD_ZIP, (zip, eocd) => zip.writeUInt32LE(0xffffffff, eocd + 16)), /ZIP64 archives are not supported/],
+	["a multi-disk end record", patchedZip(GOOD_ZIP, (zip, eocd) => zip.writeUInt16LE(1, eocd + 4)), /multi-disk/],
+	["an entry that needs a ZIP64 size", patchedZip(GOOD_ZIP, (zip, _eocd, directory) => zip.writeUInt32LE(0xffffffff, directory + 24)), /needs ZIP64/],
+	["an entry that needs a ZIP64 offset", patchedZip(GOOD_ZIP, (zip, _eocd, directory) => zip.writeUInt32LE(0xffffffff, directory + 42)), /needs ZIP64/],
+	["an entry that starts on another disk", patchedZip(GOOD_ZIP, (zip, _eocd, directory) => zip.writeUInt16LE(1, directory + 34)), /multi-disk/],
 ];
 
 for (const [name, bytes, pattern] of ZIP_ATTACKS) {
@@ -961,6 +991,7 @@ const TAR_ATTACKS: [string, Buffer, RegExp][] = [
 	["a body cut short", tarGz([{ name: "a", data: "hello", size: 5000 }], { terminator: false }), /truncated/],
 	["data that is not gzip", Buffer.from("plain text, definitely not gzip"), /corrupt or truncated gzip/],
 	["a gzip stream cut off", GOOD_TAR.subarray(0, GOOD_TAR.length - 12), /corrupt or truncated gzip/],
+	["a base-256 number in a header", base256Tar(), /base-256/],
 ];
 
 for (const [name, bytes, pattern] of TAR_ATTACKS) {
@@ -1383,3 +1414,244 @@ test("cancelling an install mid-download stops cleanly and leaves no staging, lo
 	expect(fs.existsSync(path.join(b.tooling, "tool"))).toBe(false);
 	expect(leftovers(b)).toEqual({ staging: [], locks: [] });
 }, 30_000);
+
+// ── Launch links, spawn cancellation, supervision failures, PATH, stale runs, abortable extraction ─
+
+test("a launch target may link to an installed SDK or to an executable inside the install, and reuse accepts it too", async () => {
+	const b = box();
+	const runtime = runtimeFor(b);
+	const request: InstallRequest = {
+		tool: "linked",
+		version: "1.0.0",
+		operations: [
+			{ type: "write-file", path: "bin/real", content: "#!/bin/sh\necho real\n", executable: true },
+			{
+				type: "write-file",
+				path: "make.cjs",
+				content: [
+					'const fs = require("node:fs");',
+					'const path = require("node:path");',
+					"const dir = process.argv[2];",
+					'fs.mkdirSync(path.join(dir, "venv", "bin"), { recursive: true });',
+					'fs.symlinkSync(process.execPath, path.join(dir, "venv", "bin", "python"));',
+					'fs.symlinkSync("real", path.join(dir, "bin", "alias"));',
+				].join("\n"),
+			},
+			{ type: "run", command: process.execPath, args: ["@INSTALL_DIR@/make.cjs", "@INSTALL_DIR@"] },
+		],
+		executables: ["venv/bin/python", "bin/alias", "bin/real"],
+	};
+
+	const first = await runtime.install(request);
+	const second = await runtime.install(request);
+
+	expect(first.status).toBe("installed");
+	expect(second.status).toBe("reused");
+	expect(fs.readlinkSync(path.join(first.destination, "venv", "bin", "python"))).toBe(process.execPath);
+	expect(fs.readlinkSync(path.join(first.destination, "bin", "alias"))).toBe("real");
+}, 30_000);
+
+test("a launch link that dangles, points into the project, runs through a linked directory or into staging is refused", async () => {
+	const b = box();
+	const runtime = runtimeFor(b);
+	const projectTool = path.join(b.project, "bin", "tool");
+	executable(projectTool);
+	const cases: [string, string, string, RegExp][] = [
+		["a dangling link", 'fs.symlinkSync("/nonexistent/tool", path.join(dir, "bin", "x"));', "bin/x", /link whose target is missing/],
+		["a link into the project", `fs.symlinkSync(${JSON.stringify(projectTool)}, path.join(dir, "bin", "x"));`, "bin/x", /inside your project/],
+		["an absolute link into staging", 'fs.symlinkSync(path.join(dir, "bin", "real"), path.join(dir, "bin", "x"));', "bin/x", /absolute link into the staging directory/],
+		["a link to a file that is not executable", 'fs.writeFileSync(path.join(dir, "plain"), "x"); fs.symlinkSync("../plain", path.join(dir, "bin", "x"));', "bin/x", /not an executable file/],
+		["a linked parent directory", 'fs.symlinkSync("bin", path.join(dir, "sbin"));', "sbin/real", /symbolic link/],
+		["a path that climbs out of the install", "", "../outside", /confined install path/],
+	];
+
+	for (const [index, [name, setup, target, pattern]] of cases.entries()) {
+		const error = await failure(
+			runtime.install({
+				tool: `linked${index}`,
+				version: "1.0.0",
+				operations: [
+					{ type: "write-file", path: "bin/real", content: "#!/bin/sh\n", executable: true },
+					{
+						type: "write-file",
+						path: "make.cjs",
+						content: `const fs = require("node:fs");\nconst path = require("node:path");\nconst dir = process.argv[2];\n${setup}\n`,
+					},
+					{ type: "run", command: process.execPath, args: ["@INSTALL_DIR@/make.cjs", "@INSTALL_DIR@"] },
+				],
+				executables: [target],
+			}),
+		);
+
+		expect([name, error.code]).toEqual([name, "install"]);
+		expect(error.message).toMatch(pattern);
+		expect(fs.existsSync(path.join(b.tooling, `linked${index}`))).toBe(false);
+	}
+}, 60_000);
+
+test("aborting the signal given to spawn stops the whole owned tree after the start", async () => {
+	const b = box();
+	const runtime = runtimeFor(b);
+	const { dir, file } = await scriptDir(runtime, { "hang.cjs": HANG });
+	const pidFile = path.join(dir, "pids");
+	const controller = new AbortController();
+	const proc = await runtime.spawn(process.execPath, [file("hang.cjs"), pidFile], { cwd: dir, signal: controller.signal });
+	const ready = Promise.withResolvers<void>();
+	proc.stdout?.on("data", chunk => {
+		if (chunk.toString().includes("ready")) ready.resolve();
+	});
+	await ready.promise;
+	expect(pidsIn(pidFile)).toHaveLength(2);
+
+	controller.abort();
+	const status = await proc.exited;
+
+	expect(status.error).toBeUndefined();
+	for (const pid of pidsIn(pidFile)) expect(await eventually(() => !isAlive(pid))).toBe(true);
+}, 30_000);
+
+test("an unreadable process table is never a clean result: a live root's group is killed and the failure is reported", async () => {
+	const unreadable = async (): Promise<never> => {
+		throw new Error("ps timed out");
+	};
+	const victim = cp.spawn("/bin/sh", ["-c", "sleep 60"], { detached: true, stdio: "ignore" });
+	const bystander = cp.spawn("/bin/sh", ["-c", "sleep 60"], { detached: true, stdio: "ignore" });
+	cleanups.push(() => {
+		for (const child of [victim, bystander]) {
+			try {
+				process.kill(-child.pid!, "SIGKILL");
+			} catch {
+				// Already gone.
+			}
+		}
+	});
+	const victimExited = Promise.withResolvers<void>();
+	victim.once("exit", () => victimExited.resolve());
+
+	const failed = await failure(terminateOwned({ rootPid: victim.pid, rootExited: () => false }, 100, unreadable));
+	await victimExited.promise;
+
+	expect(failed.code).toBe("cleanup-failed");
+	expect(failed.message).toContain("process table");
+	expect(failed.message).toContain("ps timed out");
+	expect(failed.message).toContain("SIGKILL");
+	expect(isAlive(victim.pid!)).toBe(false);
+
+	const refused = await failure(terminateOwned({ rootPid: bystander.pid, rootExited: () => true }, 100, unreadable));
+	expect(refused.code).toBe("cleanup-failed");
+	expect(refused.message).not.toContain("SIGKILL");
+	expect(isAlive(bystander.pid!)).toBe(true);
+}, 30_000);
+
+test("project-local directories are dropped from the child's PATH unless the project was approved", async () => {
+	const b = box();
+	fs.writeFileSync(path.join(b.project, "package.json"), "{}\n");
+	const local = path.join(b.project, "node_modules", ".bin");
+	fs.mkdirSync(local, { recursive: true });
+	const runtime = runtimeFor(b, { env: { PATH: `${local}:/usr/bin:/bin`, HOME: b.home } });
+	const { dir, file } = await scriptDir(runtime, { "path.cjs": "console.log(process.env.PATH);\n" });
+
+	const plain = await runtime.run(process.execPath, [file("path.cjs")], { cwd: dir });
+	const approved = await runtime.run(process.execPath, [file("path.cjs")], { cwd: dir, approvedProjectLocal: true });
+
+	expect(plain.stdout.trim()).toBe("/usr/bin:/bin");
+	expect(approved.stdout.trim()).toBe(`${local}:/usr/bin:/bin`);
+}, 30_000);
+
+test("a dead run's leftovers are reaped by their ownership marker before its directory is removed, and nothing else is touched", async () => {
+	const b = box();
+	const roots = await ensureToolingRoots(b.agentDir);
+	const staleId = "0123456789ab";
+	const staleDir = path.join(roots.work, staleId);
+	fs.mkdirSync(staleDir, { mode: 0o700 });
+	fs.writeFileSync(path.join(staleDir, "owner.json"), JSON.stringify({ pid: deadPid(), runtimeId: staleId }));
+	const orphan = cp.spawn("/bin/sh", ["-c", "sleep 60"], { detached: true, stdio: "ignore", env: { PATH: process.env.PATH, [MARKER_VARIABLE]: `${staleId}.3` } });
+	const bystander = cp.spawn("/bin/sh", ["-c", "sleep 60"], { detached: true, stdio: "ignore", env: { PATH: process.env.PATH, [MARKER_VARIABLE]: "ffffffffffff.1" } });
+	cleanups.push(() => {
+		for (const child of [orphan, bystander]) {
+			try {
+				process.kill(-child.pid!, "SIGKILL");
+			} catch {
+				// Already gone.
+			}
+		}
+	});
+	expect(isAlive(orphan.pid!)).toBe(true);
+	const runtime = runtimeFor(b);
+
+	const work = await runtime.workDir("sweep");
+
+	expect(await eventually(() => !isAlive(orphan.pid!))).toBe(true);
+	expect(isAlive(bystander.pid!)).toBe(true);
+	expect(fs.existsSync(staleDir)).toBe(false);
+	expect(fs.existsSync(work.path)).toBe(true);
+}, 30_000);
+
+test("extraction observes its abort signal and stops with an aborted error", async () => {
+	const b = box();
+	const early = new AbortController();
+	early.abort();
+	const inputs = [
+		["zip", stage(b, "ok.zip", GOOD_ZIP), {}],
+		["tar.gz", stage(b, "ok.tar.gz", GOOD_TAR), {}],
+		["gzip", stage(b, "one.gz", zlib.gzipSync(Buffer.from("payload"))), { fileName: "one" }],
+	] as const;
+
+	for (const [format, file, extra] of inputs) {
+		const dest = path.join(b.root, `early-${format}`);
+		expect((await failure(extractArchive(file, format, dest, { ...extra, signal: early.signal }))).code).toBe("aborted");
+		expect(fs.existsSync(dest)).toBe(false);
+		expect((await failure(inspectArchive(file, format, ARCHIVE_LIMITS, { ...extra, signal: early.signal }))).code).toBe("aborted");
+	}
+
+	// A signal that fires only after the metadata was validated cancels the extraction itself.
+	let checks = 0;
+	const late = {
+		get aborted() {
+			return ++checks > 20;
+		},
+	} as unknown as AbortSignal;
+	const error = await failure(extractArchive(stage(b, "late.zip", GOOD_ZIP), "zip", path.join(b.root, "late"), { signal: late }));
+	expect(error.code).toBe("aborted");
+	expect(checks).toBeGreaterThan(20);
+});
+
+test("atomic writes can keep exact permissions, create only, and abort before publishing", async () => {
+	const b = box();
+	const file = path.join(b.root, "options.json");
+	fs.writeFileSync(file, "old");
+	fs.chmodSync(file, 0o664);
+
+	await writeFileAtomic(file, "exact", 0o664, { exactMode: true });
+	expect(fs.statSync(file).mode & 0o777).toBe(0o664);
+
+	const created = path.join(b.root, "created.json");
+	await writeFileAtomic(created, "first", 0o600, { createOnly: true });
+	const second = await writeFileAtomic(created, "second", 0o600, { createOnly: true }).catch((error: unknown) => error);
+	expect(second).toMatchObject({ code: "EEXIST" });
+	expect(fs.readFileSync(created, "utf8")).toBe("first");
+
+	const aborted = await writeFileAtomic(file, "never", 0o664, {
+		beforePublish: () => {
+			throw new Error("stop");
+		},
+	}).catch((error: unknown) => error);
+	expect(aborted).toBeInstanceOf(Error);
+	expect(fs.readFileSync(file, "utf8")).toBe("exact");
+	expect(fs.readdirSync(b.root).filter(name => name.endsWith(".tmp"))).toEqual([]);
+});
+
+test("root markers follow omp: plain names must exist, globs are Bun globs over one directory level", () => {
+	const b = box();
+	fs.writeFileSync(path.join(b.project, "app.cabal"), "");
+	fs.mkdirSync(path.join(b.project, "nested"));
+	fs.writeFileSync(path.join(b.project, "nested", "deep.cabal"), "");
+
+	expect(hasRootMarkers(b.project, ["*.cabal"])).toBe(true);
+	expect(hasRootMarkers(b.project, ["*.{cabal,project}"])).toBe(true);
+	expect(hasRootMarkers(b.project, ["*.gemspec", "app.cabal"])).toBe(true);
+	expect(hasRootMarkers(b.project, ["*.gemspec"])).toBe(false);
+	expect(hasRootMarkers(b.project, ["**/deep.cabal"])).toBe(false);
+	expect(hasRootMarkers(b.project, ["package.json"])).toBe(false);
+	expect(hasRootMarkers(b.project, ["*[", "app.cabal"])).toBe(true);
+});

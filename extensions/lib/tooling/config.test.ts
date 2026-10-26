@@ -214,7 +214,7 @@ test("sequential merges that chain the returned snapshot keep every unrelated ke
 // ── Precedence ladder and YAML ──────────────────────────────────────────────────────────────────
 
 test("sources are ranked exactly as omp merges them: project, native, foreign user, home", async () => {
-	const box = sandbox();
+	const box = sandbox({ foreignUserSources: { claude: true, codex: true, gemini: true } });
 	const places = [
 		path.join(box.cwd, "lsp.json"),
 		path.join(box.cwd, ".omp", "lsp.json"),
@@ -315,16 +315,35 @@ test("a project that disables the server blocks the entry", async () => {
 	expect(result.outcomes[0]?.detail).toContain("disables");
 });
 
-test("a project override of unrelated fields does not block and stays visible in the effective entry", async () => {
+test("a project override of fields outside the approved entry is a conflict, not a silent merge", async () => {
 	const box = sandbox();
-	put(path.join(box.cwd, ".omp", "lsp.json"), { servers: { gopls: { settings: { gopls: { staticcheck: true } } } } });
+	const shadow = path.join(box.cwd, ".omp", "lsp.json");
+	put(shadow, { servers: { gopls: { settings: { gopls: { staticcheck: true } } } } });
 
 	const result = await apply(box, [GOPLS]);
-	const effective = effectiveEntry(result.snapshot, "lsp", "gopls");
 
-	expect(result.outcomes[0]?.status).toBe("applied");
-	expect(effective?.value).toEqual({ ...GOPLS.value, settings: { gopls: { staticcheck: true } } });
-	expect(effective?.projectSupplied).toBe(true);
+	expect(result.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [shadow] });
+	expect(result.outcomes[0]?.detail).toContain("`settings`");
+	expect(fs.existsSync(lspFile(box))).toBe(false);
+});
+
+test("a project adapter that adds launch defaults the approval lacks conflicts, while an identical project entry is already effective", async () => {
+	const box = sandbox();
+	const shadow = path.join(box.cwd, "dap.json");
+	put(shadow, { adapters: { codelldb: { command: "/managed/codelldb", launchDefaults: { python: "./evil" } } } });
+
+	const result = await apply(box, [CODELLDB]);
+
+	expect(result.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [shadow] });
+	expect(result.outcomes[0]?.detail).toContain("`launchDefaults`");
+	expect(fs.existsSync(dapFile(box))).toBe(false);
+
+	const same = sandbox();
+	const identical = path.join(same.cwd, "lsp.json");
+	put(identical, { servers: { gopls: GOPLS.value } });
+	const reused = await apply(same, [GOPLS]);
+	expect(reused.outcomes[0]).toMatchObject({ status: "unchanged", path: identical });
+	expect(effectiveEntry(reused.snapshot, "lsp", "gopls")?.projectSupplied).toBe(true);
 });
 
 // ── Foreign and home sources ────────────────────────────────────────────────────────────────────
@@ -350,7 +369,7 @@ test("a foreign provider the caller says is not enabled is listed but inert", as
 	const result = await apply(box, [GOPLS]);
 
 	expect(result.outcomes[0]?.status).toBe("applied");
-	expect(result.snapshot.sources.find(source => source.path === foreign)).toMatchObject({ enabled: false });
+	expect(result.snapshot.sources.find(source => source.path === foreign)).toMatchObject({ enablement: "disabled" });
 	expect(effectiveEntry(result.snapshot, "lsp", "gopls")?.source.path).toBe(lspFile(box));
 });
 
@@ -366,8 +385,24 @@ test("CLAUDE_CONFIG_DIR replaces ~/.claude as the Claude user directory", async 
 	expect(result.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [inAlternate] });
 });
 
-test("an identical complete entry in another source is reused, not duplicated", async () => {
+test("an identical entry in a foreign config of unknown enablement still gets the managed entry written and is never effective", async () => {
 	const box = sandbox();
+	const foreign = path.join(box.home, ".codex", "lsp.json");
+	put(foreign, { gopls: GOPLS.value });
+	const before = await inspectConfig(box.context);
+
+	expect(effectiveEntry(before, "lsp", "gopls")).toBeUndefined();
+	const result = await applyConfig(before, { entries: [GOPLS] });
+
+	expect(result.outcomes[0]).toMatchObject({ status: "applied", path: lspFile(box) });
+	expect(json(lspFile(box))).toEqual({ servers: { gopls: GOPLS.value } });
+	const effective = effectiveEntry(result.snapshot, "lsp", "gopls");
+	expect(effective?.source.path).toBe(lspFile(box));
+	expect(effective?.unverified.map(source => source.path)).toEqual([foreign]);
+});
+
+test("the same entry in a foreign config the caller says is enabled is already effective", async () => {
+	const box = sandbox({ foreignUserSources: { codex: true } });
 	const foreign = path.join(box.home, ".codex", "lsp.json");
 	put(foreign, { gopls: GOPLS.value });
 
@@ -375,6 +410,29 @@ test("an identical complete entry in another source is reused, not duplicated", 
 
 	expect(result.outcomes[0]).toMatchObject({ status: "unchanged", path: foreign });
 	expect(fs.existsSync(lspFile(box))).toBe(false);
+});
+
+test("an identical complete entry in the home config is reused, not duplicated", async () => {
+	const box = sandbox();
+	const home = path.join(box.home, "lsp.json");
+	put(home, { gopls: GOPLS.value });
+
+	const result = await apply(box, [GOPLS]);
+
+	expect(result.outcomes[0]).toMatchObject({ status: "unchanged", path: home });
+	expect(fs.existsSync(lspFile(box))).toBe(false);
+});
+
+test("CLAUDE_CONFIG_DIR keeps Claude's directory in play even when the caller says the provider is off", async () => {
+	const box = sandbox({ foreignUserSources: { claude: false } });
+	const alternate = path.join(box.root, "alt-claude");
+	const inAlternate = path.join(alternate, "lsp.json");
+	put(inAlternate, { gopls: { command: "/alt/gopls" } });
+
+	const result = await apply(box, [GOPLS], { ...box.context, env: { CLAUDE_CONFIG_DIR: alternate } });
+
+	expect(result.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [inAlternate] });
+	expect(result.snapshot.sources.find(source => source.path === inAlternate)).toMatchObject({ enablement: "unknown" });
 });
 
 test("home config is the lowest layer yet still refuses to be bypassed", async () => {
@@ -398,7 +456,7 @@ test("a lower layer that disables the server blocks the entry", async () => {
 });
 
 test("DAP launchDefaults merge one level deep, so only the same sub-key conflicts", async () => {
-	const box = sandbox();
+	const box = sandbox({ foreignUserSources: { codex: true } });
 	const foreign = path.join(box.home, ".codex", "dap.json");
 	put(foreign, { adapters: { codelldb: { command: "/managed/codelldb", launchDefaults: { a: 1 } } } });
 	const extra: ConfigEntry = { kind: "dap", key: "codelldb", value: { command: "/managed/codelldb", launchDefaults: { b: 2 } } };
@@ -569,6 +627,9 @@ const BAD_VALUES: [string, unknown][] = [
 	["a non-boolean disabled", { command: "x", disabled: "yes" }],
 	["a string instead of an object", "just a string"],
 	["an array instead of an object", ["x"]],
+	["an empty fileTypes list", { command: "x", fileTypes: [] }],
+	["an empty rootMarkers list", { command: "x", rootMarkers: [] }],
+	["an empty string among the fileTypes", { command: "x", fileTypes: [""] }],
 ];
 
 for (const [name, value] of BAD_VALUES) {
@@ -657,4 +718,253 @@ test("the inspection digest is stable for identical files and changes when any c
 
 	expect(second.digest).toBe(first.digest);
 	expect(third.digest).not.toBe(first.digest);
+
+	put(path.join(box.home, ".claude", "plugins", "installed_plugins.json"), { version: 1, plugins: {} });
+	const fourth = await inspectConfig(box.context);
+	expect(fourth.digest).not.toBe(third.digest);
+});
+
+// ── Plugin roots ────────────────────────────────────────────────────────────────────────────────
+
+test("an installed plugin's marketplace server is a lower layer: bypassing it is refused and it is never effective", async () => {
+	const box = sandbox();
+	const market = path.join(box.home, ".claude", "plugins", "cache", "market");
+	const root = path.join(market, "gopls-lsp", "1.0.0");
+	fs.mkdirSync(root, { recursive: true });
+	const catalog = path.join(market, "marketplace.json");
+	put(catalog, {
+		plugins: [{ name: "other" }, { name: "gopls-lsp", lspServers: { gopls: { command: "gopls", args: [], extensionToLanguage: { ".go": "go" } } } }],
+	});
+	put(path.join(box.home, ".claude", "plugins", "installed_plugins.json"), { version: 2, plugins: { "gopls-lsp@market": [{ installPath: root, version: "1.0.0" }] } });
+	const inline = `${catalog}#plugins/gopls-lsp`;
+
+	const snapshot = await inspectConfig(box.context);
+	expect(snapshot.sources.find(source => source.path === inline)).toMatchObject({ scope: "plugin", enablement: "unknown", pluginId: "gopls-lsp@market", shape: "wrapped" });
+	expect(effectiveEntry(snapshot, "lsp", "gopls")).toBeUndefined();
+
+	const result = await applyConfig(snapshot, { entries: [GOPLS] });
+
+	expect(result.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [inline] });
+	expect(result.outcomes[0]?.detail).toContain("replace or bypass");
+	expect(result.snapshot.notes.join("\n")).toContain("plugin root");
+	expect(fs.existsSync(lspFile(box))).toBe(false);
+});
+
+test("plugin root config files are read for both kinds and an identical plugin entry leaves the managed entry to be written", async () => {
+	const box = sandbox();
+	const root = path.join(box.home, ".claude", "plugins", "cache", "market", "dbg", "1.0.0");
+	put(path.join(root, "dap.json"), { adapters: { codelldb: { command: "/plugin/codelldb" } } });
+	put(path.join(root, "lsp.json"), { servers: { gopls: GOPLS.value } });
+	put(path.join(box.home, ".claude", "plugins", "installed_plugins.json"), { version: 2, plugins: { "dbg@market": [{ installPath: root }] } });
+
+	const result = await apply(box, [CODELLDB, GOPLS]);
+
+	expect(result.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [path.join(root, "dap.json")] });
+	expect(result.outcomes[1]?.status).toBe("applied");
+	expect(json(lspFile(box))).toEqual({ servers: { gopls: GOPLS.value } });
+	const effective = effectiveEntry(result.snapshot, "lsp", "gopls");
+	expect(effective?.source.path).toBe(lspFile(box));
+	expect(effective?.unverified.map(source => source.path)).toEqual([path.join(root, "lsp.json")]);
+});
+
+test("a plugin switched off in its registry, an id without a marketplace and an unparsable registry contribute nothing", async () => {
+	const box = sandbox();
+	const off = path.join(box.root, "plugins", "off");
+	const orphan = path.join(box.root, "plugins", "orphan");
+	put(path.join(off, "lsp.json"), { gopls: { command: "/off/gopls" } });
+	put(path.join(orphan, "lsp.json"), { gopls: { command: "/orphan/gopls" } });
+	put(path.join(box.home, ".claude", "plugins", "installed_plugins.json"), {
+		version: 2,
+		plugins: { "off@market": [{ installPath: off, enabled: false }], "no-market": [{ installPath: orphan }] },
+	});
+	put(path.join(box.home, ".omp", "plugins", "installed_plugins.json"), "{ not json");
+
+	const result = await apply(box, [GOPLS]);
+
+	expect(result.outcomes[0]?.status).toBe("applied");
+	expect(result.snapshot.unresolved).toEqual([]);
+});
+
+test("a project plugin registry is found from the working directory and an oversized registry fails closed", async () => {
+	const box = sandbox();
+	const root = path.join(box.root, "plugins", "proj");
+	put(path.join(root, "lsp.json"), { servers: { gopls: { command: "/proj-plugin/gopls" } } });
+	put(path.join(box.cwd, ".omp", "plugins", "installed_plugins.json"), { version: 1, plugins: { "proj@local": [{ installPath: root, scope: "project" }] } });
+
+	const refused = await apply(box, [GOPLS]);
+
+	expect(refused.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [path.join(root, "lsp.json")] });
+
+	const oversized = sandbox();
+	const registry = path.join(oversized.home, ".claude", "plugins", "installed_plugins.json");
+	put(registry, `{"version":1,"plugins":{},"padding":"${"x".repeat(1_100_000)}"}`);
+	const blocked = await apply(oversized, [GOPLS, CODELLDB]);
+	expect(blocked.outcomes.map(outcome => outcome.status)).toEqual(["conflict", "conflict"]);
+	expect(blocked.snapshot.unresolved.map(issue => issue.path)).toEqual([registry, registry]);
+	expect(blocked.outcomes[0]?.detail).toContain("cannot rule out");
+});
+
+test("a marketplace lspServers path is read only while it stays inside the plugin root", async () => {
+	const box = sandbox();
+	const market = path.join(box.home, ".claude", "plugins", "cache", "market");
+	const inside = path.join(market, "in", "1.0.0");
+	const outside = path.join(market, "out", "1.0.0");
+	put(path.join(inside, "servers.json"), { gopls: { command: "/inside/gopls" } });
+	put(path.join(market, "escape.json"), { clangd: { command: "/escaped/clangd" } });
+	fs.mkdirSync(outside, { recursive: true });
+	put(path.join(market, "marketplace.json"), { plugins: [{ name: "in", lspServers: "./servers.json" }, { name: "out", lspServers: "../../escape.json" }] });
+	put(path.join(box.home, ".claude", "plugins", "installed_plugins.json"), {
+		version: 2,
+		plugins: { "in@market": [{ installPath: inside }], "out@market": [{ installPath: outside }] },
+	});
+
+	const result = await apply(box, [GOPLS, CLANGD]);
+
+	expect(result.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [path.join(inside, "servers.json")] });
+	expect(result.outcomes[1]?.status).toBe("applied");
+});
+
+// ── Wrapper semantics and loader failures ───────────────────────────────────────────────────────
+
+test("a wrapper that is not an object makes omp read the whole file as a flat map, so those entries still shadow", async () => {
+	const dapBox = sandbox();
+	const dapYaml = path.join(dapBox.cwd, ".omp", "dap.yaml");
+	put(dapYaml, "adapters:\ncodelldb:\n  command: ./tools/adapter\n");
+
+	const dap = await apply(dapBox, [CODELLDB]);
+
+	expect(dap.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [dapYaml] });
+	expect(dap.snapshot.sources.find(source => source.path === dapYaml)).toMatchObject({ state: "ok", shape: "flat", wrapperIgnored: true });
+
+	const lspBox = sandbox();
+	const lspFlat = path.join(lspBox.cwd, "lsp.json");
+	put(lspFlat, { servers: [], gopls: { command: "/proj/gopls" } });
+	const lsp = await apply(lspBox, [GOPLS]);
+	expect(lsp.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [lspFlat] });
+});
+
+test("an LSP file whose loader would throw on a null entry cannot be ruled out and blocks LSP entries only", async () => {
+	const box = sandbox();
+	const broken = path.join(box.cwd, ".omp", "lsp.yaml");
+	put(broken, "servers:\ngopls:\n  command: /proj/gopls\n");
+
+	const result = await apply(box, [GOPLS, CODELLDB]);
+
+	expect(result.snapshot.unresolved).toEqual([expect.objectContaining({ kind: "lsp", path: broken })]);
+	expect(result.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [broken] });
+	expect(result.outcomes[0]?.detail).toContain("null entry");
+	expect(result.outcomes[1]?.status).toBe("applied");
+});
+
+test("a native file whose wrapper is null is refused for either kind and never overwritten", async () => {
+	const box = sandbox();
+	put(lspFile(box), '{"servers": null}\n');
+	put(dapFile(box), '{"adapters": null, "other": {"command": "x"}}\n');
+	const before = [text(lspFile(box)), text(dapFile(box))];
+
+	const result = await apply(box, [GOPLS, CODELLDB]);
+
+	expect(result.outcomes.map(outcome => outcome.status)).toEqual(["failed", "failed"]);
+	expect(result.outcomes[1]?.detail).toContain("not usable");
+	expect([text(lspFile(box)), text(dapFile(box))]).toEqual(before);
+});
+
+// ── disabled, non-object keys, directories and environment ─────────────────────────────────────
+
+test("any truthy LSP disabled value disables the server, including YAML's yes", async () => {
+	const box = sandbox();
+	put(path.join(box.cwd, ".omp", "lsp.yaml"), "servers:\n  gopls:\n    disabled: yes\n");
+
+	const result = await apply(box, [GOPLS]);
+
+	expect(result.outcomes[0]?.status).toBe("conflict");
+	expect(result.outcomes[0]?.detail).toContain("disables");
+});
+
+test("DAP has no disabled switch: a project's disabled adapter neither blocks nor disables", async () => {
+	const same = sandbox();
+	const identical = path.join(same.cwd, ".omp", "dap.json");
+	put(identical, { adapters: { codelldb: { ...CODELLDB.value, disabled: true } } });
+
+	const reused = await apply(same, [CODELLDB]);
+
+	expect(reused.outcomes[0]).toMatchObject({ status: "unchanged", path: identical });
+	expect(effectiveEntry(reused.snapshot, "dap", "codelldb")?.disabled).toBe(false);
+
+	const partial = sandbox();
+	put(path.join(partial.cwd, ".omp", "dap.json"), { adapters: { codelldb: { command: "/managed/codelldb", disabled: true } } });
+	const written = await apply(partial, [CODELLDB]);
+	expect(written.outcomes[0]?.status).toBe("applied");
+	expect(effectiveEntry(written.snapshot, "dap", "codelldb")?.disabled).toBe(false);
+});
+
+test("an existing key that is not an object is never overwritten", async () => {
+	const wrapped = sandbox();
+	put(lspFile(wrapped), { servers: { gopls: false } });
+	const wrappedBefore = text(lspFile(wrapped));
+
+	const refusedWrapped = await apply(wrapped, [GOPLS]);
+
+	expect(refusedWrapped.outcomes[0]).toMatchObject({ status: "conflict", conflictsWith: [lspFile(wrapped)] });
+	expect(refusedWrapped.outcomes[0]?.detail).toContain("not an object");
+	expect(text(lspFile(wrapped))).toBe(wrappedBefore);
+
+	const flat = sandbox();
+	put(dapFile(flat), { codelldb: "off for now", other: { command: "x" } });
+	const refusedFlat = await apply(flat, [CODELLDB]);
+	expect(refusedFlat.outcomes[0]?.status).toBe("conflict");
+	expect(json(dapFile(flat))).toEqual({ codelldb: "off for now", other: { command: "x" } });
+});
+
+test("entries are refused when omp would read user-level config from a different directory than the agent directory", async () => {
+	const box = sandbox();
+	const elsewhere = path.join(box.root, "srv-agent");
+
+	const result = await apply(box, [GOPLS, CODELLDB], { ...box.context, agentDir: elsewhere });
+
+	expect(result.outcomes.map(outcome => outcome.status)).toEqual(["failed", "failed"]);
+	expect(result.outcomes[0]?.detail).toContain(box.agentDir);
+	expect(result.outcomes[0]?.detail).toContain("PI_CODING_AGENT_DIR");
+	expect(result.snapshot.targets.lsp.problem?.code).toBe("elsewhere");
+	expect(fs.existsSync(elsewhere)).toBe(false);
+	expect(fs.existsSync(lspFile(box))).toBe(false);
+});
+
+test("PI_CONFIG_DIR and the active profile decide where omp reads user-level config", async () => {
+	const custom = sandbox();
+	const customAgent = path.join(custom.home, ".custom", "agent");
+	const customResult = await apply(custom, [GOPLS], { ...custom.context, agentDir: customAgent, env: { PI_CONFIG_DIR: ".custom" } });
+	expect(customResult.outcomes[0]?.status).toBe("applied");
+	expect(json(path.join(customAgent, "lsp.json"))).toEqual({ servers: { gopls: GOPLS.value } });
+
+	for (const env of [{ OMP_PROFILE: "work" }, { PI_PROFILE: "work" }, { OMP_PROFILE: "work", PI_PROFILE: "other" }]) {
+		const box = sandbox();
+		const agentDir = path.join(box.home, ".omp", "profiles", "work", "agent");
+		const result = await apply(box, [GOPLS], { ...box.context, agentDir, env });
+		expect(result.outcomes[0]?.status).toBe("applied");
+		expect(json(path.join(agentDir, "lsp.json"))).toEqual({ servers: { gopls: GOPLS.value } });
+	}
+
+	const mismatched = sandbox();
+	const refused = await apply(mismatched, [GOPLS], { ...mismatched.context, env: { OMP_PROFILE: "work" } });
+	expect(refused.outcomes[0]?.status).toBe("failed");
+	expect(fs.existsSync(lspFile(mismatched))).toBe(false);
+
+	const emptyWins = sandbox();
+	const defaulted = await apply(emptyWins, [GOPLS], { ...emptyWins.context, env: { OMP_PROFILE: "", PI_PROFILE: "work" } });
+	expect(defaulted.outcomes[0]?.status).toBe("applied");
+});
+
+test("the snapshot keeps only the environment variables the module reads", async () => {
+	const box = sandbox();
+	const env = { PATH: "/usr/bin", CLAUDE_CONFIG_DIR: "", AWS_SECRET_ACCESS_KEY: "s3cr3t", ANTHROPIC_API_KEY: "sk-ant-test" };
+
+	const snapshot = await inspectConfig({ ...box.context, env });
+	const result = await applyConfig(snapshot, { entries: [GOPLS] });
+
+	expect(snapshot.context.env).toEqual({ PATH: "/usr/bin", CLAUDE_CONFIG_DIR: "" });
+	for (const held of [snapshot, result.snapshot]) {
+		expect(JSON.stringify(held.context)).not.toContain("s3cr3t");
+		expect(JSON.stringify(held.context)).not.toContain("sk-ant-test");
+	}
 });
