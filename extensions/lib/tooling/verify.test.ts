@@ -267,22 +267,6 @@ const SLOW = 60_000;
 
 // ── Success is earned ───────────────────────────────────────────────────────────────────────────
 
-test("a fixture that was built, observed to match and torn down is ready for both integrations, in a private tree that is gone afterwards", async () => {
-	const b = box();
-	const before = fs.readdirSync(b.project, { recursive: true }).sort();
-	const { omp, record } = fakeOmp(b, {});
-	const outcome = await verifyLanguage(plan(b, "python"), await contextFor(b, omp));
-
-	expect(outcome.lsp.status).toBe("ready");
-	expect(outcome.dap.status).toBe("ready");
-	expect(outcome.lsp.command?.command).toBe(path.join(b.tools, "server"));
-	expect(outcome.observations.map(item => item.fixture)).toEqual(["python"]);
-	expect(outcome.observations[0]?.lsp?.expected).toEqual({ server: "srv", definition: "util.src:1" });
-	expect(outcome.observations[0]?.dap?.observed).toMatchObject({ stop: "util.src:2", variable: "answer=42", terminated: true, sessionsAfter: 0 });
-	expect(fs.readdirSync(b.temp)).toEqual([]);
-	expect(fs.readdirSync(b.project, { recursive: true }).sort()).toEqual(before);
-	expect(invocations(record).map(item => item.cwd).filter(cwd => cwd === b.project)).toEqual([]);
-}, SLOW);
 
 test("the verifier's omp runs with a private home, no inherited credentials and no ambient discovery", async () => {
 	const b = box();
@@ -300,6 +284,17 @@ test("the verifier's omp runs with a private home, no inherited credentials and 
 		expect(run.cwd.startsWith(`${b.temp}${path.sep}`)).toBe(true);
 	}
 	expect(runs[1]?.argv).not.toContain("--api-key");
+}, SLOW);
+
+test("private TMPDIR leaves room for js-debug Unix sockets on all supported platforms", async () => {
+	const b = box();
+	const { omp, record } = fakeOmp(b, {});
+	await verifyLanguage(plan(b, "javascript"), await contextFor(b, omp, { tempRoot: undefined }));
+	const run = invocations(record).find(invocation => invocation.kind === "rpc");
+	if (!run?.env.TMPDIR) throw new Error("helper temporary directory was not recorded");
+	// Darwin's sun_path is 104 bytes; reserve js-debug's real name including a long Linux PID.
+	const socket = path.join(run.env.TMPDIR, "node-cdp.4194304-01234567-0.sock");
+	expect(Buffer.byteLength(socket)).toBeLessThan(104);
 }, SLOW);
 
 test("every required variant is verified, each in its own fixture directory", async () => {

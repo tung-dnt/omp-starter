@@ -481,13 +481,14 @@ interface Run {
 	/** The helper's private copy and the natives directory shared by this call's omp processes. */
 	readonly helper: string;
 	readonly natives: string;
+	readonly tmp: string;
 	readonly language: LanguageId;
 }
 
 function createRoot(context: VerifyContext): { readonly root: string } | { readonly problem: string } {
 	const own = context.config.context;
 	const user = [context.cwd, own.home, own.agentDir, own.nativeDir, own.claudeDir, os.homedir()].map(realpathOrSelf);
-	for (const candidate of [context.tempRoot, os.tmpdir(), "/tmp"]) {
+	for (const candidate of [context.tempRoot, "/tmp", os.tmpdir()]) {
 		if (candidate === undefined) continue;
 		const base = realpathOrSelf(candidate);
 		if (!fs.existsSync(base) || user.some(dir => isWithin(dir, base))) continue;
@@ -545,7 +546,7 @@ function helperEnvironment(run: Run, dirs: Dirs): Record<string, string> {
 		XDG_CACHE_HOME: path.join(dirs.home, ".cache"),
 		XDG_DATA_HOME: path.join(dirs.home, ".local", "share"),
 		XDG_STATE_HOME: path.join(dirs.home, ".local", "state"),
-		TMPDIR: path.join(dirs.home, "tmp"),
+		TMPDIR: run.tmp,
 		PI_CONFIG_DIR: ".omp",
 		PI_CODING_AGENT_DIR: path.join(dirs.home, ".omp", "agent"),
 		PI_CONFIG_FILES: path.join(dirs.out, "isolation.yml"),
@@ -560,7 +561,7 @@ function helperEnvironment(run: Run, dirs: Dirs): Record<string, string> {
 }
 
 function writeIsolation(run: Run, fixture: FixtureCase, dirs: Dirs, setups: Partial<Record<IntegrationKind, Setup>>): void {
-	for (const dir of ["tmp", ".config", ".cache", ".local/share", ".local/state", ".omp/agent"]) fs.mkdirSync(path.join(dirs.home, dir), { recursive: true, mode: 0o700 });
+	for (const dir of [".config", ".cache", ".local/share", ".local/state", ".omp/agent"]) fs.mkdirSync(path.join(dirs.home, dir), { recursive: true, mode: 0o700 });
 	// JSON is valid YAML; the nested mapping is what omp requires.
 	const settings = `${JSON.stringify(ISOLATION_SETTINGS, null, 2)}\n`;
 	fs.writeFileSync(path.join(dirs.home, ".omp", "agent", "config.yml"), settings, { mode: 0o600 });
@@ -951,10 +952,13 @@ export async function verifyLanguage(plan: LanguagePlan, context: VerifyContext)
 	try {
 		const natives = path.join(created.root, "natives");
 		fs.mkdirSync(natives, { mode: 0o700 });
+		// js-debug creates Unix sockets below TMPDIR; a nested fixture HOME can exceed sun_path.
+		const tmp = path.join(created.root, "tmp");
+		fs.mkdirSync(tmp, { mode: 0o700 });
 		const helperDir = await runtime.workDir("helper");
 		const helper = path.join(helperDir.path, "verifier-extension.ts");
 		fs.copyFileSync(fileURLToPath(new URL("./verifier-extension.ts", import.meta.url)), helper);
-		const run: Run = { runtime, context, limits, policy: scope.policy, helper, natives, language: plan.language };
+		const run: Run = { runtime, context, limits, policy: scope.policy, helper, natives, tmp, language: plan.language };
 		for (const fixture of plan.fixtures) {
 			if (context.signal?.aborted === true) {
 				reports.push({ fixture: fixture.id, ...(setups.lsp === undefined ? {} : { lsp: stage("unverified", "verification was cancelled") }), ...(setups.dap === undefined ? {} : { dap: stage("unverified", "verification was cancelled") }) });
