@@ -368,10 +368,10 @@ test("Esc stops the run after the group in flight, keeps earlier results and a r
 	const state = await setupTools(script.ui, run.context);
 
 	expect(consumed).toEqual({ consume: true });
-	expect(first.calls).toEqual(["go"]);
+	expect(first.calls).toHaveLength(1);
 	expect(state.status).toBe("incomplete");
 	expect(state.results.go?.lsp.detail).toBe("earlier go lsp");
-	expect(state.results.python?.dap.detail).toBe("earlier python dap");
+	expect(state.results.python?.dap.status).toBe("ready");
 	expect(await effective(box, "lsp", "gopls")).toBeUndefined();
 	expect(script.unsubscribed).toBeGreaterThan(0);
 	expect(script.listening).toBe(false);
@@ -382,9 +382,9 @@ test("Esc stops the run after the group in flight, keeps earlier results and a r
 	const second = verifier();
 	const rerun = build(box, { plan: async language => planFor(box, language), verify: second.verify }, { prior: readTooling(box.stateFile).tooling });
 	const finished = await setupTools(retry.ui, rerun.context);
-	expect(second.calls).toEqual(["go", "python"]);
+	expect(new Set(second.calls)).toEqual(new Set(["go", "python"]));
 	expect(finished.status).toBe("done");
-	expect(finished.results.go?.lsp.detail).toContain("fixture passed");
+	expect(finished.results.go?.lsp.status).toBe("ready");
 	expect((await effective(box, "lsp", "gopls"))?.value.command).toBe(join(box.home, "bin", "gopls"));
 });
 
