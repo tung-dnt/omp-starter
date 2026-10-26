@@ -459,7 +459,7 @@ async function inspectConfigured(ctx: Ctx, kind: IntegrationKind, spec: ToolSpec
 			notes,
 		};
 	}
-	const launch: Command = { command: effective.command.path, args: stringArray(effective.value.args) };
+	const launch: Command = { command: effective.command.path, args: effective.value.args === undefined ? [...spec.args] : stringArray(effective.value.args) };
 	const local = effective.projectSupplied || effective.command.origin === "project-local";
 	if (local && !ctx.approved.has(path.resolve(launch.command))) {
 		ctx.disclosed.add(launch.command);

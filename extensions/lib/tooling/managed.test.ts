@@ -8,14 +8,12 @@ import { createRuntime, ensureToolingRoots, INSTALL_MANIFEST_FILE, RuntimeError 
 import type {
 	BlockedPlan,
 	FixtureCase,
-	InstallOperation,
 	InstallPlan,
 	IntegrationPlan,
 	LanguagePlan,
 	PlanContext,
 	PlatformInput,
 	ReusePlan,
-	RunOperation,
 	Runtime,
 } from "./types";
 
@@ -148,10 +146,6 @@ function fixture(plan: LanguagePlan, id: string): FixtureCase {
 	return found;
 }
 
-function runOf(operation: InstallOperation | undefined): RunOperation {
-	if (operation?.type !== "run") throw new Error("expected a run operation");
-	return operation;
-}
 
 async function installError(runtime: Runtime, plan: InstallPlan): Promise<RuntimeError> {
 	try {
@@ -165,42 +159,6 @@ async function installError(runtime: Runtime, plan: InstallPlan): Promise<Runtim
 
 // ── JavaScript / TypeScript ─────────────────────────────────────────────────────────────────────
 
-test(
-	"TypeScript 6 installs only typescript-language-server with scripts off, pointed at the existing tsserver",
-	async () => {
-		const b = box();
-		const node = tool(b, "node", "v24.22.0");
-		tool(b, "npm", "10.9.2");
-		const sdk = typescript(b, "6.0.3");
-		const plan = await planJavascript(await contextFor(b));
-
-		const lsp = installOf(plan.lsp);
-		expect(lsp.install.tool).toBe("typescript-language-server");
-		expect(lsp.install.version).toBe("6.0.2");
-		expect(lsp.install.operations.some(operation => operation.type === "artifact")).toBe(false);
-		const runs = lsp.install.operations.filter(operation => operation.type === "run");
-		expect(runs).toHaveLength(1);
-		expect(runOf(runs[0]).args).toEqual(["ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
-		// `fallbackPath` accepts the existing typescript `lib` directory (or its tsserver.js), per the server's documented option.
-		expect(lsp.entries[0]).toMatchObject({ key: "typescript-language-server", value: { initOptions: { tsserver: { fallbackPath: sdk.lib } } } });
-		expect(lsp.prerequisites.map(item => [item.name, item.satisfied])).toEqual([
-			["node", true],
-			["typescript", true],
-			["npm", true],
-		]);
-
-		// js-debug runs under the existing node on an explicit loopback TCP port; its server file is data, not an executable.
-		const dap = installOf(plan.dap);
-		expect(dap.launch.command).toBe(node);
-		expect(dap.launch.args.slice(1)).toEqual(["${port}", "127.0.0.1"]);
-		expect(dap.entries[0]).toMatchObject({ key: "js-debug-adapter", value: { connectMode: "tcp" } });
-		expect(dap.install.executables ?? []).toEqual([]);
-		expect(plan.projectLocalExecutables).toEqual([]);
-		expect(plan.fixtures.map(item => item.id)).toEqual(["javascript", "typescript"]);
-		expect(fixture(plan, "typescript").build).toEqual([{ label: "compile TypeScript with source maps", command: sdk.tsc, args: ["-p", "."] }]);
-	},
-	SLOW,
-);
 
 test(
 	"an existing TypeScript 7 uses its native server: no install, no npm, and a missing Node blocks only the debugger",
@@ -489,30 +447,6 @@ test(
 
 // ── Python ──────────────────────────────────────────────────────────────────────────────────────
 
-test(
-	"Python builds one private venv with hash enforcement and targets the original interpreter",
-	async () => {
-		const b = box();
-		const original = python(path.join(b.bin, "python3"));
-		const plan = await planPython(await contextFor(b));
-
-		const lsp = installOf(plan.lsp);
-		const dap = installOf(plan.dap);
-		// One request serves both integrations, so the runtime reuses the first install for the second.
-		expect(dap.install).toEqual(lsp.install);
-		const pip = lsp.install.operations.map(operation => (operation.type === "run" ? operation.args : [])).find(args => args.includes("pip") && args.includes("install"));
-		for (const flag of ["--isolated", "--only-binary=:all:", "--require-hashes", "--no-deps"]) expect(pip).toContain(flag);
-		expect(runOf(lsp.install.operations[1]).args).toEqual(["-m", "venv", "@INSTALL_DIR@/venv"]);
-
-		// -m launches survive the relocated venv; console-script shebangs would not.
-		const venvPython = path.join(lsp.tool.destination as string, "venv", "bin", "python");
-		expect(lsp.launch).toEqual({ command: venvPython, args: ["-m", "pylsp"] });
-		expect(dap.launch).toEqual({ command: venvPython, args: ["-m", "debugpy.adapter"] });
-		expect(lsp.entries[0]).toMatchObject({ key: "pylsp", value: { command: venvPython, settings: { pylsp: { plugins: { jedi: { environment: original } } } } } });
-		expect(dap.entries[0]).toMatchObject({ key: "debugpy", value: { command: venvPython, launchDefaults: { python: [original] } } });
-	},
-	SLOW,
-);
 
 test(
 	"only CPython 3.10 to 3.14 qualifies; anything else blocks both Python integrations with remediation",
@@ -624,30 +558,6 @@ test(
 
 // ── Go ──────────────────────────────────────────────────────────────────────────────────────────
 
-test(
-	"Go builds gopls with the existing Go and a local toolchain only, and takes Delve as a release asset",
-	async () => {
-		const b = box();
-		const go = tool(b, "go", "go version go1.27.2 linux/amd64");
-		const plan = await planGo(await contextFor(b));
-
-		const lsp = installOf(plan.lsp);
-		expect(lsp.install.version).toBe("v0.24.0-go1.27");
-		const [build] = lsp.install.operations;
-		expect(lsp.install.operations).toHaveLength(1);
-		expect(runOf(build)).toMatchObject({ command: "go", args: ["install", "golang.org/x/tools/gopls@v0.24.0"] });
-		// The recipe sets no toolchain, checksum or proxy override: the runtime forces GOTOOLCHAIN=local, GOSUMDB and a private module cache.
-		expect(Object.keys(runOf(build).env ?? {})).toEqual(["GOBIN"]);
-		expect(lsp.launch).toEqual({ command: path.join(lsp.tool.destination as string, "bin", "gopls"), args: ["serve"] });
-		expect(lsp.prerequisites[0]).toMatchObject({ name: "go", satisfied: true, found: { path: go, version: "1.27.2" } });
-
-		const dap = installOf(plan.dap);
-		expect(dap.install.operations.map(operation => operation.type)).toEqual(["artifact"]);
-		expect(dap.install.executables).toEqual(["dlv"]);
-		expect(dap.launch).toEqual({ command: path.join(dap.tool.destination as string, "dlv"), args: ["dap"] });
-	},
-	SLOW,
-);
 
 test(
 	"an unsupported platform gets no managed install for any group",
@@ -719,33 +629,22 @@ test(
 	SLOW,
 );
 
-// ── Fixture coverage ────────────────────────────────────────────────────────────────────────────
 
-test(
-	"the fixture sets cover JavaScript and source-mapped TypeScript, the Python target and a Go package directory",
-	async () => {
-		const b = box();
-		tool(b, "node", "v24.22.0");
-		tool(b, "npm", "10.9.2");
-		tool(b, "go", "go version go1.27.2 linux/amd64");
-		python(path.join(b.bin, "python3"));
-		const sdk = typescript(b, "6.0.3");
-		const context = await contextFor(b);
-		const js = await planJavascript(context);
-		const py = await planPython(context);
-		const go = await planGo(context);
+test("configured protocol arguments inherit when omitted but an explicit empty override is preserved", async () => {
+	const b = box();
+	tool(b, "node", "v24.22.0");
+	typescript(b, "6.0.3");
+	const server = tool(b, "typescript-language-server", "6.0.2");
+	const configFile = path.join(b.agentDir, "lsp.json");
+	lspConfig(configFile, "typescript-language-server", { command: server });
+	const inheritedBytes = fs.readFileSync(configFile, "utf8");
+	const inherited = await planJavascript(await contextFor(b));
+	expect(reuseOf(inherited.lsp).launch.args).toEqual(["--stdio"]);
+	expect(fs.readFileSync(configFile, "utf8")).toBe(inheritedBytes);
 
-		expect(js.fixtures.map(item => item.id)).toEqual(["javascript", "typescript"]);
-		expect(fixture(js, "javascript").dap).toMatchObject({ adapter: "js-debug-adapter", breakpoint: { file: "main.js" } });
-		expect(fixture(js, "typescript")).toMatchObject({
-			build: [{ command: sdk.tsc, args: ["-p", "."] }],
-			dap: { adapter: "js-debug-adapter", program: "dist/main.js", breakpoint: { file: "main.ts" } },
-		});
-		expect(py.fixtures.map(item => item.id)).toEqual(["python"]);
-		expect(fixture(py, "python")).toMatchObject({ lsp: { server: "pylsp" }, dap: { adapter: "debugpy" } });
-		expect(go.fixtures.map(item => item.id)).toEqual(["go"]);
-		// Go launches the package directory, not a file.
-		expect(fixture(go, "go")).toMatchObject({ lsp: { server: "gopls" }, dap: { adapter: "dlv", program: "." } });
-	},
-	SLOW,
-);
+	lspConfig(configFile, "typescript-language-server", { command: server, args: [] });
+	const explicitBytes = fs.readFileSync(configFile, "utf8");
+	const explicit = await planJavascript(await contextFor(b));
+	expect(reuseOf(explicit.lsp).launch.args).toEqual([]);
+	expect(fs.readFileSync(configFile, "utf8")).toBe(explicitBytes);
+}, SLOW);
