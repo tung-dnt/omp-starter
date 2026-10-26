@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { effectiveEntry } from "./config";
-import { errorMessage, INSTALL_MANIFEST_FILE, isExecutableFile, isRecord, RuntimeError, sha256Hex } from "./runtime";
+import { errorMessage, RuntimeError, sha256Hex } from "./runtime";
 import type {
 	Artifact,
 	BlockedPlan,
@@ -217,6 +217,8 @@ interface SdkSpec {
 	readonly args: readonly string[];
 	readonly accepts: (found: Version) => boolean;
 	readonly remediation: string;
+	/** Look in the project's own bin directories first (for example `node_modules/.bin`). */
+	readonly projectLocal?: boolean;
 }
 
 interface Sdk {
@@ -224,6 +226,8 @@ interface Sdk {
 	readonly path?: string;
 	/** Present whenever the executable ran, including when it is too old; the caller classifies it. */
 	readonly version?: Version;
+	/** The executable lives in the user's project (and was approved to run). */
+	readonly projectLocal?: boolean;
 }
 
 const NODE_SDK: SdkSpec = {
@@ -246,10 +250,11 @@ const NPM_SDK: SdkSpec = {
 
 const TSC_SDK: SdkSpec = {
 	name: "typescript",
-	requirement: "an existing TypeScript 6 or 7 SDK (`tsc` on PATH, outside your project)",
+	requirement: "an existing TypeScript 6 or 7 SDK (`tsc` on PATH, or an approved project-local one)",
 	names: ["tsc"],
 	args: ["--version"],
 	accepts: found => found.major >= 6,
+	projectLocal: true,
 	remediation: "Install TypeScript 6 or 7 yourself (for example `npm install -g typescript@6`); this tool never installs a TypeScript compiler.",
 };
 
@@ -263,39 +268,41 @@ const GO_SDK: SdkSpec = {
 };
 
 /**
- * First executable on PATH that runs and reports a compatible version. A PATH entry inside the project is not an SDK
- * for user-level setup, so it is skipped rather than executed.
+ * First executable that runs and reports a compatible version. With `projectLocal` the project's own bin directories
+ * come first (as in omp), but a project-local executable is only run once its exact path is approved; until then it is
+ * disclosed and the search continues on PATH. SDKs are never installed or modified either way.
  */
 async function detectSdk(ctx: Ctx, spec: SdkSpec): Promise<Sdk> {
-	let tooOld: { path: string; version: Version } | undefined;
+	let tooOld: { path: string; version: Version; local: boolean } | undefined;
 	let failure: string | undefined;
-	let skipped: string | undefined;
+	let withheld: string | undefined;
 	const seen = new Set<string>();
 	for (const name of spec.names) {
-		const found = ctx.runtime.resolveExecutable(name);
-		if (found === undefined || seen.has(found.path)) continue;
-		seen.add(found.path);
-		if (found.origin === "project-local") {
-			skipped ??= found.path;
-			continue;
+		for (const projectLocal of spec.projectLocal === true ? [true, false] : [false]) {
+			const found = ctx.runtime.resolveExecutable(name, { projectLocal });
+			if (found === undefined || seen.has(found.path)) continue;
+			seen.add(found.path);
+			const local = found.origin === "project-local";
+			const probed = await probeVersion(ctx, found.path, spec.args, local);
+			if (!probed.ok) {
+				if (probed.reason === "unapproved") withheld ??= found.path;
+				else failure ??= `${found.path}: ${probed.detail}`;
+				continue;
+			}
+			if (spec.accepts(probed.version)) {
+				return {
+					prerequisite: { name: spec.name, requirement: spec.requirement, satisfied: true, found: { path: found.path, version: show(probed.version) } },
+					path: found.path,
+					version: probed.version,
+					projectLocal: local,
+				};
+			}
+			tooOld ??= { path: found.path, version: probed.version, local };
 		}
-		const probed = await probeVersion(ctx, found.path, spec.args, false);
-		if (!probed.ok) {
-			failure ??= `${found.path}: ${probed.detail}`;
-			continue;
-		}
-		if (spec.accepts(probed.version)) {
-			return {
-				prerequisite: { name: spec.name, requirement: spec.requirement, satisfied: true, found: { path: found.path, version: show(probed.version) } },
-				path: found.path,
-				version: probed.version,
-			};
-		}
-		tooOld ??= { path: found.path, version: probed.version };
 	}
 	const remediation = [
 		failure === undefined ? undefined : `A ${spec.name} was found but could not report its version (${failure}).`,
-		skipped === undefined ? undefined : `${skipped} is inside your project and was not used.`,
+		withheld === undefined ? undefined : `${withheld} is inside your project and was not run; approve that path to use it.`,
 		spec.remediation,
 	]
 		.filter((line): line is string => line !== undefined)
@@ -308,7 +315,7 @@ async function detectSdk(ctx: Ctx, spec: SdkSpec): Promise<Sdk> {
 			...(tooOld === undefined ? {} : { found: { path: tooOld.path, version: show(tooOld.version) } }),
 			remediation,
 		},
-		...(tooOld === undefined ? {} : { path: tooOld.path, version: tooOld.version }),
+		...(tooOld === undefined ? {} : { path: tooOld.path, version: tooOld.version, projectLocal: tooOld.local }),
 	};
 }
 
@@ -552,20 +559,12 @@ function readCommitted(file: string): string {
 	return fs.readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8");
 }
 
-/** A previously published install of this tool and version is reused without running anything; the runtime revalidates it on use. */
-function alreadyInstalled(destination: string, request: InstallRequest, dataFiles: readonly string[] = []): boolean {
-	try {
-		const manifest: unknown = JSON.parse(fs.readFileSync(path.join(destination, INSTALL_MANIFEST_FILE), "utf8"));
-		if (!isRecord(manifest) || manifest.tool !== request.tool || manifest.version !== request.version) return false;
-	} catch {
-		return false;
-	}
-	return (
-		(request.executables ?? []).every(file => isExecutableFile(path.join(destination, file))) && dataFiles.every(file => fs.existsSync(path.join(destination, file)))
-	);
-}
-
-function installOrReuse(
+/**
+ * Always an `InstallPlan`: `Runtime.install` is the one place that decides whether an identical published install can
+ * be reused (it revalidates the recipe digest, tool, version, platform and launch targets) and refuses a foreign or
+ * incomplete directory. Pre-checking the destination here would bypass that validation.
+ */
+function installPlan(
 	kind: IntegrationKind,
 	tool: ToolDescription,
 	request: InstallRequest,
@@ -573,23 +572,9 @@ function installOrReuse(
 	entries: readonly ConfigEntry[],
 	prerequisites: readonly Prerequisite[],
 	notes: readonly string[],
-	dataFiles: readonly string[] = [],
-): IntegrationPlan {
-	const destination = tool.destination as string;
-	if (alreadyInstalled(destination, request, dataFiles)) {
-		return {
-			status: "reuse",
-			kind,
-			tool,
-			prerequisites,
-			notes: [...notes, `${request.tool} ${request.version} is already installed at ${destination}.`],
-			launch,
-			source: "managed",
-			entries: [...entries],
-		};
-	}
-	const plan: InstallPlan = { status: "install", kind, tool, prerequisites, notes: [...notes], install: request, launch, entries: [...entries] };
-	return plan;
+): InstallPlan {
+	const reuseNote = `An identical existing install of ${request.tool} ${request.version} is validated and reused without reinstalling; a different or incomplete one is reported, never replaced.`;
+	return { status: "install", kind, tool, prerequisites, notes: [...notes, reuseNote], install: request, launch, entries: [...entries] };
 }
 
 // ── JavaScript / TypeScript ─────────────────────────────────────────────────────────────────────
@@ -615,7 +600,7 @@ function tsserverLibrary(tsc: string): string | undefined {
 	}
 }
 
-function tlsEntry(command: string, tsserverPath: string): ConfigEntry {
+function tlsEntry(command: string, tsserverPath: string | undefined): ConfigEntry {
 	return {
 		kind: "lsp",
 		key: TLS_SPEC.key,
@@ -624,8 +609,8 @@ function tlsEntry(command: string, tsserverPath: string): ConfigEntry {
 			args: [...TLS_SPEC.args],
 			fileTypes: [...JS_FILE_TYPES],
 			rootMarkers: [...JS_ROOT_MARKERS],
-			// `fallbackPath`, not `path`: a project's own TypeScript still wins when it has one.
-			initOptions: { ...TLS_INIT_OPTIONS, tsserver: { fallbackPath: tsserverPath } },
+			// `fallbackPath` (a typescript `lib` directory or tsserver.js, per the server docs), not `path`: a project's own TypeScript still wins.
+			initOptions: { ...TLS_INIT_OPTIONS, ...(tsserverPath === undefined ? {} : { tsserver: { fallbackPath: tsserverPath } }) },
 		},
 	};
 }
@@ -649,7 +634,7 @@ async function javascriptLsp(ctx: Ctx, node: Sdk, ts: Sdk): Promise<JsLsp> {
 	const server = TLS_SPEC.key;
 	if (ts.version === undefined || ts.version.major < 6) return { plan: blockedBy("lsp", tool, [ts.prerequisite], ts.prerequisite, notes), server };
 	if (ts.version.major >= 7) {
-		const found: Found = { source: "path", path: ts.path as string, version: ts.version, launch: { command: ts.path as string, args: [...TS_NATIVE_SPEC.args] } };
+		const found: Found = { source: ts.projectLocal === true ? "project-local" : "path", path: ts.path as string, version: ts.version, launch: { command: ts.path as string, args: [...TS_NATIVE_SPEC.args] } };
 		const nativeNotes = [...notes, "TypeScript 7 serves LSP natively (`tsc --lsp --stdio`): no language server and no compiler are installed."];
 		return { plan: reusePlan("lsp", "typescript-native (tsc --lsp)", found, [ts.prerequisite], nativeNotes, []), server: TS_NATIVE_SPEC.key };
 	}
@@ -657,8 +642,9 @@ async function javascriptLsp(ctx: Ctx, node: Sdk, ts: Sdk): Promise<JsLsp> {
 	// TypeScript 6: typescript-language-server 6.x drives the existing tsserver.
 	const prerequisites = [node.prerequisite, ts.prerequisite];
 	if (!node.prerequisite.satisfied) return { plan: blockedBy("lsp", tool, prerequisites, node.prerequisite, notes), server };
-	const library = tsserverLibrary(ts.path as string);
-	if (library === undefined) {
+	// An approved project-local TypeScript is used in place: the server finds the workspace's own tsserver, so no path is written to user config.
+	const library = ts.projectLocal === true ? undefined : tsserverLibrary(ts.path as string);
+	if (library === undefined && ts.projectLocal !== true) {
 		const detail = `Could not find lib/tsserver.js next to ${ts.path}. Use a regular npm installation of TypeScript 6 (for example \`npm install -g typescript@6\`).`;
 		return { plan: blocked("lsp", tool, prerequisites, "needs-sdk", detail, notes), server };
 	}
@@ -683,7 +669,7 @@ async function javascriptLsp(ctx: Ctx, node: Sdk, ts: Sdk): Promise<JsLsp> {
 	};
 	const destination = ctx.runtime.installDirectory(name, TLS_VERSION);
 	const command = path.join(destination, binary);
-	const plan = installOrReuse(
+	const plan = installPlan(
 		"lsp",
 		{ ...tool, destination },
 		request,
@@ -695,13 +681,27 @@ async function javascriptLsp(ctx: Ctx, node: Sdk, ts: Sdk): Promise<JsLsp> {
 	return { plan, server };
 }
 
-async function javascriptDap(ctx: Ctx, node: Sdk, compiler: string | undefined): Promise<IntegrationPlan> {
+/**
+ * JavaScript/TypeScript debugging is one integration with two required variants: plain JavaScript and source-mapped
+ * TypeScript. Without a runnable `tsc` the mapped variant cannot be exercised, so the integration is blocked instead of
+ * being allowed to look ready after JavaScript-only proof.
+ */
+async function javascriptDap(ctx: Ctx, node: Sdk, ts: Sdk, compiler: string | undefined): Promise<IntegrationPlan> {
 	const name = "vscode-js-debug";
 	const notes = ["js-debug accepts DAP clients on a short-lived loopback TCP port (127.0.0.1) for the length of a session; other users on a shared machine could reach it meanwhile."];
+	const mapped: Prerequisite = {
+		name: "typescript",
+		requirement: "an existing `tsc` (any version that runs) to compile the source-mapped TypeScript fixture",
+		satisfied: compiler !== undefined,
+		...(compiler === undefined || ts.version === undefined ? {} : { found: { path: compiler, version: show(ts.version) } }),
+		...(compiler === undefined ? { remediation: ts.prerequisite.remediation ?? TSC_SDK.remediation } : {}),
+	};
+	const prerequisites = [node.prerequisite, mapped];
 	if (compiler === undefined) {
-		notes.push("No TypeScript compiler (tsc) is available, so only plain JavaScript debugging is exercised; source-mapped TypeScript debugging is not verified.");
+		const tool = describeTool(name, `v${JS_DEBUG_VERSION}`, [JS_DEBUG_ARTIFACT.url, `sha256:${JS_DEBUG_ARTIFACT.sha256}`]);
+		const detail = `${mapped.requirement} is missing, so the required source-mapped TypeScript debug check cannot run and JavaScript/TypeScript debugging stays unverified. ${mapped.remediation ?? ""}`;
+		return blocked("dap", tool, prerequisites, "needs-sdk", detail, notes);
 	}
-	const prerequisites = [node.prerequisite];
 	const configured = await inspectConfigured(ctx, "dap", JS_DEBUG_SPEC);
 	const configuredResult = configuredPlan("dap", name, configured, prerequisites);
 	if (configuredResult !== undefined) return { ...configuredResult, notes: [...configuredResult.notes, ...notes] };
@@ -713,7 +713,7 @@ async function javascriptDap(ctx: Ctx, node: Sdk, compiler: string | undefined):
 	const destination = ctx.runtime.installDirectory(request.tool, request.version);
 	const server = path.join(destination, JS_DEBUG_SERVER);
 	const args = [server, "${port}", "127.0.0.1"];
-	return installOrReuse(
+	return installPlan(
 		"dap",
 		{ ...tool, destination },
 		request,
@@ -721,7 +721,6 @@ async function javascriptDap(ctx: Ctx, node: Sdk, compiler: string | undefined):
 		[{ kind: "dap", key: JS_DEBUG_SPEC.key, value: { command: node.path as string, args: [...args], connectMode: "tcp" } }],
 		prerequisites,
 		carried,
-		[JS_DEBUG_SERVER],
 	);
 }
 
@@ -729,10 +728,10 @@ export async function planJavascript(context: PlanContext, options: ManagedPlanO
 	const ctx = makeCtx(context, options);
 	const node = await detectSdk(ctx, NODE_SDK);
 	const ts = await detectSdk(ctx, TSC_SDK);
-	// Any `tsc` that runs can compile the fixture, even one too old for the language server.
+	// Any `tsc` that runs can compile the mapped fixture, even one too old for the language server.
 	const compiler = ts.version === undefined ? undefined : ts.path;
 	const lsp = await javascriptLsp(ctx, node, ts);
-	const dap = await javascriptDap(ctx, node, compiler);
+	const dap = await javascriptDap(ctx, node, ts, compiler);
 	return { language: "javascript", lsp: lsp.plan, dap, fixtures: javascriptFixtures(lsp.server, compiler), projectLocalExecutables: [...ctx.disclosed].sort() };
 }
 
@@ -931,7 +930,7 @@ async function pythonLsp(ctx: Ctx, interpreters: Interpreters): Promise<Integrat
 	const request = pythonInstallRequest(base);
 	const destination = ctx.runtime.installDirectory(request.tool, request.version);
 	const python = path.join(destination, "venv", "bin", "python");
-	return installOrReuse(
+	return installPlan(
 		"lsp",
 		{ ...tool, destination },
 		request,
@@ -974,7 +973,7 @@ async function pythonDap(ctx: Ctx, interpreters: Interpreters): Promise<Integrat
 	const request = pythonInstallRequest(base);
 	const destination = ctx.runtime.installDirectory(request.tool, request.version);
 	const python = path.join(destination, "venv", "bin", "python");
-	return installOrReuse(
+	return installPlan(
 		"dap",
 		{ ...tool, destination },
 		request,
@@ -1028,7 +1027,7 @@ async function goLsp(ctx: Ctx, go: Sdk): Promise<IntegrationPlan> {
 	};
 	const destination = ctx.runtime.installDirectory(request.tool, request.version);
 	const command = path.join(destination, "bin", "gopls");
-	return installOrReuse(
+	return installPlan(
 		"lsp",
 		{ ...tool, destination },
 		request,
@@ -1060,7 +1059,7 @@ async function goDap(ctx: Ctx, go: Sdk): Promise<IntegrationPlan> {
 	const request: InstallRequest = { tool: name, version: DELVE_VERSION, operations: [{ type: "artifact", artifact: asset }], executables: ["dlv"] };
 	const destination = ctx.runtime.installDirectory(request.tool, request.version);
 	const command = path.join(destination, "dlv");
-	return installOrReuse(
+	return installPlan(
 		"dap",
 		{ ...tool, destination },
 		request,
@@ -1113,7 +1112,6 @@ function javascriptFixtures(server: string, compiler: string | undefined): Fixtu
 		lsp: { server, file: "main.js", line: 8, symbol: "greet", definition: { file: "util.js", line: 1 } },
 		dap: { adapter: "js-debug-adapter", program: "main.js", breakpoint: { file: "main.js", line: 5 }, variable: { name: "answer", value: "42" } },
 	};
-	if (compiler === undefined) return [plain];
 	const tsconfig = {
 		compilerOptions: {
 			target: "ES2022",
@@ -1150,8 +1148,8 @@ function javascriptFixtures(server: string, compiler: string | undefined): Fixtu
 				),
 			},
 		],
-		// The existing SDK compiles the fixture; no TypeScript compiler is installed.
-		build: [{ label: "compile TypeScript with source maps", command: compiler, args: ["-p", "."] }],
+		// The existing SDK compiles the fixture; no TypeScript compiler is installed. Without one the DAP plan is blocked, so this is never run unresolved.
+		build: [{ label: "compile TypeScript with source maps", command: compiler ?? "tsc", args: ["-p", "."] }],
 		lsp: { server, file: "main.ts", line: 8, symbol: "greet", definition: { file: "util.ts", line: 1 } },
 		dap: { adapter: "js-debug-adapter", program: "dist/main.js", breakpoint: { file: "main.ts", line: 5 }, variable: { name: "answer", value: "42" } },
 	};
