@@ -2,7 +2,8 @@
 // there as project-manager notes. The file is per machine and never committed.
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { HOME, expandHome, type KbState, type SetupState } from "./state";
+import { primarySource } from "./kb-sources";
+import { expandHome, HOME, type KbSource, type SetupState } from "./state";
 
 export function agentSkillsConfigFile(): string {
 	const base = process.env.XDG_CONFIG_HOME || path.join(HOME, ".config");
@@ -20,7 +21,7 @@ function findVaultRoot(start: string): string | undefined {
 	}
 }
 
-function vaultOf(kb: KbState): string | undefined {
+function vaultOf(kb: KbSource): string | undefined {
 	if (kb.vault) return kb.vault;
 	for (const p of [kb.kbRef, ...(kb.kbPaths ?? [])]) {
 		const root = p && findVaultRoot(expandHome(p));
@@ -30,13 +31,13 @@ function vaultOf(kb: KbState): string | undefined {
 }
 
 /**
- * Writes `{"vault": <abs vault>}` into agent-skills' user config, merging into any existing keys.
- * Only writes when the content changes, and never deletes the file.
+ * Writes `{"vault": <abs vault>}` (the primary knowledge-base source's vault) into agent-skills'
+ * user config, merging into any existing keys. Only writes when the content changes, and never
+ * deletes the file.
  */
 export function syncAgentSkillsStore(state: SetupState): void {
-	const kb = state.kb;
-	if (kb?.status !== "done") return;
-	const vault = vaultOf(kb);
+	const source = primarySource(state.kb);
+	const vault = source && vaultOf(source);
 	if (!vault) return;
 
 	const file = agentSkillsConfigFile();

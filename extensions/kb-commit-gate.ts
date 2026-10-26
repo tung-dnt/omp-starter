@@ -1,9 +1,10 @@
-// Blocks agent `git commit` under the configured directory until a knowledge-base file was
-// written via write/edit in this session. `[skip-mem]` in the command bypasses it.
-// Configured by the setup wizard (`kb.gateDir` / `kb.kbPaths` in ~/.omp/agent/omp-starter.json).
-import * as fs from "node:fs";
+// Blocks agent `git commit` under a knowledge-base source's gate folder until that source's KB was
+// written in this session, via write/edit or kb_remember. `[skip-mem]` in the command bypasses it.
+// Configured by the setup wizard (`kb.sources[].gateDir` / `kbPaths` in ~/.omp/agent/omp-starter.json).
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { doneSources, inside, resolveKb, sourceOwning } from "./lib/kb-sources";
+import { kbWritten, markKbWritten, resetKbWritten } from "./lib/kb-write-flag";
 import { expandHome, readState } from "./lib/state";
 
 // `git [global opts] commit`, not commit-tree or "commit" as an argument of another subcommand.
@@ -17,18 +18,6 @@ const EDIT_TARGET =
 
 const unquote = (s: string) => (/^(["']).*\1$/.test(s) ? s.slice(1, -1) : s);
 const resolveFrom = (base: string, p: string) => path.resolve(base, expandHome(unquote(p.trim())));
-
-/** Existing path as written plus its symlink-resolved form, so either spelling matches. */
-function forms(p: string): string[] {
-	try {
-		const real = fs.realpathSync(p);
-		return real === p ? [p] : [p, real];
-	} catch {
-		return [p];
-	}
-}
-
-const within = (p: string, dir: string) => p === dir || p.startsWith(dir + path.sep);
 
 /** Paths a write/edit tool call targets, as written (not yet resolved). */
 function targetPaths(toolName: string, input: Record<string, unknown>): string[] {
@@ -49,46 +38,40 @@ function commitDir(command: string, match: RegExpExecArray, input: Record<string
 	return dir;
 }
 
-// Module-level: shared by the main session and its subagents, so a subagent's KB write
-// satisfies the gate for the parent's commit.
-let kbWritten = false;
-
 export default function kbCommitGate(pi: ExtensionAPI): void {
 	const reset = (ctx: { agent?: { kind: string } }) => {
-		if (ctx.agent?.kind !== "sub") kbWritten = false;
+		if (ctx.agent?.kind !== "sub") resetKbWritten();
 	};
 	pi.on("session_start", (_event, ctx) => reset(ctx));
 	pi.on("session_switch", (_event, ctx) => reset(ctx));
 
 	pi.on("tool_result", (event, ctx) => {
-		if (kbWritten || event.isError || !WRITE_TOOLS[event.toolName]) return;
+		if (event.isError || !WRITE_TOOLS[event.toolName]) return;
 		const kb = readState().kb;
-		if (!kb?.kbPaths) return;
-		const roots = kb.kbPaths.flatMap(p => forms(path.resolve(expandHome(p))));
-		kbWritten = targetPaths(event.toolName, (event.input ?? {}) as Record<string, unknown>).some(raw => {
+		for (const raw of targetPaths(event.toolName, (event.input ?? {}) as Record<string, unknown>)) {
 			const p = unquote(raw.trim());
-			// `vault://` addresses the Obsidian vault, which holds the knowledge base.
-			if (p.startsWith("vault://")) return true;
-			const abs = resolveFrom(ctx.cwd, p);
-			return forms(abs).some(a => roots.some(root => within(a, root)));
-		});
+			// `vault://` addresses the Obsidian vault, taken as the one serving this session's folder.
+			const source = p.startsWith("vault://") ? resolveKb(ctx.cwd, kb) : sourceOwning(resolveFrom(ctx.cwd, p), kb);
+			if (source) markKbWritten(source.kbRef);
+		}
 	});
 
 	pi.on("tool_call", (event, ctx) => {
-		if (event.toolName !== "bash" || kbWritten) return;
+		if (event.toolName !== "bash") return;
 		const command = String(event.input.command ?? "");
 		const match = GIT_COMMIT.exec(command);
 		if (!match || command.includes("[skip-mem]")) return;
-		const kb = readState().kb;
-		if (!kb?.gateDir || !kb.kbRef) return;
 		const dir = commitDir(command, match, event.input, ctx.cwd);
-		const gates = forms(path.resolve(expandHome(kb.gateDir)));
-		if (!forms(dir).some(d => gates.some(g => within(d, g)))) return;
+		// The deepest gate folder holding the commit decides which KB must have been written.
+		const source = doneSources(readState().kb)
+			.filter(s => s.gateDir && inside(dir, path.resolve(expandHome(s.gateDir))))
+			.sort((a, b) => b.gateDir!.length - a.gateDir!.length)[0];
+		if (!source || kbWritten(source.kbRef)) return;
 		return {
 			block: true,
 			reason:
-				`memory-before-code: commit blocked. Write/edit the relevant facts under ${kb.kbRef}/ ` +
-				"(e.g. _memory/ or projects/) with the write/edit tools first, " +
+				`memory-before-code: commit blocked. Write the relevant facts under ${source.kbRef}/ ` +
+				"(e.g. _memory/ or projects/) with kb_remember or the write/edit tools first, " +
 				"or add [skip-mem] to the commit message if the commit carries no new facts.",
 		};
 	});

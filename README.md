@@ -6,7 +6,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 |---|---|
 | **agent-skills** *(optional)* | Installs [tung-dnt/agent-skills](https://github.com/tung-dnt/agent-skills): engineering-workflow skills, agents and `/spec` `/plan` `/build` `/review` `/ship` commands. |
 | **Model routing** *(Claude-first)* | Saves `claude` and `codex` subscription presets without requiring a login. When the required Claude models are available, also routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels; otherwise keeps the current routing. Using a preset requires its provider login. |
-| **Knowledge base** | Uses an Obsidian vault as omp's knowledge base and long-term memory. Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that points sessions at the knowledge base, injects the part of the memory index that applies to the current repo, and optionally adds a commit gate. |
+| **Knowledge base** | Uses Obsidian vaults as omp's knowledge base and long-term memory, one per folder if you like (e.g. `~/work` and `~/personal`). Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that points sessions at the knowledge base, injects the part of the memory index that applies to the current repo, adds `kb_remember`/`kb_recall` memory tools, and optionally adds a commit gate. |
 | **Display language** *(optional)* | Sets the target language of the `/trans` command, which translates on demand between any languages while the agent keeps working in English. Installs Google's Antigravity CLI and signs it in to your Google AI Pro/Ultra plan. |
 | **Developer tools** *(optional)* | Sets up a language server (LSP) and a debugger (DAP) for JavaScript/TypeScript, Python, Go, Rust and C/C++ with the SDKs you already have. Offered on a brand-new install; existing installs run `/starter tools`. See [Language tooling](#language-tooling-starter-tools). |
 
@@ -72,11 +72,13 @@ Every Fable spawn counts toward a daily cap: `FABLE_ROUTER_DAILY_CAP`, default 5
 
 - **Vault:** chosen from Obsidian's own vault list, or any folder you type.
 - **Knowledge-base folder:** a folder inside the vault (default `KnowledgeBase`). It is created with a `_memory/MEMORY.md` holding an empty `## Global` section if missing.
-- **Space-free link:** omp's `@` imports stop at spaces, so a vault path containing spaces gets a `~/.omp-kb` symlink.
+- **Space-free link:** omp's `@` imports stop at spaces, so a vault path containing spaces gets a `~/.omp-kb` symlink (`~/.omp-kb-<vault>` when that name already points at another vault; existing links are never repointed).
 - **Always-loaded notes:** optional list of notes (relative paths) imported into every session, e.g. your coding standards.
 - **Scope:** every omp session (`~/.omp/agent/AGENTS.md`) or only sessions under one folder (`<folder>/AGENTS.md`). An existing file is backed up before it's replaced.
+- **Several knowledge bases:** rerunning `/starter kb` opens a menu to add or replace a knowledge base for another folder, remove one (its `AGENTS.md` is backed up and deleted only if you agree; the vault is never touched), or choose the primary one. Each session uses the knowledge base whose folder contains its working directory. Folders must not contain each other, since omp loads every enclosing `AGENTS.md` and two knowledge-base roots would mix; "every omp session" is only offered while it is the sole knowledge base. agent-skills stores tasks in the primary knowledge base's vault. State written by 0.13 or earlier is read as one primary knowledge base.
+- **Memory tools:** `kb_remember` saves a memory note to `_memory/<slug>.md` (nested `metadata:` frontmatter) and adds or updates its index line: under the `scope` you pass, else the section listing the current repo (a new `## <repo>` section if none does), else `## Global` outside a repo. `mode: "create"` refuses to overwrite an existing note; `mode: "update"` changes only the fields given and keeps other frontmatter keys. Index edits are serialized across sessions with a lock file in the temp folder and written atomically. `kb_recall` searches the notes' names, descriptions and bodies, optionally within one index section, and reports notes iCloud has evicted. Both use the knowledge base serving the session's folder and fail with a clear message outside every configured folder. They are discoverable tools (listed under `xd://`), so they add nothing to the prompt until used.
 - **Memory:** the `kb-memory` extension injects the memory index `_memory/MEMORY.md` (one line per note) into each session, scoped to the current repo. `## <Scope>` headings split the index; a section applies to the repos listed in a `<!-- repos: a, b -->` comment under its heading, or to the repo named by the heading itself. `## Global` (and any lines before the first heading) always loads; the other sections are listed by name with their note counts. A section with an empty `<!-- repos: -->` comment never loads, which suits long per-ticket lists. The repo name comes from the `origin` remote, so worktrees and suffixed clones match too. The index is read once per session. Subagents get it only when they write code (`task`, `task-builder`, `test-engineer`); read-only ones such as `scout` and reviewers skip it. The generated `AGENTS.md` tells the agent how to save new memories as notes in `_memory/` and which section to file them under.
-- **Commit gate (optional):** blocks the agent's `git commit` under the chosen folder until it has written a knowledge-base note in that session. `[skip-mem]` in the commit message bypasses it. Only the `commit` subcommand is gated: `git commit-tree` or `git log --grep commit` pass. The gate checks the folder the commit really runs in (bash `cwd`, a leading `cd <dir> &&`, `git -C <dir>`). A KB write counts only when a `write`/`edit` target is inside the knowledge base (symlinked or real path) or a `vault://` path; mentioning the KB path in a file's content doesn't count. The folder must be an existing absolute path such as `~/projects`. Cancelling a step while rerunning `/starter` keeps that step's saved result.
+- **Commit gate (optional):** blocks the agent's `git commit` under the chosen folder until it has written a note in that folder's knowledge base in that session. `[skip-mem]` in the commit message bypasses it. Only the `commit` subcommand is gated: `git commit-tree` or `git log --grep commit` pass. The gate checks the folder the commit really runs in (bash `cwd`, a leading `cd <dir> &&`, `git -C <dir>`). A KB write counts when `kb_remember` succeeds, or when a `write`/`edit` target is inside that knowledge base (symlinked or real path) or a `vault://` path; mentioning the KB path in a file's content doesn't count, and a note written to another folder's knowledge base doesn't either. The folder must be an existing absolute path such as `~/projects`. Cancelling a step while rerunning `/starter` keeps that step's saved result.
 
 The plugin also ships a `knowledge-base` skill for searching and creating notes in the knowledge base.
 
@@ -133,7 +135,7 @@ It needs no provider login, never installs or changes an SDK, and never changes 
 ## Commands
 
 - `/starter`: rerun every step.
-- `/starter skills`, `/starter models`, `/starter kb`, `/starter language`, `/starter tools`: rerun one step.
+- `/starter skills`, `/starter models`, `/starter kb`, `/starter language`, `/starter tools`: rerun one step (`/starter kb` manages several knowledge bases once one exists).
 - `/starter voice`: change only the voice (and offer `PERSONALITY.md` if missing).
 - `/trans [--to <language>] [text | file | local://name.md]`: translate on demand (see above).
 
@@ -169,6 +171,12 @@ A fifth always-on rule (`rules/say-it-in-chat.md`): herdr web's Chat view collap
 The rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Release notes
+
+### 0.14.0 — 2026-10-27
+
+- **Added:** `kb_remember` and `kb_recall` tools to save and search memory notes without hand-editing `MEMORY.md`.
+- **Added:** one knowledge base per folder. `/starter kb` adds, replaces or removes knowledge bases and picks the primary one for agent-skills; the memory index, tools and commit gate follow the session's folder. Existing single-knowledge-base installs keep working unchanged.
+- **Changed:** the generated `AGENTS.md` documents nested `metadata:` frontmatter for memory notes and points at `kb_remember`. Rerun `/starter kb` to regenerate it, or edit yours by hand.
 
 ### 0.13.0 — 2026-10-26
 

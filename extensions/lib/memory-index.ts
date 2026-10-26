@@ -18,19 +18,21 @@ export const MEMORY_BLOCK_HEADER = "# Memory index";
 const HEADING = /^## (.+)$/;
 const REPOS_COMMENT = /<!--\s*repos:([\s\S]*?)-->/;
 
-const isGlobal = (name: string) => name.toLowerCase() === "global";
+export const isGlobal = (name: string) => name.toLowerCase() === "global";
+
+/** Repos a section applies to (its `<!-- repos: … -->` list, else the heading) and its text without that comment. */
+export function sectionRepos(name: string, text: string): { repos: string[]; text: string } {
+	const match = REPOS_COMMENT.exec(text);
+	if (!match) return { repos: [name.toLowerCase()], text };
+	const repos = match[1]
+		.split(",")
+		.map(s => s.trim().toLowerCase())
+		.filter(Boolean);
+	return { repos, text: text.slice(0, match.index) + text.slice(match.index + match[0].length) };
+}
 
 function toSection(name: string, raw: string[]): MemorySection {
-	let text = raw.join("\n");
-	let repos = [name.toLowerCase()];
-	const match = REPOS_COMMENT.exec(text);
-	if (match) {
-		repos = match[1]
-			.split(",")
-			.map(s => s.trim().toLowerCase())
-			.filter(Boolean);
-		text = text.slice(0, match.index) + text.slice(match.index + match[0].length);
-	}
+	const { repos, text } = sectionRepos(name, raw.join("\n"));
 	const body = text.trim();
 	const lines = body ? body.split("\n").filter(l => l.startsWith("- [")).length : 0;
 	return { name, repos, body, lines };

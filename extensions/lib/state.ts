@@ -5,17 +5,25 @@ import * as path from "node:path";
 import type { VoiceId } from "./voices";
 import { LANGUAGE_IDS, type LanguageId, type ToolResult, type ToolStatus } from "./tooling/types";
 
-export interface KbState {
-	status: "done" | "skipped";
-	/** Absolute vault root (the space-free link when one was made). Absent in older state. */
+/** One knowledge base and the folder it serves. */
+export interface KbSource {
+	/** Absolute vault root (the space-free link when one was made). */
 	vault?: string;
 	/** Space-free path the agent uses, e.g. `~/.omp-kb/KnowledgeBase`. */
-	kbRef?: string;
-	/** Absolute paths that identify a KB write (symlink form and resolved form). */
-	kbPaths?: string[];
-	contextFile?: string;
+	kbRef: string;
+	/** Absolute paths that identify a write into this KB (symlink form and resolved form). */
+	kbPaths: string[];
+	/** AGENTS.md written for this source. Its folder is the source's scope; `~/.omp/agent` means every session. */
+	contextFile: string;
 	/** Commit gate applies to `git commit` run at or below this directory; absent = gate off. */
 	gateDir?: string;
+	/** The source whose vault agent-skills uses. Exactly one source is primary. */
+	primary?: boolean;
+}
+
+export interface KbState {
+	status: "done" | "skipped";
+	sources?: KbSource[];
 }
 
 export interface LanguageState {
@@ -62,12 +70,42 @@ export function tildify(p: string): string {
 	return p === HOME ? "~" : p.startsWith(HOME + path.sep) ? `~/${p.slice(HOME.length + 1)}` : p;
 }
 
+/** State written before multi-source knowledge bases (≤ 0.13): one source's fields directly on `kb`. */
+interface LegacyKb {
+	status: "done" | "skipped";
+	vault?: string;
+	kbRef?: string;
+	kbPaths?: string[];
+	contextFile?: string;
+	gateDir?: string;
+	sources?: KbSource[];
+}
+
+/** Converts a pre-0.14 `kb` into one primary source; newer state passes through. */
+export function migrateKb(kb: LegacyKb | undefined): KbState | undefined {
+	if (!kb || kb.sources || !kb.kbRef || !kb.contextFile) {
+		return kb && { status: kb.status, ...(kb.sources ? { sources: kb.sources } : {}) };
+	}
+	const source: KbSource = {
+		...(kb.vault ? { vault: kb.vault } : {}),
+		kbRef: kb.kbRef,
+		kbPaths: kb.kbPaths ?? [],
+		contextFile: kb.contextFile,
+		...(kb.gateDir ? { gateDir: kb.gateDir } : {}),
+		primary: true,
+	};
+	return { status: kb.status, sources: [source] };
+}
+
 export function readState(file = STATE_FILE): SetupState {
+	let state: SetupState;
 	try {
-		return JSON.parse(fs.readFileSync(file, "utf8")) as SetupState;
+		state = JSON.parse(fs.readFileSync(file, "utf8")) as SetupState;
 	} catch {
 		return {};
 	}
+	if (state.kb) state.kb = migrateKb(state.kb as LegacyKb);
+	return state;
 }
 
 export function writeState(next: SetupState, file = STATE_FILE): void {
