@@ -5,7 +5,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 | Step | What it does |
 |---|---|
 | **agent-skills** *(optional)* | Installs [tung-dnt/agent-skills](https://github.com/tung-dnt/agent-skills): engineering-workflow skills, agents and `/spec` `/plan` `/build` `/review` `/ship` commands. |
-| **Model routing** *(Claude-first)* | Routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels. Saves `claude` and `codex` subscription presets. Setup needs a Claude login; switching to Codex needs a separate Codex login. |
+| **Model routing** *(Claude-first)* | Saves `claude` and `codex` subscription presets without requiring a login. When the required Claude models are available, also routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels; otherwise keeps the current routing. Using a preset requires its provider login. |
 | **Knowledge base** | Uses an Obsidian vault as omp's knowledge base and long-term memory. Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that points sessions at the knowledge base, injects the part of the memory index that applies to the current repo, and optionally adds a commit gate. |
 | **Display language** *(optional)* | Sets the target language of the `/trans` command, which translates on demand between any languages while the agent keeps working in English. Installs Google's Antigravity CLI and signs it in to your Google AI Pro/Ultra plan. |
 
@@ -23,7 +23,7 @@ Before the knowledge-base step, open Obsidian once so your vault is registered (
 
 ## Model routing
 
-Applied with `omp config set` after you confirm. Setup still requires Claude and activates Claude routing. Role assignments, named presets and per-agent overrides are merged into your existing settings; same-named entries are replaced.
+Applied with `omp config set` after you confirm. Setup saves both subscription presets regardless of login status. It applies Claude routing only when the required Claude models are available; otherwise all active routing settings stay unchanged. Role assignments, named presets and per-agent overrides are merged into your existing settings; same-named entries are replaced.
 
 | Work | Model | Effort |
 |---|---|---|
@@ -39,7 +39,7 @@ The idea: spend effort on the plan, since it runs once and feeds every coding sl
 
 ### Subscription presets
 
-The model step saves two complete role setups:
+The model step saves two complete role setups, even when neither provider is logged in:
 
 | Preset | Main session | Planning / deep consultation | Helpers |
 |---|---|---|---|
@@ -135,6 +135,10 @@ A fifth always-on rule (`rules/say-it-in-chat.md`): herdr web's Chat view collap
 The rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Release notes
+
+### 0.12.1 — 2026-10-26
+
+- **Fixed:** `/starter models` saves both subscription presets without requiring a Claude or Codex login. Clients without the required Claude models keep their current routing. Existing installs must upgrade and rerun `/starter models`; using a preset still requires its provider login.
 
 ### 0.12.0 — 2026-10-22
 

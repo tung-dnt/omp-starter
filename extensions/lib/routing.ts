@@ -92,23 +92,19 @@ async function omp(exec: Exec, args: string[]): Promise<string> {
 }
 
 export async function setupModels(ui: WizardUi, exec: Exec): Promise<"done" | "skipped"> {
+	const ok = await ui.confirm(
+		"Subscription presets and model routing",
+		"Save `claude` and `codex` subscription presets for /modelpreset switch, even without a login. " +
+			"If the required Claude models are available, also apply Claude routing: Opus for the main session " +
+			"and planning, Sonnet for coding and exploration, Haiku for mechanical work, and Fable for deep consultation. " +
+			"Otherwise, keep your current routing. Existing roles and presets with the same names are replaced; others are kept.",
+	);
+	if (!ok) return "skipped";
 	const listed = JSON.parse(await omp(exec, ["models", "anthropic", "--json"])) as { models: { selector: string }[] };
 	const available = new Set(listed.models.map(m => m.selector));
 	const missing = Object.values(MODELS).filter(m => !available.has(m));
-	if (missing.length > 0) {
-		ui.notify(`Model routing skipped: needs a Claude login with ${missing.join(", ")} (run /login).`, "warning");
-		return "skipped";
-	}
-	const ok = await ui.confirm(
-		"Model routing",
-		"Route work by model tier? Main session: Opus (auto effort). Planning and review: Opus at high effort. " +
-			"Coding subagents: Sonnet at high effort, raised to max for risky slices. Exploration: Sonnet. " +
-			"Mechanical work and classifiers: Haiku. Fable: only for the `deep` agent and the capped auto-router. " +
-			"Save `claude` and `codex` subscription presets for /modelpreset switch; Claude stays active. " +
-			"Existing roles and presets with the same names are replaced; others are kept.",
-	);
-	if (!ok) return "skipped";
 	for (const { key, value, merge } of PROFILE) {
+		if (missing.length > 0 && key !== "modelPresets") continue;
 		let next = value;
 		if (merge) {
 			const current = JSON.parse((await omp(exec, ["config", "get", key])).trim() || "{}") as Record<string, unknown>;
@@ -116,6 +112,10 @@ export async function setupModels(ui: WizardUi, exec: Exec): Promise<"done" | "s
 		}
 		await omp(exec, ["config", "set", key, typeof next === "string" ? next : JSON.stringify(next)]);
 	}
-	ui.notify("Claude routing applied; claude/codex presets saved. Restart open sessions, then use /modelpreset switch codex or claude.", "info");
+	if (missing.length > 0) {
+		ui.notify("Claude/codex presets saved; current routing unchanged. Log in before using a preset's models.", "info");
+	} else {
+		ui.notify("Claude routing applied; claude/codex presets saved. Restart open sessions, then use /modelpreset switch codex or claude.", "info");
+	}
 	return "done";
 }

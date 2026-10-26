@@ -1,6 +1,6 @@
 {
   "name": "omp-starter",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "private": true,
   "description": "First-run setup for omp: Claude-first routing with Codex/Claude subscription presets and capped Fable escalation, an Obsidian vault as knowledge base + memory, optional agent-skills, and an on-demand /trans command (any language) on Google's Antigravity CLI",
   "license": "MIT",

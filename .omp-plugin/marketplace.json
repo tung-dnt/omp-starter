@@ -6,7 +6,7 @@
     {
       "name": "starter",
       "description": "First-run wizard: Claude-first routing with Codex/Claude subscription presets and capped Fable escalation, Obsidian vault as knowledge base + memory, optional agent-skills, on-demand /trans (any language) via Antigravity CLI",
-      "version": "0.12.0",
+      "version": "0.12.1",
       "license": "MIT",
       "source": "./"
     }
