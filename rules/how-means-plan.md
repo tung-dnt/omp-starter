@@ -1,12 +1,12 @@
 ---
-description: A request phrased as "how …" means plan and discuss; never build, edit, or run state-changing commands.
+description: A request phrased as "how …" (or Vietnamese "làm sao …", "như thế nào …") means plan and discuss; never build, edit, or run state-changing commands.
 alwaysApply: true
 agents: main
 ---
 
 # "How" means plan, don't build
 
-When the user's request asks **how** ("how do I…", "how to…", "how should we…", "how can we fix…", "how does … work"), treat it as a planning and discussion request, not an implementation request.
+When the user's request asks **how** ("how do I…", "how to…", "how should we…", "how can we fix…", "how does … work", or in Vietnamese "làm sao…", "làm thế nào…", "… như thế nào", "… thế nào", "cách nào…", "cách để…"), treat it as a planning and discussion request, not an implementation request.
 
 - Allowed: read-only investigation (reading code, grep/glob, LSP, docs, web search) and measurements whose output goes outside the repo (e.g. a build or bundle analysis written to `/tmp`).
 - Not allowed: editing or creating files in the repo, installing dependencies, running codegen/formatters that rewrite files, migrations, commits, pushes, or any deploy/remote mutation.

@@ -16,7 +16,7 @@ The knowledge base root is the `KB root` path in your context (written by omp-st
 - Follow the vault's existing naming and folder structure. Look at neighbouring notes before creating one.
 - Memory notes live in `_memory/` and are indexed in `_memory/MEMORY.md`. Save them with `kb_remember` and search them with `kb_recall` (both pick the knowledge base serving the current folder); see the memory rules in your context.
 
-Task notes under the vault's projects folder (e.g. `Projects/<repo>/stories/…/_tasks/*.md`) belong to agent-skills' `work-state.sh`. Don't hand-edit their frontmatter; change status and fields through `work-state.sh` commands.
+Task notes under the vault's projects folder (e.g. `Projects/<repo>/stories/…/_tasks/*.md`) belong to agent-skills' `work_state` tool. Don't hand-edit their frontmatter; change status and fields through `work_state` commands.
 
 ## Workflows
 

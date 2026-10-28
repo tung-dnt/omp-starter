@@ -149,9 +149,9 @@ It needs no provider login, never installs or changes an SDK, and never changes 
 
 Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p` or subagents.
 
-## agent-skills `/resume` hint
+## agent-skills
 
-If agent-skills is installed, the plugin also ports its Claude Code SessionStart hook: when a session starts in a repository with claimed tasks, the agent is told to run `/resume`.
+agent-skills (0.6.23 and later) registers its own omp extension: the `work_state` tool its workflows run on, and the `/resume` hint shown when a session starts in a repository with claimed tasks. This plugin no longer ships that hint.
 
 ### Task tracking
 
@@ -168,17 +168,28 @@ Two optional keys in a repo's committed `.agent-skills.json` override this:
 
 The plugin ships an always-on rule (`rules/ask-user.md`): the agent puts every real decision to you (gates, grill rounds, design and approach choices, scope) instead of deciding itself, and every question goes through omp's `ask` dialog: one `ask` call per turn, where a grill, interview or approval round is one call holding all the round's independent questions, each with 2–5 multiple-choice answers and a recommended pick. Each dialog carries its own context: what is being decided, why it matters now, and what it hinges on, and every option lists how it works, pros, cons, effort, and reversibility (Proceed/Continue confirmations get one-line descriptions; interview-me rounds use your guess as the recommended pick), with a preview for anything longer. That includes approval gates and setup confirmations; the agent never asks in plain prose.
 
-A second always-on rule (`rules/how-means-plan.md`): a request phrased as "how …" is treated as planning and discussion. The agent investigates read-only, presents options, trade-offs and a recommendation, and asks before building anything.
+A second always-on rule (`rules/how-means-plan.md`): a request phrased as "how …" (or in Vietnamese "làm sao …", "như thế nào …", "cách nào …") is treated as planning and discussion. The agent investigates read-only, presents options, trade-offs and a recommendation, and asks before building anything.
 
-A third always-on rule (`rules/lld-before-build.md`): before implementing any task from a written task breakdown, the agent writes that task's low-level design note and gets your approval in plan mode, one approval per note by default (`/build auto` and the approval gate's "Don't stop" batch mode show every note in one plan). At the end of each planning phase (spec, design, plan, task design) the agent asks you to turn plan mode on (Alt+Shift+P; omp doesn't let the agent do it), submits the result to omp's Plan Review, and continues only after you approve it there; `refine` sends it back with your feedback. Approved tasks are built only as designed (through agent-skills' `task-builder` when installed), and run in parallel only when their notes show no shared files or generated outputs. Ad-hoc fixes, debugging and reviews are unaffected.
+A third always-on rule (`rules/lld-before-build.md`): before implementing any task from a written task breakdown, the agent writes that task's low-level design note and gets your explicit approval through agent-skills' approval gate, one approval per note by default (`/build auto` and the approval gate's "Don't stop" batch mode show every note and ask once for all of them). Large stories (more than about five tasks, or several repos) use slice gates: every task keeps its own note, and one approval covers a repo-sized slice, after which each task in it is recorded as approved, so `work_state ready` and `task-builder` accept them. At the end of each planning phase (spec, design, plan, task design), the agent shows the result, settled decisions, and artifact path in chat, including a task's design verbatim, then asks for approval through the `ask` dialog in the same turn. No plan-mode toggle or Plan Review submission is required. Proceed authorizes the next step and the agent starts it in the same turn, without asking again; Revise updates the result and asks again. Approved tasks are built only as designed (through agent-skills' `task-builder` when installed), and run in parallel only when their notes show no shared files or generated outputs. Ad-hoc fixes, debugging and reviews are unaffected.
 
-A fourth always-on rule (`rules/ticket-tracking.md`): work tied to an agent-skills task note, or a vault or repo task file, updates its status as the work changes state, and records every final decision (approved designs, your `ask` answers, deviations, the outcome with its evidence) there when it is made. agent-skills task notes are updated through `work-state.sh` (`set` for status, `log` for decisions, with "waiting on approval" as a log line); one writer per ticket. Issue trackers such as Jira are never commented on unless you ask, and any status transition is asked first.
+A fourth always-on rule (`rules/ticket-tracking.md`): work tied to an agent-skills task note, or a vault or repo task file, updates its status as the work changes state, and records every final decision (approved designs, your `ask` answers, deviations, the outcome with its evidence) there when it is made. agent-skills task notes are updated through `work_state` (`set` for status, `log` for decisions, with "waiting on approval" as a log line); one writer per ticket. Issue trackers such as Jira are never commented on unless you ask, and any status transition is asked first.
 
 A fifth always-on rule (`rules/say-it-in-chat.md`): herdr web's Chat view collapses tool calls to their one-line intent, so the agent says in chat what a subagent will do (task, files, limits like "no push") and puts paths, branches and results in its prose, not only in tool arguments.
+
+A sixth always-on rule (`rules/agent-sessions.md`): when the agent coordinates other agent sessions (herdr panes, terminals running omp or Claude), it never answers their `ask` dialogs or sends keystrokes to them; only you answer dialogs. It doesn't wait on a session with no event that will end the wait: it stops and says in chat what is blocked. Progress is reported from verified output, never from a session showing `running`, and building goes to subagents rather than extra top-level sessions.
 
 The rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Release notes
+
+### 0.16.0 — 2026-10-28
+
+- **Removed:** the agent-skills `/resume` hint extension (`extensions/agent-skills-hint.ts`). agent-skills 0.6.23 registers the hint itself, with the `work_state` tool that replaced its `work-state.sh`. Upgrade both plugins together.
+- **Changed:** show planning results in the current chat and request explicit approval through `ask`, without requiring plan mode. Per-note approvals, batch gates, and re-approval after changes remain required.
+- **Changed:** large stories (more than about five tasks or several repos) are approved per repo-sized slice, not per task, through agent-skills' slice gates: each task keeps its own note and is recorded as approved, so the build tooling accepts it. An approval is acted on in the same turn and never re-asked.
+- **Changed:** `rules/how-means-plan.md` also recognises Vietnamese "how" phrasing ("làm sao", "như thế nào", "cách nào").
+- **Changed:** `rules/ask-user.md` keeps waits short: facts are looked up before a phase's first question, every independent question goes into one dialog, and nothing but the lookups the answers require runs between rounds.
+- **Added:** `rules/agent-sessions.md`: never answer another session's dialog or type into it, report a stall in chat instead of waiting, and report progress only from verified output.
 
 ### 0.15.0 — 2026-10-26
 

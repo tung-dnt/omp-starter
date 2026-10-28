@@ -11,6 +11,7 @@ agents: main
 Every question goes through the `ask` tool:
 
 - One `ask` call per turn. A grill, interview or approval round is one call whose `questions[]` holds the round's independent questions; a single decision stays one question. Never a question asked only in prose.
+- **Keep the user's waits short.** Before a phase's first question, look up every fact it needs in one parallel pass. Then ask every question that doesn't depend on an unanswered one in the same dialog: never one question per dialog while others are already askable. Between rounds, only record the answers and do the lookups they made necessary, then ask the next round at once.
 - 2–5 multiple-choice options. Never add "Other": the UI adds one. `multi: true` only when the choices really aren't mutually exclusive.
 
 ## The dialog must stand on its own
