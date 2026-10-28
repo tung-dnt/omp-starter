@@ -182,6 +182,10 @@ The rules load in the main session only, except `lld-before-build` and `ticket-t
 
 ## Release notes
 
+### 0.16.1 — 2026-10-28
+
+- **Changed:** `rules/ask-user.md` lets the agent settle the mechanical choices that the Jev delegation rule hands to Jev (scope, request type, target repo, delegation) without an `ask`.
+
 ### 0.16.0 — 2026-10-28
 
 - **Removed:** the agent-skills `/resume` hint extension (`extensions/agent-skills-hint.ts`). agent-skills 0.6.23 registers the hint itself, with the `work_state` tool that replaced its `work-state.sh`. Upgrade both plugins together.

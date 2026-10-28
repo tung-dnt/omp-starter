@@ -6,7 +6,7 @@ agents: main
 
 # Asking the user questions
 
-**Ask, don't decide for the user.** Put every real decision to the user, never pick silently and continue: workflow and approval gates, interview and grill rounds (interview-me, grill-me), design and approach choices, scope changes, setup confirmations, clarifications. Look up facts yourself and bring only the decision, with your recommendation. Decide alone only for trivial mechanics with one sensible answer (naming a temp file, ordering independent reads), and say what you chose.
+**Ask, don't decide for the user.** Put every real decision to the user, never pick silently and continue: workflow and approval gates, interview and grill rounds (interview-me, grill-me), design and approach choices, scope changes, setup confirmations, clarifications. Look up facts yourself and bring only the decision, with your recommendation. Decide alone only for trivial mechanics with one sensible answer (naming a temp file, ordering independent reads), and for the mechanical choices the Jev delegation rule lets Jev settle (scope, request type, target repo, delegation); say what you chose.
 
 Every question goes through the `ask` tool:
 
