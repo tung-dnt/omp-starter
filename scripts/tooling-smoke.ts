@@ -424,7 +424,7 @@ async function runChild(report: ChildReport, root: string, mode: Mode): Promise<
 
 	// Seeds that must survive: unrelated state keys and user-owned LSP/DAP entries.
 	fs.mkdirSync(agentDir, { recursive: true });
-	report.seeds.state = { agentSkills: "skipped", models: "done", language: { status: "done", name: "Vietnamese" }, "x-smoke-custom": { keep: [1, 2, 3], nested: { a: true } } };
+	report.seeds.state = { agentSkills: "skipped", models: "done", "x-smoke-custom": { keep: [1, 2, 3], nested: { a: true } } };
 	report.seeds.lsp = { command: "/usr/bin/true", fileTypes: [".smoke"], rootMarkers: ["smoke.marker"] };
 	report.seeds.dap = { command: "/usr/bin/true", args: [], fileTypes: [".smoke"] };
 	fs.writeFileSync(state.STATE_FILE, `${JSON.stringify(report.seeds.state, null, 2)}\n`);

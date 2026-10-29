@@ -6,19 +6,9 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { syncAgentSkillsStore } from "./lib/agent-skills-store";
 import { setupModels } from "./lib/routing";
-import { AGY, installAgy, loginAgy } from "./lib/agy";
-import { languageName, PRESETS } from "./lib/languages";
 import { EVERY_SESSION_DIR, doneSources, overlapProblem, servesEverySession, sourceFolder } from "./lib/kb-sources";
-import { HOME, STATE_FILE, expandHome, readState, readTooling, saveTooling, tildify, updateState, type KbSource, type KbState, type LanguageState, type SetupState } from "./lib/state";
+import { HOME, STATE_FILE, expandHome, readState, readTooling, saveTooling, tildify, updateState, type KbSource, type KbState, type SetupState } from "./lib/state";
 import type { ToolsUi } from "./lib/tooling";
-import {
-	PERSONALITY_FILE,
-	PERSONALITY_TEMPLATE,
-	VOICE_FILE,
-	VOICE_FILE_TEMPLATE,
-	voicesFor,
-	type VoiceId,
-} from "./lib/voices";
 
 export interface WizardUi {
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -311,69 +301,12 @@ export async function setupKnowledgeBase(ui: WizardUi, current: KbState | undefi
 	return sources.length ? { status: "done", sources } : { status: "skipped" };
 }
 
-// ── Display language ────────────────────────────────────────────────────────
-
-const ENGLISH = "English (no translation)";
-const OTHER_LANGUAGE = "Other language…";
-
-/** Picks the /trans display language, then installs and signs in Google's Antigravity CLI that translates it. */
-export async function setupDisplayLanguage(ui: WizardUi): Promise<LanguageState> {
-	const choice = await ui.select("Display language for /trans", [ENGLISH, ...PRESETS.map(p => p.label), OTHER_LANGUAGE]);
-	if (!choice) return { status: "skipped" };
-	if (choice === ENGLISH) return { status: "done" };
-	const name =
-		choice === OTHER_LANGUAGE
-			? (await ui.input("Language name in English", "e.g. Indonesian, German, Brazilian Portuguese"))?.trim()
-			: PRESETS.find(p => p.label === choice)?.english;
-	if (!name) return { status: "skipped" };
-
-	if (!fs.existsSync(AGY)) {
-		const ok = await ui.confirm(
-			"Antigravity CLI",
-			"Translation runs on your Google AI Pro/Ultra plan through Google's Antigravity CLI (agy). Install it now? Google's installer puts it in ~/.local/bin and adds that to your shell profile.",
-		);
-		if (!ok) return { status: "skipped" };
-		await installAgy();
-	}
-	for (;;) {
-		const result = await loginAgy(ui);
-		if (result.ok) {
-			const voice = await setupVoice(ui, name);
-			ui.notify(`/trans now translates into ${name}. Run /trans with text, a file, or nothing for the last reply.`, "info");
-			return { status: "done", name, model: result.model, voice };
-		}
-		if (!(await ui.confirm("Antigravity sign-in failed", `${result.error}. Try again?`))) return { status: "skipped" };
-	}
-}
-
-/** Picks how translated text addresses the user, and offers a PERSONALITY.md for the agent itself. */
-export async function setupVoice(ui: WizardUi, language: string): Promise<VoiceId> {
-	const options = Object.entries(voicesFor(language)).flatMap(([id, voice]) => (voice ? [{ id: id as VoiceId, label: voice.label }] : []));
-	const choice = await ui.select(`Tone and form of address for text translated into ${language}`, options.map(o => o.label));
-	const voice = options.find(o => o.label === choice)?.id ?? "neutral";
-	if (voice === "custom" && !fs.existsSync(VOICE_FILE)) {
-		fs.writeFileSync(VOICE_FILE, VOICE_FILE_TEMPLATE);
-		ui.notify(`Edit ${tildify(VOICE_FILE)} to describe the voice; it applies on the next translation.`, "info");
-	}
-	if (
-		!fs.existsSync(PERSONALITY_FILE) &&
-		(await ui.confirm(
-			"Agent personality",
-			`Write ${tildify(PERSONALITY_FILE)}? It replaces omp's default personality block: the agent debates plans, lists edge cases and keeps objecting until you settle it (e.g. "chốt"). Edit or delete the file any time.`,
-		))
-	) {
-		fs.writeFileSync(PERSONALITY_FILE, PERSONALITY_TEMPLATE);
-	}
-	return voice;
-}
-
 // ── Wiring ──────────────────────────────────────────────────────────────────
 
 export interface Steps {
 	skills: boolean;
 	models: boolean;
 	kb: boolean;
-	language: boolean;
 	tools: boolean;
 }
 
@@ -386,10 +319,9 @@ export function startupSteps(state: SetupState, stateFileExisted: boolean): Step
 		skills: !state.agentSkills,
 		models: !state.models,
 		kb: !state.kb,
-		language: !state.language,
 		tools: !stateFileExisted,
 	};
-	return steps.skills || steps.models || steps.kb || steps.language || steps.tools ? steps : undefined;
+	return steps.skills || steps.models || steps.kb || steps.tools ? steps : undefined;
 }
 
 /** Whether omp's own first-run setup has not finished yet: it records `setupVersion` in config.yml when done. */
@@ -409,9 +341,6 @@ export default function ompStarter(pi: ExtensionAPI): void {
 	};
 
 	async function run(ui: ToolsUi, steps: Steps, cwd: string): Promise<void> {
-		// A cancelled rerun must not overwrite a step that was already done.
-		const keep = <T extends { status: "done" | "skipped" }>(previous: T | undefined, next: T): T =>
-			previous?.status === "done" && next.status === "skipped" ? previous : next;
 		if (steps.skills) {
 			const next = await setupAgentSkills(ui, exec);
 			updateState({ agentSkills: readState().agentSkills === "done" && next === "skipped" ? "done" : next });
@@ -428,7 +357,6 @@ export default function ompStarter(pi: ExtensionAPI): void {
 				ui.notify(`Could not point agent-skills at the vault: ${String(error)}`, "warning");
 			}
 		}
-		if (steps.language) updateState({ language: keep(readState().language, await setupDisplayLanguage(ui)) });
 		if (steps.tools) {
 			try {
 				// Dynamic on purpose: omp loads this extension on every start (and for subagents), and a failure to
@@ -484,26 +412,15 @@ export default function ompStarter(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("starter", {
-		description: "Rerun omp-starter setup. Args: skills | models | kb | language | voice | tools (default: all)",
+		description: "Rerun omp-starter setup. Args: skills | models | kb | tools (default: all)",
 		handler: async (args, ctx) => {
 			const which = args.trim();
-			if (which === "voice") {
-				const language = readState().language;
-				const name = languageName(language);
-				if (!language || !name) {
-					ctx.ui.notify("Pick a display language first: /starter language", "warning");
-					return;
-				}
-				updateState({ language: { ...language, name, voice: await setupVoice(ctx.ui, name) } });
-				return;
-			}
 			await run(
 				ctx.ui,
 				{
 					skills: !which || which === "skills",
 					models: !which || which === "models",
 					kb: !which || which === "kb",
-					language: !which || which === "language",
 					tools: !which || which === "tools",
 				},
 				ctx.cwd,

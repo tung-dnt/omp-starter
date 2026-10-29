@@ -2,7 +2,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { VoiceId } from "./voices";
 import { LANGUAGE_IDS, type LanguageId, type ToolResult, type ToolStatus } from "./tooling/types";
 
 /** One knowledge base and the folder it serves. */
@@ -26,18 +25,6 @@ export interface KbState {
 	sources?: KbSource[];
 }
 
-export interface LanguageState {
-	status: "done" | "skipped";
-	/** Display language for /trans, any language name (e.g. "Vietnamese"); absent means English. */
-	name?: string;
-	/** Preset code written before 0.11 (e.g. "vi"); read only when `name` is absent. */
-	code?: string;
-	/** agy model slug verified at setup; "" uses agy's default model. */
-	model?: string;
-	/** How text translated into the display language addresses the user; absent means neutral. */
-	voice?: VoiceId;
-}
-
 /** Outcome of one language group: the language server and the debugger are judged independently. */
 export interface LanguageToolingResult {
 	lsp: ToolResult;
@@ -55,7 +42,6 @@ export interface SetupState {
 	agentSkills?: "done" | "skipped";
 	models?: "done" | "skipped";
 	kb?: KbState;
-	language?: LanguageState;
 	tooling?: ToolingState;
 }
 
