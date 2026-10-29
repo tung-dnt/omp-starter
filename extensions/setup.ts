@@ -1,10 +1,11 @@
-// First-run setup wizard: optional agent-skills install, Claude-first subscription presets,
-// and an Obsidian vault as omp's knowledge base and memory.
+// First-run setup wizard: optional agent-skills install, Claude-first subscription presets, an optional
+// TypeSafe Jev judge, and an Obsidian vault as omp's knowledge base and memory.
 // Runs automatically in the TUI until each step is done or skipped; `/starter` reruns it.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { syncAgentSkillsStore } from "./lib/agent-skills-store";
+import { JEV_MODEL, setupJev } from "./lib/jev";
 import { setupModels } from "./lib/routing";
 import { EVERY_SESSION_DIR, doneSources, overlapProblem, servesEverySession, sourceFolder } from "./lib/kb-sources";
 import { HOME, STATE_FILE, expandHome, readState, readTooling, saveTooling, tildify, updateState, type KbSource, type KbState, type SetupState } from "./lib/state";
@@ -306,22 +307,25 @@ export async function setupKnowledgeBase(ui: WizardUi, current: KbState | undefi
 export interface Steps {
 	skills: boolean;
 	models: boolean;
+	jev: boolean;
 	kb: boolean;
 	tools: boolean;
 }
 
 /**
- * Steps the automatic wizard offers. Language tooling is offered only to a brand-new install (no state file
- * existed before the wizard began); existing installs opt in with `/starter tools`, so a new field never re-prompts them.
+ * Steps the automatic wizard offers. Language tooling and the optional Jev judge are offered only to a brand-new install
+ * (no state file existed before the wizard began); existing installs opt in with `/starter tools` or `/starter jev`,
+ * so a new field never re-prompts them.
  */
 export function startupSteps(state: SetupState, stateFileExisted: boolean): Steps | undefined {
 	const steps: Steps = {
 		skills: !state.agentSkills,
 		models: !state.models,
+		jev: !stateFileExisted,
 		kb: !state.kb,
 		tools: !stateFileExisted,
 	};
-	return steps.skills || steps.models || steps.kb || steps.tools ? steps : undefined;
+	return steps.skills || steps.models || steps.jev || steps.kb || steps.tools ? steps : undefined;
 }
 
 /** Whether omp's own first-run setup has not finished yet: it records `setupVersion` in config.yml when done. */
@@ -346,8 +350,16 @@ export default function ompStarter(pi: ExtensionAPI): void {
 			updateState({ agentSkills: readState().agentSkills === "done" && next === "skipped" ? "done" : next });
 		}
 		if (steps.models) {
-			const next = await setupModels(ui, exec);
+			// Rerunning the models step must not move the judge off Jev.
+			const next = await setupModels(ui, exec, readState().jev === "done" ? JEV_MODEL : undefined);
 			updateState({ models: readState().models === "done" && next === "skipped" ? "done" : next });
+		}
+		if (steps.jev) {
+			try {
+				updateState({ jev: await setupJev(ui, exec, { current: readState().jev }) });
+			} catch (error) {
+				ui.notify(`Jev setup failed: ${String(error)}`, "error");
+			}
 		}
 		if (steps.kb) {
 			const next = updateState({ kb: await setupKnowledgeBase(ui, readState().kb) });
@@ -412,7 +424,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("starter", {
-		description: "Rerun omp-starter setup. Args: skills | models | kb | tools (default: all)",
+		description: "Rerun omp-starter setup. Args: skills | models | jev | kb | tools (default: all)",
 		handler: async (args, ctx) => {
 			const which = args.trim();
 			await run(
@@ -420,6 +432,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 				{
 					skills: !which || which === "skills",
 					models: !which || which === "models",
+					jev: !which || which === "jev",
 					kb: !which || which === "kb",
 					tools: !which || which === "tools",
 				},

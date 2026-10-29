@@ -476,13 +476,13 @@ test("invalid saved tooling records are reported and dropped, never promoted to 
 	expect(normalizeTooling({ status: "weird" }).tooling).toBeUndefined();
 });
 
-test("only a brand-new install is offered tooling automatically", () => {
+test("only a brand-new install is offered tooling and the Jev judge automatically", () => {
 	const complete = { agentSkills: "done", models: "done", kb: { status: "done" } } as const;
 	expect(startupSteps(complete, true)).toBeUndefined();
 	expect(startupSteps({ ...complete, tooling: { status: "skipped", selected: [], results: {} } }, true)).toBeUndefined();
-	expect(startupSteps({ agentSkills: "done", models: "done" }, true)).toEqual({ skills: false, models: false, kb: true, tools: false });
-	expect(startupSteps({}, true)).toMatchObject({ tools: false });
-	expect(startupSteps({}, false)).toEqual({ skills: true, models: true, kb: true, tools: true });
+	expect(startupSteps({ agentSkills: "done", models: "done" }, true)).toEqual({ skills: false, models: false, jev: false, kb: true, tools: false });
+	expect(startupSteps({}, true)).toMatchObject({ jev: false, tools: false });
+	expect(startupSteps({}, false)).toEqual({ skills: true, models: true, jev: true, kb: true, tools: true });
 });
 
 test("the omp executable is the compiled binary itself, or the shim on PATH when running under Bun or Node", () => {

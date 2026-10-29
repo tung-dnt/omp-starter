@@ -114,18 +114,33 @@ async function available(exec: Exec, provider: string): Promise<Set<string>> {
 	return new Set(listed.models.map(m => m.selector));
 }
 
-async function apply(exec: Exec, settings: readonly Setting[]): Promise<void> {
+export async function applySettings(exec: Exec, settings: readonly Setting[]): Promise<void> {
 	for (const { key, value, merge } of settings) {
 		let next = value;
-		if (merge) {
-			const current = JSON.parse((await omp(exec, ["config", "get", key])).trim() || "{}") as Record<string, unknown>;
-			next = { ...current, ...(value as Record<string, unknown>) };
-		}
+		if (merge) next = { ...((await readSetting(exec, key)) as Record<string, unknown> | undefined), ...(value as Record<string, unknown>) };
 		await omp(exec, ["config", "set", key, typeof next === "string" ? next : JSON.stringify(next)]);
 	}
 }
 
-export async function setupModels(ui: WizardUi, exec: Exec): Promise<"done" | "skipped"> {
+/** Effective value of one setting, or undefined when unset. */
+export async function readSetting(exec: Exec, key: string): Promise<unknown> {
+	const parsed: unknown = JSON.parse(await omp(exec, ["config", "get", key, "--json"]));
+	return parsed && typeof parsed === "object" && "value" in parsed ? (parsed.value ?? undefined) : undefined;
+}
+
+/** `settings` with every `modelRoles.judge` (active roles and saved presets) replaced by `judge`. */
+function withJudge(settings: readonly Setting[], judge: string | undefined): Setting[] {
+	if (!judge) return [...settings];
+	return settings.map(s => {
+		if (s.key === "modelRoles") return { ...s, value: { ...(s.value as object), judge } };
+		if (s.key !== "modelPresets") return s;
+		const presets = s.value as Record<string, { modelRoles: object }>;
+		return { ...s, value: Object.fromEntries(Object.entries(presets).map(([n, p]) => [n, { ...p, modelRoles: { ...p.modelRoles, judge } }])) };
+	});
+}
+
+/** `judge` overrides the presets' judge model; the Jev step passes it so rerunning this step keeps Jev. */
+export async function setupModels(ui: WizardUi, exec: Exec, judge?: string): Promise<"done" | "skipped"> {
 	const ok = await ui.confirm(
 		"Subscription presets and model routing",
 		"Save `claude` and `codex` subscription presets for /modelpreset switch, plus effort, agent overrides, " +
@@ -136,7 +151,7 @@ export async function setupModels(ui: WizardUi, exec: Exec): Promise<"done" | "s
 			"Existing roles and presets with the same names are replaced; others are kept.",
 	);
 	if (!ok) return "skipped";
-	await apply(exec, COMMON);
+	await applySettings(exec, withJudge(COMMON, judge));
 	let active: keyof typeof ROUTING | undefined;
 	for (const [name, provider] of [["claude", "anthropic"], ["codex", "openai-codex"]] as const) {
 		const models = await available(exec, provider);
@@ -145,7 +160,7 @@ export async function setupModels(ui: WizardUi, exec: Exec): Promise<"done" | "s
 			break;
 		}
 	}
-	if (active) await apply(exec, ROUTING[active].settings);
+	if (active) await applySettings(exec, withJudge(ROUTING[active].settings, judge));
 	ui.notify(
 		active
 			? `${active === "claude" ? "Claude" : "Codex"} routing applied; claude/codex presets saved. Restart open sessions, then use /modelpreset switch codex or claude.`

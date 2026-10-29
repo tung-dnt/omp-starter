@@ -41,6 +41,8 @@ export interface ToolingState {
 export interface SetupState {
 	agentSkills?: "done" | "skipped";
 	models?: "done" | "skipped";
+	/** Optional TypeSafe Jev judge (`/starter jev`). */
+	jev?: "done" | "skipped";
 	kb?: KbState;
 	tooling?: ToolingState;
 }

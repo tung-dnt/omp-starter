@@ -6,6 +6,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 |---|---|
 | **agent-skills** *(optional)* | Installs [tung-dnt/agent-skills](https://github.com/tung-dnt/agent-skills): engineering-workflow skills, agents and `/spec` `/plan` `/build` `/review` `/ship` commands. |
 | **Model routing** *(Claude-first)* | Saves `claude` and `codex` subscription presets without requiring a login. When the required Claude models are available, also routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels; otherwise keeps the current routing. Using a preset requires its provider login. |
+| **TypeSafe Jev judge** *(optional)* | Routes omp's `judge` role to TypeSafe Jev after checking your API key, and stores the key in `~/.omp/agent/.env` (mode 600). Jev then answers `question` rules such as the LSP-over-grep reminder and picks the thinking level per prompt. Offered on a brand-new install; existing installs run `/starter jev`. See [TypeSafe Jev judge](#typesafe-jev-judge-starter-jev). |
 | **Knowledge base** | Uses Obsidian vaults as omp's knowledge base and long-term memory, one per folder if you like (e.g. `~/work` and `~/personal`). Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that points sessions at the knowledge base, injects the part of the memory index that applies to the current repo, adds `kb_remember`/`kb_recall` memory tools, and optionally adds a commit gate. |
 | **Developer tools** *(optional)* | Sets up a language server (LSP) and a debugger (DAP) for JavaScript/TypeScript, Python, Go, Rust and C/C++ with the SDKs you already have. Offered on a brand-new install; existing installs run `/starter tools`. See [Language tooling](#language-tooling-starter-tools). |
 
@@ -67,6 +68,17 @@ Fable is never the default. While the active model is Anthropic, the `fable-rout
 
 Every Fable spawn counts toward a daily cap: `FABLE_ROUTER_DAILY_CAP`, default 5, tracked in `~/.omp/agent/fable-router.json`. Past the cap, the spawn runs on Opus and the task panel shows a note saying so.
 
+### TypeSafe Jev judge (`/starter jev`)
+
+Optional. It sends judged tool calls and your prompts to TypeSafe (processed in the US), so skip it if your data rules don't allow that.
+
+1. If `TYPESAFE_API_KEY` is already in the environment it is used and never written to disk. Otherwise the step asks for the key (the input is not masked) and saves it to `~/.omp/agent/.env` with mode 600, replacing an earlier `TYPESAFE_API_KEY` line and keeping the rest. omp loads that file into its process, so bash and eval children (for example agent-skills' `jev.sh`) see the key too.
+2. The key is checked with one tiny Jev request. A rejected or unreachable key stops the step with nothing changed.
+3. `modelRoles.judge` and the `judge` of the saved `claude`/`codex` presets become `typesafe/jev-1.14.0`, with `@tiny` as fallback; `ttsr.judge` stays `auto`. `/starter models` keeps Jev as the judge while this step is on.
+4. `lsp-symbol-search` (regex) goes into `ttsr.disabledRules` and `rules/lsp-symbol-judged.md` takes over: Jev reads every non-piped `rg`/`grep` and decides whether it searches for a code symbol. Over 45 real commands it caught 24/24 symbol searches (the regex caught 7) with 2 of 21 other searches flagged, both containing an identifier.
+
+Rerunning `/starter jev` offers to turn Jev off: the presets' own judges and the regex rule come back, and the key stays in `~/.omp/agent/.env`. While Jev is on and unreachable, no LSP reminder fires.
+
 ## Knowledge base
 
 - **Vault:** chosen from Obsidian's own vault list, or any folder you type.
@@ -125,7 +137,7 @@ It needs no provider login, never installs or changes an SDK, and never changes 
 ## Commands
 
 - `/starter`: rerun every step.
-- `/starter skills`, `/starter models`, `/starter kb`, `/starter tools`: rerun one step (`/starter kb` manages several knowledge bases once one exists).
+- `/starter skills`, `/starter models`, `/starter jev`, `/starter kb`, `/starter tools`: rerun one step (`/starter kb` manages several knowledge bases once one exists; `/starter jev` turns Jev off when it is on).
 
 Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p` or subagents.
 
@@ -162,9 +174,15 @@ A seventh always-on rule (`rules/cross-repo-investigation.md`): an investigation
 
 Three tool-use rules (`rules/lsp-symbol-search.md`, `rules/dap-over-print.md`, `rules/delegate-cross-repo-reads.md`) are omp TTSR rules: the harness checks each tool call as it streams and adds a reminder after the result, so they work however long the session gets and survive compaction. When the agent greps for a code symbol (camelCase/PascalCase anywhere; snake_case when the command targets Rust or C/C++), it is pointed to `xd://lsp` `definition`/`references`/`symbols`/`rename`. When it adds `console.log`, `fmt.Print*`, `println!`/`dbg!`, `printf` or `std::cerr` to TS/JS, Go, Rust or C/C++ code, it is pointed to `xd://debug`. When the main session reads a source file, or runs `rg`/`grep`/`fd`/`find`, by absolute path under `~/projects/<repo>/`, it is pointed to the cross-repo scout fan-out. Relative paths don't trigger it; if it fires while the session works in its one repo, the reminder itself says to carry on. All three only remind and never block or interrupt; string, SQL-column and config-key searches don't trigger the LSP rule. The LSP and debugger rules load in the main session and `task-builder`; the cross-repo rule loads in the main session only.
 
+With the Jev step on, `rules/lsp-symbol-judged.md` replaces the regex LSP rule (which goes into `ttsr.disabledRules`): it prefilters every non-piped `rg`/`grep` and asks Jev whether the command looks up a code symbol, so forms the regex misses (`export function X`, `^func Test`, `a|b|X`, `X(`) also get the reminder. Without a TypeSafe judge (`ttsr.judge: auto`) the judged rule never runs and costs nothing.
+
 The `ask`-based rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Release notes
+
+### 0.21.0 — 2026-10-29
+
+- **Added:** optional TypeSafe Jev judge step (`/starter jev`, offered on brand-new installs). It verifies the API key, stores it in `~/.omp/agent/.env` (mode 600) unless `TYPESAFE_API_KEY` is already set, routes the `judge` role and both presets' judges to `typesafe/jev-1.14.0`, and swaps the regex `lsp-symbol-search` rule for the Jev-judged `lsp-symbol-judged` (24/24 vs 7/24 symbol searches on real commands). Rerunning it turns Jev off. `/starter models` keeps the Jev judge while the step is on.
 
 ### 0.20.0 — 2026-10-29
 
