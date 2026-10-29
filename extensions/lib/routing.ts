@@ -1,5 +1,5 @@
-// Subscription model + effort presets, written by the setup wizard's Claude-first "models"
-// step. The Fable router shares the Claude model ids.
+// Subscription model + effort presets and subscription-agnostic agent settings, written by the
+// setup wizard's "models" step. The Fable router shares the Claude model ids.
 import type { Exec, WizardUi } from "../setup";
 
 export const MODELS = {
@@ -7,6 +7,11 @@ export const MODELS = {
 	sonnet: "anthropic/claude-sonnet-5-5",
 	haiku: "anthropic/claude-haiku-5-5",
 	fable: "anthropic/claude-fable-5-1",
+} as const;
+
+export const CODEX_MODELS = {
+	sol: "openai-codex/gpt-6.1-sol",
+	luna: "openai-codex/gpt-6-luna",
 } as const;
 
 export const MODEL_PRESETS = {
@@ -49,15 +54,11 @@ interface Setting {
 	merge?: boolean;
 }
 
+// Written on every subscription: none of these names a concrete model.
 // Planning gets the effort (one plan feeds every slice); coders keep a `high` floor and the
 // parent raises risky slices to `max`; Fable is reserved for the `deep` role and the router.
-export const PROFILE: Setting[] = [
+export const COMMON: Setting[] = [
 	{ key: "defaultThinkingLevel", value: "auto" },
-	{
-		key: "modelRoles",
-		merge: true,
-		value: MODEL_PRESETS.claude.modelRoles,
-	},
 	{ key: "modelPresets", merge: true, value: MODEL_PRESETS },
 	{ key: "cycleOrder", value: ["smol", "default", "slow", "deep"] },
 	{ key: "task.enableEffort", value: true },
@@ -80,12 +81,27 @@ export const PROFILE: Setting[] = [
 			"security-auditor": "@slow",
 		},
 	},
-	{
-		key: "retry.fallbackChains",
-		merge: true,
-		value: { [MODELS.fable]: [MODELS.opus], [MODELS.opus]: [MODELS.sonnet] },
-	},
+	// LSP diagnostics after every edit, not only after whole-file writes; the TTSR reminders in
+	// rules/ (LSP over grep, debugger over print) may fire again after 10 turns instead of once.
+	{ key: "lsp.diagnosticsOnEdit", value: true },
+	{ key: "ttsr.repeatMode", value: "after-gap" },
+	{ key: "ttsr.repeatGap", value: 10 },
 ];
+
+/** Active routing for one subscription, applied only when all of its models are available. */
+const ROUTING = {
+	claude: {
+		models: Object.values(MODELS),
+		settings: [
+			{ key: "modelRoles", merge: true, value: MODEL_PRESETS.claude.modelRoles },
+			{ key: "retry.fallbackChains", merge: true, value: { [MODELS.fable]: [MODELS.opus], [MODELS.opus]: [MODELS.sonnet] } },
+		],
+	},
+	codex: {
+		models: Object.values(CODEX_MODELS),
+		settings: [{ key: "modelRoles", merge: true, value: MODEL_PRESETS.codex.modelRoles }],
+	},
+} satisfies Record<keyof typeof MODEL_PRESETS, { models: string[]; settings: Setting[] }>;
 
 async function omp(exec: Exec, args: string[]): Promise<string> {
 	const result = await exec("omp", args, { timeout: 60_000 });
@@ -93,20 +109,13 @@ async function omp(exec: Exec, args: string[]): Promise<string> {
 	return result.stdout;
 }
 
-export async function setupModels(ui: WizardUi, exec: Exec): Promise<"done" | "skipped"> {
-	const ok = await ui.confirm(
-		"Subscription presets and model routing",
-		"Save `claude` and `codex` subscription presets for /modelpreset switch, even without a login. " +
-			"If the required Claude models are available, also apply Claude routing: Opus for the main session " +
-			"and planning, Sonnet for coding and review, Haiku 5.5 for exploration and mechanical work, and Fable for deep consultation. " +
-			"Otherwise, keep your current routing. Existing roles and presets with the same names are replaced; others are kept.",
-	);
-	if (!ok) return "skipped";
-	const listed = JSON.parse(await omp(exec, ["models", "anthropic", "--json"])) as { models: { selector: string }[] };
-	const available = new Set(listed.models.map(m => m.selector));
-	const missing = Object.values(MODELS).filter(m => !available.has(m));
-	for (const { key, value, merge } of PROFILE) {
-		if (missing.length > 0 && key !== "modelPresets") continue;
+async function available(exec: Exec, provider: string): Promise<Set<string>> {
+	const listed = JSON.parse(await omp(exec, ["models", provider, "--json"])) as { models: { selector: string }[] };
+	return new Set(listed.models.map(m => m.selector));
+}
+
+async function apply(exec: Exec, settings: readonly Setting[]): Promise<void> {
+	for (const { key, value, merge } of settings) {
 		let next = value;
 		if (merge) {
 			const current = JSON.parse((await omp(exec, ["config", "get", key])).trim() || "{}") as Record<string, unknown>;
@@ -114,10 +123,34 @@ export async function setupModels(ui: WizardUi, exec: Exec): Promise<"done" | "s
 		}
 		await omp(exec, ["config", "set", key, typeof next === "string" ? next : JSON.stringify(next)]);
 	}
-	if (missing.length > 0) {
-		ui.notify("Claude/codex presets saved; current routing unchanged. Log in before using a preset's models.", "info");
-	} else {
-		ui.notify("Claude routing applied; claude/codex presets saved. Restart open sessions, then use /modelpreset switch codex or claude.", "info");
+}
+
+export async function setupModels(ui: WizardUi, exec: Exec): Promise<"done" | "skipped"> {
+	const ok = await ui.confirm(
+		"Subscription presets and model routing",
+		"Save `claude` and `codex` subscription presets for /modelpreset switch, plus effort, agent overrides, " +
+			"LSP diagnostics after every edit and repeating LSP/debugger reminders, on any subscription. " +
+			"Then apply routing for the subscription whose models are available: Claude first (Opus for the main session " +
+			"and planning, Sonnet for coding and review, Haiku 5.5 for exploration and mechanical work, Fable for deep consultation), " +
+			"otherwise Codex (GPT-6.1 Sol and GPT-6 Luna). With neither, routing stays unchanged. " +
+			"Existing roles and presets with the same names are replaced; others are kept.",
+	);
+	if (!ok) return "skipped";
+	await apply(exec, COMMON);
+	let active: keyof typeof ROUTING | undefined;
+	for (const [name, provider] of [["claude", "anthropic"], ["codex", "openai-codex"]] as const) {
+		const models = await available(exec, provider);
+		if (ROUTING[name].models.every(m => models.has(m))) {
+			active = name;
+			break;
+		}
 	}
+	if (active) await apply(exec, ROUTING[active].settings);
+	ui.notify(
+		active
+			? `${active === "claude" ? "Claude" : "Codex"} routing applied; claude/codex presets saved. Restart open sessions, then use /modelpreset switch codex or claude.`
+			: "Claude/codex presets and shared settings saved; routing unchanged. Log in before using a preset's models.",
+		"info",
+	);
 	return "done";
 }

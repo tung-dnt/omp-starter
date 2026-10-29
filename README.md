@@ -24,7 +24,7 @@ Before the knowledge-base step, open Obsidian once so your vault is registered (
 
 ## Model routing
 
-Applied with `omp config set` after you confirm. Setup saves both subscription presets regardless of login status. It applies Claude routing only when the required Claude models are available; otherwise all active routing settings stay unchanged. Role assignments, named presets and per-agent overrides are merged into your existing settings; same-named entries are replaced.
+Applied with `omp config set` after you confirm, on any subscription. Setup always saves both subscription presets and the settings that name no concrete model: effort, cycle order, per-agent overrides (role aliases such as `@tiny`), LSP diagnostics after every edit (`lsp.diagnosticsOnEdit`), and repeating rule reminders (`ttsr.repeatMode: after-gap`, `ttsr.repeatGap: 10`). It then applies active routing for the first subscription whose models are all available: Claude (table below), otherwise Codex (the `codex` preset's roles). With neither, active routing stays unchanged. Role assignments, named presets and per-agent overrides are merged into your existing settings; same-named entries are replaced.
 
 | Work | Model | Effort |
 |---|---|---|
@@ -178,9 +178,16 @@ A fifth always-on rule (`rules/say-it-in-chat.md`): herdr web's Chat view collap
 
 A sixth always-on rule (`rules/agent-sessions.md`): when the agent coordinates other agent sessions (herdr panes, terminals running omp or Claude), it never answers their `ask` dialogs or sends keystrokes to them; only you answer dialogs. It doesn't wait on a session with no event that will end the wait: it stops and says in chat what is blocked. Progress is reported from verified output, never from a session showing `running`, and building goes to subagents rather than extra top-level sessions.
 
-The rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
+Two tool-use rules (`rules/lsp-symbol-search.md`, `rules/dap-over-print.md`) are omp TTSR rules: the harness checks each tool call as it streams and adds a reminder after the result, so they work however long the session gets and survive compaction. When the agent greps for a code symbol (camelCase/PascalCase anywhere; snake_case when the command targets Rust or C/C++), it is pointed to `xd://lsp` `definition`/`references`/`symbols`/`rename`. When it adds `console.log`, `fmt.Print*`, `println!`/`dbg!`, `printf` or `std::cerr` to TS/JS, Go, Rust or C/C++ code, it is pointed to `xd://debug`. Both only remind and never block or interrupt; string, SQL-column and config-key searches don't trigger them. They load in the main session and `task-builder`.
+
+The `ask`-based rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Release notes
+
+### 0.18.0 — 2026-10-29
+
+- **Added:** TTSR rules `lsp-symbol-search` and `dap-over-print` (main session and `task-builder`) remind the agent to use `xd://lsp` instead of grepping for symbols and `xd://debug` instead of print debugging, for TS/JS, Go, Rust and C/C++.
+- **Changed:** the models step works on any subscription. Settings that name no model, now including `lsp.diagnosticsOnEdit: true` and `ttsr.repeatMode: after-gap` (gap 10), are always applied; active routing uses Claude when its models are available, otherwise Codex, otherwise stays unchanged. Previously a machine without Claude got only the presets. Run `/starter models` after updating.
 
 ### 0.17.0 — 2026-10-29
 

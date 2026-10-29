@@ -3,14 +3,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Exec, WizardUi } from "../setup";
-import { MODELS, setupModels } from "./routing";
+import { CODEX_MODELS, MODELS, setupModels } from "./routing";
 
 const homes: string[] = [];
 afterEach(() => {
 	for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
 });
 
-function client(claudeModels?: string[], confirmed = true) {
+/** `models` stubs `omp models <provider> --json` for every provider; omitted, the real (logged-out) omp answers. */
+function client(models?: string[], confirmed = true) {
 	const home = mkdtempSync(join(tmpdir(), "omp-starter-routing-"));
 	homes.push(home);
 	const env = {
@@ -21,8 +22,8 @@ function client(claudeModels?: string[], confirmed = true) {
 		XDG_DATA_HOME: join(home, ".local", "share"),
 	};
 	const exec: Exec = async (command, args) => {
-		if (claudeModels && args[0] === "models") {
-			return { code: 0, stderr: "", stdout: JSON.stringify({ models: claudeModels.map(selector => ({ selector })) }) };
+		if (models && args[0] === "models") {
+			return { code: 0, stderr: "", stdout: JSON.stringify({ models: models.map(selector => ({ selector })) }) };
 		}
 		const child = Bun.spawn([command, ...args], { cwd: home, env, stdout: "pipe", stderr: "pipe" });
 		const [stdout, stderr, code] = await Promise.all([
@@ -47,7 +48,7 @@ function client(claudeModels?: string[], confirmed = true) {
 	return { exec, config, ui };
 }
 
-test("an unauthenticated client saves both presets without changing active routing", async () => {
+test("an unauthenticated client saves presets and shared settings without changing active routing", async () => {
 	const { exec, config, ui } = client();
 	await config("set", "modelRoles", { default: "openai-codex/gpt-6.1-sol", custom: "@default" });
 	await config("set", "defaultThinkingLevel", "high");
@@ -58,7 +59,19 @@ test("an unauthenticated client saves both presets without changing active routi
 	expect(presets.codex.modelRoles.default).toBe("openai-codex/gpt-6.1-sol");
 	expect(presets.claude.modelRoles.default).toBe("anthropic/claude-opus-5-5:auto");
 	expect(await config("get", "modelRoles")).toEqual(before);
-	expect(await config("get", "defaultThinkingLevel")).toBe("high");
+	expect(await config("get", "defaultThinkingLevel")).toBe("auto");
+	expect(await config("get", "lsp.diagnosticsOnEdit")).toBe(true);
+	expect(await config("get", "ttsr.repeatGap")).toBe(10);
+}, 60_000);
+
+test("a Codex-only client gets Codex routing, never Claude models", async () => {
+	const { exec, config, ui } = client(Object.values(CODEX_MODELS));
+	await config("set", "modelRoles", { custom: "@default" });
+
+	expect(await setupModels(ui, exec)).toBe("done");
+	const roles = await config("get", "modelRoles") as Record<string, string>;
+	expect(roles).toMatchObject({ default: "openai-codex/gpt-6.1-sol", tiny: "openai-codex/gpt-6-luna:low", custom: "@default" });
+	expect(Object.values(roles).some(model => model.startsWith("anthropic/"))).toBe(false);
 }, 60_000);
 
 test("saving presets replaces matching names and preserves unrelated presets", async () => {
