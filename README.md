@@ -178,9 +178,16 @@ Three tool-use rules (`rules/lsp-symbol-search.md`, `rules/dap-over-print.md`, `
 
 With the Jev step on, `rules/lsp-symbol-judged.md` replaces the regex LSP rule (which goes into `ttsr.disabledRules`): it prefilters every non-piped `rg`/`grep` and asks Jev whether the command looks up a code symbol, so forms the regex misses (`export function X`, `^func Test`, `a|b|X`, `X(`) also get the reminder. It loads in the main session, `task-builder`, the default `task` agent (also vibe's `good` workers), `code-reviewer` and `test-engineer`; `task-builder` needs agent-skills 0.6.25 or later, the first version that gives it the `lsp` tool. Without a TypeSafe judge (`ttsr.judge: auto`) the judged rule never runs and costs nothing.
 
+The same Jev step turns on `extensions/lsp-guard.ts`, which blocks instead of reminding, in coding subagents only (`task-builder`, `task`, `code-reviewer`, `test-engineer`). Before an `rg`/`grep` runs, code drops what is text by construction: a grep reading another command's output, and searches whose every path is `/tmp`, an artifact, `node_modules`, docs, SQL/migrations, data or logs. Jev then judges the rest with the judged rule's own question. At p ≥ 0.85 the call is blocked with the exact `lsp`/`xd://lsp` call to make instead. Appending `# text-search` to the command lets it run, for a language with no server or a real text search. No key, a timeout or a bad answer lets the command run. On 94 labelled greps from real subagent sessions it blocked 27 of 36 symbol lookups and 3 of 58 other searches (two of those three also grepped identifiers).
+
 The `ask`-based rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Release notes
+
+### 0.26.0 — 2026-10-29
+
+- **Added:** `lsp-guard` (with `/starter jev` on): coding subagents' `rg`/`grep` symbol lookups are blocked before they run and pointed at the language server, at Jev p ≥ 0.85, with `# text-search` as the escape hatch. Reminders alone didn't work: in a live session a `task` agent got three and called LSP 0 times.
+- **Changed:** the `lsp-symbol-judged` reminder gives ready-to-paste `xd://lsp` JSON calls (references, definition, symbols, rename) instead of tool names, so using LSP takes one step.
 
 ### 0.25.0 — 2026-10-29
 
