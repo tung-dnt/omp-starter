@@ -33,9 +33,32 @@ const OTHER_FOLDER = "Other folder…";
 
 // ── agent-skills ────────────────────────────────────────────────────────────
 
-export async function setupAgentSkills(ui: WizardUi, exec: Exec): Promise<"done" | "skipped"> {
+/** Version `omp plugin list` shows for agent-skills, e.g. `agent-skills@tung-agent-skills (0.6.25) (user)`. */
+function installedVersion(list: string): string | undefined {
+	return new RegExp(`${AGENT_SKILLS_ID.replaceAll(".", "\\.")} \\(([^)]+)\\)`).exec(list)?.[1];
+}
+
+/**
+ * Installs agent-skills when missing. When it is installed and `offerUpgrade` is set (the `/starter` command, never
+ * the startup wizard), offers to refresh the marketplace and upgrade it, then reports the old and new version.
+ */
+export async function setupAgentSkills(ui: WizardUi, exec: Exec, offerUpgrade = false): Promise<"done" | "skipped"> {
 	const list = await exec("omp", ["plugin", "list"]);
-	if (list.stdout.includes(AGENT_SKILLS_ID)) return "done";
+	if (list.stdout.includes(AGENT_SKILLS_ID)) {
+		if (!offerUpgrade) return "done";
+		const before = installedVersion(list.stdout) ?? "unknown";
+		if (!(await ui.confirm("agent-skills", `agent-skills ${before} is installed. Check for an update and install it?`))) return "done";
+		const update = await exec("omp", ["plugin", "marketplace", "update"], { timeout: 120_000 });
+		if (update.code !== 0) throw new Error(`marketplace update failed: ${(update.stderr || update.stdout).trim()}`);
+		const upgrade = await exec("omp", ["plugin", "upgrade", AGENT_SKILLS_ID], { timeout: 300_000 });
+		if (upgrade.code !== 0) throw new Error(`plugin upgrade failed: ${(upgrade.stderr || upgrade.stdout).trim()}`);
+		const after = installedVersion((await exec("omp", ["plugin", "list"])).stdout) ?? "unknown";
+		ui.notify(
+			after === before ? `agent-skills ${after} is already the latest version.` : `agent-skills ${before} → ${after}. Run /reload-plugins to load it.`,
+			"info",
+		);
+		return "done";
+	}
 	const ok = await ui.confirm(
 		"agent-skills",
 		`Install ${AGENT_SKILLS_REPO}? Engineering-workflow skills, agents and commands (/spec, /plan, /build, /review, /ship).`,
@@ -344,9 +367,10 @@ export default function ompStarter(pi: ExtensionAPI): void {
 		return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", code: result.code ?? 1 };
 	};
 
-	async function run(ui: ToolsUi, steps: Steps, cwd: string): Promise<void> {
+	/** `fromCommand`: run by `/starter`, so installed steps may offer updates; the startup wizard never does. */
+	async function run(ui: ToolsUi, steps: Steps, cwd: string, fromCommand = false): Promise<void> {
 		if (steps.skills) {
-			const next = await setupAgentSkills(ui, exec);
+			const next = await setupAgentSkills(ui, exec, fromCommand);
 			updateState({ agentSkills: readState().agentSkills === "done" && next === "skipped" ? "done" : next });
 		}
 		if (steps.models) {
@@ -437,6 +461,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 					tools: !which || which === "tools",
 				},
 				ctx.cwd,
+				true,
 			);
 		},
 	});
