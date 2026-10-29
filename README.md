@@ -31,8 +31,8 @@ Applied with `omp config set` after you confirm. Setup saves both subscription p
 | Main session | Opus 5.5 | `auto` (Haiku classifies each prompt; `ultrathink` forces `max`) |
 | Plan mode, `reviewer` | Opus 5.5 | `high` |
 | Coding subagents (`task`, agent-skills builders/testers) | Sonnet 5.5 | `high`; the parent can raise a slice to `max` |
-| Exploration (`scout`), commits, `code-reviewer` | Sonnet 5.5 | default |
-| Mechanical edits (`sonic`), titles, classifiers | Haiku 4.5 | default |
+| Commits, `code-reviewer` | Sonnet 5.5 | default |
+| Exploration (`scout`), mechanical edits (`sonic`), titles, classifiers | Haiku 5.5 | default |
 | Security agents | Opus 5.5 | `high` (never Fable) |
 | `deep` agent, Ctrl+P `deep` role | Fable 5.1 | `high` |
 
@@ -44,7 +44,7 @@ The model step saves two complete role setups, even when neither provider is log
 
 | Preset | Main session | Planning / deep consultation | Helpers |
 |---|---|---|---|
-| `claude` | Opus 5.5 (`auto`) | Opus 5.5 / Fable 5.1 (`high`) | Sonnet 5.5; Haiku 4.5 for tiny work and judgments |
+| `claude` | Opus 5.5 (`auto`) | Opus 5.5 / Fable 5.1 (`high`) | Sonnet 5.5; Haiku 5.5 for exploration, tiny work and judgments |
 | `codex` | GPT-6.1 Sol (`auto`) | GPT-6.1 Sol (`high`) | GPT-6 Luna; `high` for tasks, `low` for tiny work and judgments |
 
 Existing installs: update the plugin and run `/starter models` to save the presets. Restart open sessions to load the routing changes, then switch inside omp:
@@ -181,6 +181,10 @@ A sixth always-on rule (`rules/agent-sessions.md`): when the agent coordinates o
 The rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Release notes
+
+### 0.17.0 — 2026-10-29
+
+- **Changed:** the `claude` preset's `tiny` and `judge` roles move from Haiku 4.5 to Haiku 5.5, and `scout` now routes to `@tiny` (Haiku 5.5 under `claude`, `gpt-6-luna:low` under `codex`). Haiku 5.5 bills prompts over 100K tokens at 5x, so long coding subagents stay on Sonnet. Run `/starter models` after updating.
 
 ### 0.16.1 — 2026-10-28
 

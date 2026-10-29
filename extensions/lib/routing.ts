@@ -5,7 +5,7 @@ import type { Exec, WizardUi } from "../setup";
 export const MODELS = {
 	opus: "anthropic/claude-opus-5-5",
 	sonnet: "anthropic/claude-sonnet-5-5",
-	haiku: "anthropic/claude-haiku-4-5",
+	haiku: "anthropic/claude-haiku-5-5",
 	fable: "anthropic/claude-fable-5-1",
 } as const;
 
@@ -67,6 +67,8 @@ export const PROFILE: Setting[] = [
 		merge: true,
 		value: {
 			sonic: "@tiny",
+			// Read-only, short runs: Haiku 5.5 in the claude preset, Luna in codex.
+			scout: "@tiny",
 			// agent-skills agents carry Claude Code model names that omp does not resolve.
 			"state-investigator": "@tiny",
 			"code-reviewer": "@smol",
@@ -96,7 +98,7 @@ export async function setupModels(ui: WizardUi, exec: Exec): Promise<"done" | "s
 		"Subscription presets and model routing",
 		"Save `claude` and `codex` subscription presets for /modelpreset switch, even without a login. " +
 			"If the required Claude models are available, also apply Claude routing: Opus for the main session " +
-			"and planning, Sonnet for coding and exploration, Haiku for mechanical work, and Fable for deep consultation. " +
+			"and planning, Sonnet for coding and review, Haiku 5.5 for exploration and mechanical work, and Fable for deep consultation. " +
 			"Otherwise, keep your current routing. Existing roles and presets with the same names are replaced; others are kept.",
 	);
 	if (!ok) return "skipped";
