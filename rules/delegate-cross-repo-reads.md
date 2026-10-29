@@ -4,7 +4,7 @@ scope: [tool:read, tool:bash]
 agents: [main]
 condition:
   - '(?:/home/[^/\s"'']+|~)/projects/[\w.-]+/[^\s"'']*\.(?:tsx?|jsx?|mjs|cjs|go|sql|py|rs|java|kt|cs|php|rb)(?=[\s"'':]|$)'
-  - '(?<!\|\s{0,3})\b(?:rg|grep|fd|find)\b[^|;&\n]*\s(?:\\?["''])?(?:/home/[^/\s"'']+|~)/projects/'
+  - '(?<!\|\s{0,3})\b(?:rg|grep)\b(?:[^|;&\n"\\]|\\[^n])*\s(?:\\?["''])?(?:/home/[^/\s"''\\]+|~)/projects/'
 interruptMode: never
 ---
 
