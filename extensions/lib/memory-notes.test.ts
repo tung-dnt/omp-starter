@@ -5,24 +5,24 @@ const INDEX = [
 	"## Global",
 	"- [A](a.md) — global a",
 	"",
-	"## PACO",
-	"<!-- repos: paco24, paco-connect-fe -->",
+	"## Work",
+	"<!-- repos: acme-api, acme-web -->",
 	"- [P1](p1.md) — first",
 	"- [P2](p2.md) — second",
 	"",
-	"## PACO tickets",
+	"## Work tickets",
 	"<!-- repos: -->",
 	"",
-	"## meme-app",
-	"- [M](m.md) — meme",
+	"## side-app",
+	"- [M](m.md) — side",
 	"",
 ].join("\n");
 
 const line = (slug: string) => indexLine(slug, slug.toUpperCase(), `hook ${slug}`);
 
 test("a new line goes after the last entry of the section that lists the repo", () => {
-	const r = upsertIndex(INDEX, "new", line("new"), { repo: "paco-connect-fe" });
-	expect(r).toMatchObject({ section: "PACO", action: "added", createdSection: false });
+	const r = upsertIndex(INDEX, "new", line("new"), { repo: "acme-web" });
+	expect(r).toMatchObject({ section: "Work", action: "added", createdSection: false });
 	const lines = r.text.split("\n");
 	expect(lines.indexOf(line("new"))).toBe(lines.indexOf("- [P2](p2.md) — second") + 1);
 });
@@ -32,7 +32,7 @@ test("a repo no section lists gets its own section; no repo means Global", () =>
 	expect(repo).toMatchObject({ section: "brand-new", createdSection: true });
 	expect(repo.text.endsWith(`## brand-new\n${line("x")}\n`)).toBe(true);
 	// A section with an empty repos list never matches a repo, even one equal to its heading.
-	expect(upsertIndex(INDEX, "t", line("t"), { repo: "paco tickets" }).createdSection).toBe(true);
+	expect(upsertIndex(INDEX, "t", line("t"), { repo: "work tickets" }).createdSection).toBe(true);
 
 	const global = upsertIndex(INDEX, "g", line("g"), {});
 	expect(global.section).toBe("Global");
@@ -40,22 +40,22 @@ test("a repo no section lists gets its own section; no repo means Global", () =>
 });
 
 test("an explicit scope with no entries yet inserts after its repos comment", () => {
-	const r = upsertIndex(INDEX, "t1", line("t1"), { scope: "paco tickets", repo: "paco24" });
+	const r = upsertIndex(INDEX, "t1", line("t1"), { scope: "work tickets", repo: "acme-api" });
 	const lines = r.text.split("\n");
-	expect(r.section).toBe("PACO tickets");
+	expect(r.section).toBe("Work tickets");
 	expect(lines[lines.indexOf("<!-- repos: -->") + 1]).toBe(line("t1"));
 });
 
 test("an existing line is replaced in place without scope and moved with one", () => {
-	const inPlace = upsertIndex(INDEX, "p1", "- [P1](p1.md) — changed", { repo: "meme-app" });
-	expect(inPlace).toMatchObject({ section: "PACO", action: "updated" });
-	expect(findEntry(inPlace.text, "p1")).toMatchObject({ section: "PACO", hook: "changed" });
+	const inPlace = upsertIndex(INDEX, "p1", "- [P1](p1.md) — changed", { repo: "side-app" });
+	expect(inPlace).toMatchObject({ section: "Work", action: "updated" });
+	expect(findEntry(inPlace.text, "p1")).toMatchObject({ section: "Work", hook: "changed" });
 
 	const moved = upsertIndex(INDEX, "p1", "- [P1](p1.md) — first", { scope: "Global" });
 	expect(moved).toMatchObject({ section: "Global", action: "moved" });
 	expect(moved.text.match(/\(p1\.md\)/g)).toHaveLength(1);
 	expect(findEntry(moved.text, "p1")?.section).toBe("Global");
-	expect(findEntry(moved.text, "p2")?.section).toBe("PACO");
+	expect(findEntry(moved.text, "p2")?.section).toBe("Work");
 });
 
 test("lines before the first heading count as Global when there is no Global heading", () => {

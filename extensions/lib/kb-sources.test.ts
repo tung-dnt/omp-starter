@@ -16,7 +16,7 @@ const everywhere = source(EVERY_SESSION_DIR, "all");
 
 test("the folder source containing the cwd serves it; others and outside folders get none", () => {
 	const kb = { status: "done" as const, sources: [work, personal] };
-	expect(resolveKb("/w/projects/paco24/src", kb)?.kbRef).toBe("work");
+	expect(resolveKb("/w/projects/acme-api/src", kb)?.kbRef).toBe("work");
 	expect(resolveKb("/w/personal", kb)?.kbRef).toBe("personal");
 	expect(resolveKb("/w/projects-old", kb)).toBeUndefined();
 	expect(resolveKb("/w/projects", { status: "skipped", sources: [work] })).toBeUndefined();

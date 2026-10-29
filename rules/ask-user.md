@@ -25,4 +25,4 @@ The user may see only the dialog, so it carries the whole decision brief. "Which
 - `recommended`: your pick. Its description starts `Recommended: <why it wins on what it hinges on>; choose <other> instead if <condition that would flip it>.`
 - Approval gates name what is being approved and what proceeding does next, with options like "Proceed" / "Revise <what>".
 
-Anything longer than the dialog can hold (the step's output, the decision-brief table a workflow such as grill-me requires, file paths) goes in the message just before the call, in the same turn. That prose supplements the dialog; it never replaces the dialog's own context. Nothing inside the dialog is clickable in herdr web.
+Anything longer than the dialog can hold (the step's output, the decision-brief table a workflow such as grill-me requires, file paths) goes in the message just before the call, in the same turn. That prose supplements the dialog; it never replaces the dialog's own context. Many clients (herdr web, for one) make nothing inside the dialog clickable.

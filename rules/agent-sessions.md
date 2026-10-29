@@ -6,7 +6,7 @@ agents: main
 
 # Coordinating other agent sessions
 
-Applies whenever you drive or watch other agent sessions: herdr panes and workspaces, or terminals running omp or Claude.
+Applies whenever you drive or watch other agent sessions: panes in a terminal multiplexer or agent workspace manager (tmux, herdr, …), or terminals running omp or Claude.
 
 - **Only the user answers dialogs.** Never answer another session's `ask` dialog, and never send keystrokes (Escape, Enter, arrows) to a session that shows one: a dialog can resolve to its default option under injected keys, and nobody can then tell whether the user approved. Tell the user which pane holds the dialog and wait for them.
 - **Approvals aren't relayed.** Don't pass an approval from one session to another as typed text. The session that asked reads its own dialog result; others read the recorded decision in the story or task note.
