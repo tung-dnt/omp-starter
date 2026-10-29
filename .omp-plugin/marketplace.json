@@ -6,7 +6,7 @@
     {
       "name": "starter",
       "description": "First-run wizard: Claude-first routing with Codex/Claude subscription presets and capped Fable escalation, Obsidian vaults as knowledge base + memory per folder with kb_remember/kb_recall tools, optional agent-skills, optional guided LSP/debugger tooling (JavaScript/TypeScript, Python, Go, Rust, C/C++)",
-      "version": "0.26.0",
+      "version": "0.26.1",
       "license": "MIT",
       "source": "./"
     }

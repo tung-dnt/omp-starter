@@ -184,6 +184,10 @@ The `ask`-based rules load in the main session only, except `lld-before-build` a
 
 ## Release notes
 
+### 0.26.1 — 2026-10-29
+
+- **Fixed:** the `lsp-symbol-judged` reminder no longer fires on an `rg`/`grep` that carries `# text-search`, the marker `lsp-guard` tells agents to use for real text searches.
+
 ### 0.26.0 — 2026-10-29
 
 - **Added:** `lsp-guard` (with `/starter jev` on): coding subagents' `rg`/`grep` symbol lookups are blocked before they run and pointed at the language server, at Jev p ≥ 0.85, with `# text-search` as the escape hatch. Reminders alone didn't work: in a live session a `task` agent got three and called LSP 0 times.

@@ -3,7 +3,7 @@ description: Use xd://lsp navigation instead of rg/grep when searching for a cod
 scope: tool:bash
 agents: [main, task-builder, task, code-reviewer, test-engineer]
 condition:
-  - '(?<!\|\s{0,3})\b(?:rg|grep)\b'
+  - '(?<!\|\s{0,3})\b(?:rg|grep)\b(?![^\n]*# text-search)'
 question: "`content` is the arguments of a shell command an AI coding agent ran. Is the agent using rg or grep to find where a named code symbol (a function, method, type, interface, class, variable or constant, e.g. `useCreateMode(`, `export function inspectConfig`, `^func Test`) is defined or used in source code? Answer no when the pattern looks for text no language server indexes: a log or test-output line, a message string, SQL, a config key, a version number, a docs heading, or output piped from another command."
 interruptMode: never
 ---
