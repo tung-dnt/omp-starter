@@ -1,6 +1,6 @@
 {
   "name": "omp-starter",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "private": true,
   "description": "First-run setup for omp: Claude-first routing with Codex/Claude subscription presets and capped Fable escalation, Obsidian vaults as knowledge base + memory per folder with kb_remember/kb_recall tools, optional agent-skills, and optional guided LSP/debugger tooling for JavaScript/TypeScript, Python, Go, Rust and C/C++",
   "license": "MIT",

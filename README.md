@@ -172,13 +172,20 @@ A sixth always-on rule (`rules/agent-sessions.md`): when the agent coordinates o
 
 A seventh always-on rule (`rules/cross-repo-investigation.md`): an investigation that spans two or more repositories follows the `end-to-end-technical-flow-report` skill with one `scout` per repo. Each scout writes `local://<repo>-trace.md` with `path:start-end`, the symbol, a short excerpt and an evidence label; the main session reads those reports and opens only the cited range of a claim it doubts. Its turns carry the whole conversation, so a file read there costs many times a scout's read.
 
+An eighth always-on rule (`rules/subagent-absolute-paths.md`) loads in every subagent and never in the main session: `read`, `edit`, `write`, `glob` and `lsp` resolve relative paths from the session's directory, not from where `bash` `cd`'ed, so subagents pass them absolute paths. Before it, subagents of a session started in a parent folder of the repo lost a turn on each relative `read`/`lsp` call that came back "not found".
+
 Three tool-use rules (`rules/lsp-symbol-search.md`, `rules/dap-over-print.md`, `rules/delegate-cross-repo-reads.md`) are omp TTSR rules: the harness checks each tool call as it streams and adds a reminder after the result, so they work however long the session gets and survive compaction. When the agent greps for a code symbol (camelCase/PascalCase anywhere; snake_case when the command targets Rust or C/C++), it is pointed to `xd://lsp` `definition`/`references`/`symbols`/`rename`. When it adds `console.log`, `fmt.Print*`, `println!`/`dbg!`, `printf` or `std::cerr` to TS/JS, Go, Rust or C/C++ code, it is pointed to `xd://debug`. When the main session reads a source file, or runs `rg`/`grep`, by absolute path under `~/projects/<repo>/`, it is pointed to the cross-repo scout fan-out (`fd`/`find` only list files and don't trigger it). Relative paths don't trigger it; if it fires while the session works in its one repo, the reminder itself says to carry on. All three only remind and never block or interrupt; string, SQL-column and config-key searches don't trigger the LSP rule. The LSP and debugger rules load in the main session and `task-builder`; the cross-repo rule loads in the main session only.
 
-With the Jev step on, `rules/lsp-symbol-judged.md` replaces the regex LSP rule (which goes into `ttsr.disabledRules`): it prefilters every non-piped `rg`/`grep` and asks Jev whether the command looks up a code symbol, so forms the regex misses (`export function X`, `^func Test`, `a|b|X`, `X(`) also get the reminder. It loads in the main session, `task-builder` and the default `task` agent (also vibe's `good` workers); `task-builder` needs agent-skills 0.6.25 or later, the first version that gives it the `lsp` tool. Without a TypeSafe judge (`ttsr.judge: auto`) the judged rule never runs and costs nothing.
+With the Jev step on, `rules/lsp-symbol-judged.md` replaces the regex LSP rule (which goes into `ttsr.disabledRules`): it prefilters every non-piped `rg`/`grep` and asks Jev whether the command looks up a code symbol, so forms the regex misses (`export function X`, `^func Test`, `a|b|X`, `X(`) also get the reminder. It loads in the main session, `task-builder`, the default `task` agent (also vibe's `good` workers), `code-reviewer` and `test-engineer`; `task-builder` needs agent-skills 0.6.25 or later, the first version that gives it the `lsp` tool. Without a TypeSafe judge (`ttsr.judge: auto`) the judged rule never runs and costs nothing.
 
 The `ask`-based rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Release notes
+
+### 0.24.0 — 2026-10-29
+
+- **Added:** always-on rule `subagent-absolute-paths` (every subagent, not the main session): file tools and `lsp` take absolute paths. In two live sessions started in a parent folder of their repos, subagents hit 7 "not found" errors in 30 minutes from relative `read`/`lsp` paths after `cd` into a repo.
+- **Changed:** `lsp-symbol-judged` also loads in `code-reviewer` and `test-engineer`, which have `xd://lsp`; a reviewer grepped symbols about 5 times in one review without a reminder.
 
 ### 0.23.0 — 2026-10-29
 
