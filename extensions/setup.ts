@@ -9,6 +9,7 @@ import { setupModels } from "./lib/routing";
 import { EVERY_SESSION_DIR, doneSources, overlapProblem, servesEverySession, sourceFolder } from "./lib/kb-sources";
 import { HOME, STATE_FILE, expandHome, readState, readTooling, saveTooling, tildify, updateState, type KbSource, type KbState, type SetupState } from "./lib/state";
 import type { ToolsUi } from "./lib/tooling";
+import { AGENT_SKILLS_PLUGIN, checkPluginUpdates, readPluginInstallations } from "./lib/plugin-updates";
 
 export interface WizardUi {
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -23,8 +24,6 @@ export type Exec = (
 	options?: { timeout?: number },
 ) => Promise<{ stdout: string; stderr: string; code: number }>;
 
-const AGENT_SKILLS_REPO = "tung-dnt/agent-skills";
-const AGENT_SKILLS_ID = "agent-skills@tung-agent-skills";
 const OBSIDIAN_REGISTRY = path.join(HOME, "Library/Application Support/obsidian/obsidian.json");
 const ICLOUD_OBSIDIAN = path.join(HOME, "Library/Mobile Documents/iCloud~md~obsidian/Documents");
 const KB_LINK = path.join(HOME, ".omp-kb");
@@ -32,44 +31,25 @@ const OTHER_FOLDER = "Other folder…";
 
 // ── agent-skills ────────────────────────────────────────────────────────────
 
-/** Version `omp plugin list` shows for agent-skills, e.g. `agent-skills@tung-agent-skills (0.6.25) (user)`. */
-function installedVersion(list: string): string | undefined {
-	return new RegExp(`${AGENT_SKILLS_ID.replaceAll(".", "\\.")} \\(([^)]+)\\)`).exec(list)?.[1];
-}
-
-/**
- * Installs agent-skills when missing. When it is installed and `offerUpgrade` is set (the `/starter` command, never
- * the startup wizard), offers to refresh the marketplace and upgrade it, then reports the old and new version.
- */
+/** Startup only detects presence; explicit commands may offer a confirmed update. */
 export async function setupAgentSkills(ui: WizardUi, exec: Exec, offerUpgrade = false): Promise<"done" | "skipped"> {
-	const list = await exec("omp", ["plugin", "list"]);
-	if (list.stdout.includes(AGENT_SKILLS_ID)) {
-		if (!offerUpgrade) return "done";
-		const before = installedVersion(list.stdout) ?? "unknown";
-		if (!(await ui.confirm("agent-skills", `agent-skills ${before} is installed. Check for an update and install it?`))) return "done";
-		const update = await exec("omp", ["plugin", "marketplace", "update"], { timeout: 120_000 });
-		if (update.code !== 0) throw new Error(`marketplace update failed: ${(update.stderr || update.stdout).trim()}`);
-		const upgrade = await exec("omp", ["plugin", "upgrade", AGENT_SKILLS_ID], { timeout: 300_000 });
-		if (upgrade.code !== 0) throw new Error(`plugin upgrade failed: ${(upgrade.stderr || upgrade.stdout).trim()}`);
-		const after = installedVersion((await exec("omp", ["plugin", "list"])).stdout) ?? "unknown";
-		ui.notify(
-			after === before ? `agent-skills ${after} is already the latest version.` : `agent-skills ${before} → ${after}. Run /reload-plugins to load it.`,
-			"info",
-		);
+	const installations = await readPluginInstallations(exec);
+	if (installations.some(row => row.key === "agent-skills")) {
+		if (offerUpgrade) await checkPluginUpdates(ui, exec, { keys: ["agent-skills"], installations });
 		return "done";
 	}
 	const ok = await ui.confirm(
 		"agent-skills",
-		`Install ${AGENT_SKILLS_REPO}? Engineering-workflow skills, agents and commands (/spec, /plan, /build, /review, /ship).`,
+		`Install ${AGENT_SKILLS_PLUGIN.repo}? Engineering-workflow skills, agents and commands (/spec, /plan, /build, /review, /ship).`,
 	);
 	if (!ok) return "skipped";
-	const add = await exec("omp", ["plugin", "marketplace", "add", AGENT_SKILLS_REPO], { timeout: 120_000 });
-	if (add.code !== 0 && !/already exists/.test(add.stdout + add.stderr)) {
-		throw new Error(`marketplace add failed: ${(add.stderr || add.stdout).trim()}`);
-	}
-	const install = await exec("omp", ["plugin", "install", AGENT_SKILLS_ID], { timeout: 300_000 });
-	if (install.code !== 0) throw new Error(`plugin install failed: ${(install.stderr || install.stdout).trim()}`);
-	ui.notify(`Installed ${AGENT_SKILLS_REPO}. Run /reload-plugins to load it.`, "info");
+	const add = await exec("omp", ["plugin", "marketplace", "add", AGENT_SKILLS_PLUGIN.repo], { timeout: 120_000 });
+	if (add.code !== 0 && !/already exists/.test(add.stdout + add.stderr)) throw new Error(`Cannot add the agent-skills marketplace (native exit ${add.code}).`);
+	const install = await exec("omp", ["plugin", "install", "--scope", "user", AGENT_SKILLS_PLUGIN.id], { timeout: 300_000 });
+	if (install.code !== 0) throw new Error(`Cannot install agent-skills (native exit ${install.code}); installed state may have changed.`);
+	const after = await readPluginInstallations(exec);
+	if (!after.some(row => row.key === "agent-skills" && row.kind === "marketplace" && row.scope === "user")) throw new Error("Native installation finished, but agent-skills could not be verified.");
+	ui.notify(`Installed ${AGENT_SKILLS_PLUGIN.repo}. Restart your OMP session to load its extensions.`, "info");
 	return "done";
 }
 
@@ -420,9 +400,21 @@ export default function ompStarter(pi: ExtensionAPI): void {
 
 
 	pi.registerCommand("starter", {
-		description: "Rerun omp-starter setup. Args: skills | models | jev | kb | tools (default: all)",
+		description: "Setup or confirmed plugin updates. Args: updates | skills | models | jev | kb | tools (default: setup all)",
 		handler: async (args, ctx) => {
 			const which = args.trim();
+			if (which === "updates") {
+				if (!ctx.hasUI || ctx.agent?.kind === "sub") {
+					ctx.ui.notify("Plugin updates require a main session with interactive user confirmation.", "warning");
+					return;
+				}
+				try {
+					await checkPluginUpdates(ctx.ui, exec);
+				} catch (error) {
+					ctx.ui.notify(error instanceof Error ? error.message : "Plugin update check failed.", "error");
+				}
+				return;
+			}
 			await run(
 				ctx.ui,
 				{

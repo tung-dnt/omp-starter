@@ -138,8 +138,23 @@ It needs no provider login, never installs or changes an SDK, and never changes 
 
 - `/starter`: rerun every step.
 - `/starter skills`, `/starter models`, `/starter jev`, `/starter kb`, `/starter tools`: rerun one step (`/starter skills` offers to update an installed agent-skills and reports the old and new version; `/starter kb` manages several knowledge bases once one exists; `/starter jev` turns Jev off when it is on).
+- `/starter updates`: check installed/published versions of both `agent-skills@tung-agent-skills` and `starter@omp-starter`; confirm each plugin/scope before updating.
 
 Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p` or subagents.
+
+### Confirmed plugin updates
+
+Run `/starter updates` when you want to check. There is no added startup version request, polling timer, or background updater. `/starter skills` uses the same version-check/update helper for agent-skills and retains its existing confirmed installation flow when skills are missing.
+
+The updater reads structured native installation metadata and the two official public catalogs. A newer semantic version is offered with its `user` or `project` scope; equal/older versions are not reinstalled. Only confirmation permits refreshing that named marketplace and invoking native upgrade for that exact plugin/scope. Missing plugins and unmanaged npm/link/Git copies are not converted or overwritten.
+
+| Do | Don't |
+|---|---|
+| Review the plugin ID, scope and available version, then confirm or decline. | Expect opening a session to check or install updates. |
+| Restart the OMP session after a verified update to load new extension code. | Treat an on-disk update as an automatic reload of the running extension. |
+| Read failures as unverified state and check again deliberately. | Interpret network, metadata or native-command errors as “already latest.” |
+
+Native OMP remains responsible for configured marketplace sources and installation. Its version caches can be shared across scopes; a targeted scope does not guarantee a physically separate cache. Its independent `marketplace.autoUpdate` preference is not changed by this feature.
 
 ## agent-skills and task tracking
 
@@ -179,6 +194,7 @@ The `ask`-based rules load in the main session only, except `lld-before-build` a
 
 - **Removed:** task-vault synchronization into agent-skills and the primary-KB designation. Knowledge-base folder routing, memory and the commit gate remain independent.
 - **Changed:** task progress uses native todo/task with static requirement/design briefs; every task from a written plan still requires explicit LLD approval.
+- **Added:** `/starter updates` checks both plugins on demand and updates only after explicit per-plugin/scope confirmation, with native version verification and no automatic reload.
 
 ### 0.26.1 — 2026-10-29
 
