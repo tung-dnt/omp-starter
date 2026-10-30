@@ -190,7 +190,7 @@ The `ask`-based rules load in the main session only, except `lld-before-build` a
 
 ## Release notes
 
-### Unreleased
+### 0.28.0 — 2026-10-30
 
 - **Removed:** task-vault synchronization into agent-skills and the primary-KB designation. Knowledge-base folder routing, memory and the commit gate remain independent.
 - **Changed:** task progress uses native todo/task with static requirement/design briefs; every task from a written plan still requires explicit LLD approval.
