@@ -16,8 +16,6 @@ export interface KbSource {
 	contextFile: string;
 	/** Commit gate applies to `git commit` run at or below this directory; absent = gate off. */
 	gateDir?: string;
-	/** The source whose vault agent-skills uses. Exactly one source is primary. */
-	primary?: boolean;
 }
 
 export interface KbState {
@@ -66,21 +64,25 @@ interface LegacyKb {
 	kbPaths?: string[];
 	contextFile?: string;
 	gateDir?: string;
-	sources?: KbSource[];
+	sources?: Array<KbSource & { primary?: boolean }>;
 }
 
-/** Converts a pre-0.14 `kb` into one primary source; newer state passes through. */
+/** Converts old single- and multi-source state while discarding obsolete primary markers. */
 export function migrateKb(kb: LegacyKb | undefined): KbState | undefined {
-	if (!kb || kb.sources || !kb.kbRef || !kb.contextFile) {
-		return kb && { status: kb.status, ...(kb.sources ? { sources: kb.sources } : {}) };
+	if (!kb) return undefined;
+	if (kb.sources) {
+		return {
+			status: kb.status,
+			sources: kb.sources.map(({ primary: _, ...source }) => source),
+		};
 	}
+	if (!kb.kbRef || !kb.contextFile) return { status: kb.status };
 	const source: KbSource = {
 		...(kb.vault ? { vault: kb.vault } : {}),
 		kbRef: kb.kbRef,
 		kbPaths: kb.kbPaths ?? [],
 		contextFile: kb.contextFile,
 		...(kb.gateDir ? { gateDir: kb.gateDir } : {}),
-		primary: true,
 	};
 	return { status: kb.status, sources: [source] };
 }

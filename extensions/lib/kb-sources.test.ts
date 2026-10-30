@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import * as path from "node:path";
-import { EVERY_SESSION_DIR, overlapProblem, primarySource, resolveKb } from "./kb-sources";
+import { EVERY_SESSION_DIR, overlapProblem, resolveKb } from "./kb-sources";
 import { HOME, migrateKb, type KbSource } from "./state";
 
 const source = (folder: string, kbRef: string, extra: Partial<KbSource> = {}): KbSource => ({
@@ -11,7 +11,7 @@ const source = (folder: string, kbRef: string, extra: Partial<KbSource> = {}): K
 });
 
 const work = source("/w/projects", "work");
-const personal = source("/w/personal", "personal", { primary: true });
+const personal = source("/w/personal", "personal");
 const everywhere = source(EVERY_SESSION_DIR, "all");
 
 test("the folder source containing the cwd serves it; others and outside folders get none", () => {
@@ -32,12 +32,7 @@ test("source folders may be siblings but not nested, and every-session must stan
 	expect(overlapProblem(EVERY_SESSION_DIR, [])).toBeUndefined();
 });
 
-test("the marked source is primary, else the first", () => {
-	expect(primarySource({ status: "done", sources: [work, personal] })?.kbRef).toBe("personal");
-	expect(primarySource({ status: "done", sources: [work, { ...personal, primary: undefined }] })?.kbRef).toBe("work");
-});
-
-test("pre-0.14 single-kb state becomes one primary source", () => {
+test("pre-0.14 single-kb state keeps serving and gate fields without a primary marker", () => {
 	const legacy = {
 		status: "done" as const,
 		vault: `${HOME}/.kb`,
@@ -55,11 +50,28 @@ test("pre-0.14 single-kb state becomes one primary source", () => {
 				kbPaths: [`${HOME}/.kb/KnowledgeBase`],
 				contextFile: "/w/projects/AGENTS.md",
 				gateDir: "/w/projects",
-				primary: true,
 			},
 		],
 	});
 	expect(migrateKb({ status: "skipped" })).toEqual({ status: "skipped" });
-	const current = { status: "done" as const, sources: [work] };
-	expect(migrateKb(current)).toEqual(current);
+});
+
+test("multi-source migration strips stale primary keys and preserves folder, memory, and gate routing", () => {
+	const legacy = {
+		status: "done" as const,
+		sources: [
+			{ ...work, primary: true, gateDir: "/w/projects" },
+			{ ...personal, primary: false, gateDir: "/w/personal" },
+		],
+	};
+	expect(migrateKb(legacy)).toEqual({
+		status: "done",
+		sources: [
+			{ ...work, gateDir: "/w/projects" },
+			{ ...personal, gateDir: "/w/personal" },
+		],
+	});
+	const migrated = migrateKb(legacy);
+	expect(resolveKb("/w/projects/acme-api", migrated)?.kbRef).toBe("work");
+	expect(resolveKb("/w/personal/notes", migrated)?.kbRef).toBe("personal");
 });

@@ -38,11 +38,6 @@ export function resolveKb(dir: string, kb: KbState | undefined = readState().kb)
 	return folderHits[0] ?? sources.find(servesEverySession);
 }
 
-/** Source whose vault agent-skills uses. */
-export function primarySource(kb: KbState | undefined): KbSource | undefined {
-	const sources = doneSources(kb);
-	return sources.find(s => s.primary) ?? sources[0];
-}
 
 /** Source whose KB contains `p` (absolute), if any. */
 export function sourceOwning(p: string, kb: KbState | undefined): KbSource | undefined {

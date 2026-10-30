@@ -141,20 +141,11 @@ It needs no provider login, never installs or changes an SDK, and never changes 
 
 Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p` or subagents.
 
-## agent-skills
+## agent-skills and task tracking
 
-agent-skills (0.6.23 and later) registers its own omp extension: the `work_state` tool its workflows run on, and the `/resume` hint shown when a session starts in a repository with claimed tasks. This plugin no longer ships that hint.
+agent-skills' planning and build workflows use the native session todo and task tools for mutable progress. The active session is the single progress owner; a task run is execution, not proof that code is verified.
 
-### Task tracking
-
-agent-skills work state (stories, tasks, statuses) is stored as notes in the format of Obsidian's project-manager plugin (dotpm). Once the knowledge-base step is done, the notes live in your vault under `<vault>/<projectsFolder>/<repo>/stories` and `…/epics`, where `<projectsFolder>` is the project-manager plugin's setting (default `Projects`) and `<repo>` is the repository name. Without a vault, they live in the repo under `docs/stories`, with the same note format.
-
-The plugin tells agent-skills where your vault is by writing `~/.config/agent-skills/config.json` (or under `$XDG_CONFIG_HOME`). It does this when the knowledge-base step finishes and again at each session start, so existing installs pick it up without rerunning the wizard. The file is per machine, other keys in it are kept, and the plugin never deletes it.
-
-Two optional keys in a repo's committed `.agent-skills.json` override this:
-
-- `"store": "repo"` keeps that repo's tasks in git, even when a vault is configured.
-- `"vaultFolder": "group/name"` changes the folder used under the projects folder (default: the repo name).
+Keep plans, acceptance criteria, designs and decisions as static artifacts, and pass workers their approved artifact paths. Native todo/task state is session-local: it does not provide a shared project board, cross-session claims or automatic dependency scheduling. For durable cross-session project coordination, choose and maintain an external tracker deliberately; do not mirror native task status into KB notes.
 
 ## Asking questions
 
@@ -162,9 +153,9 @@ The plugin ships an always-on rule (`rules/ask-user.md`): the agent puts every r
 
 A second always-on rule (`rules/how-means-plan.md`): a request phrased as "how …" (or in Vietnamese "làm sao …", "như thế nào …", "cách nào …") is treated as planning and discussion. The agent investigates read-only, presents options, trade-offs and a recommendation, and asks before building anything.
 
-A third always-on rule (`rules/lld-before-build.md`): before implementing any task from a written task breakdown, the agent writes that task's low-level design note and gets your explicit approval through agent-skills' approval gate, one approval per note by default (`/build auto` and the approval gate's "Don't stop" batch mode show every note and ask once for all of them). Large stories (more than about five tasks, or several repos) use slice gates: every task keeps its own note, and one approval covers a repo-sized slice, after which each task in it is recorded as approved, so `work_state ready` and `task-builder` accept them. At the end of each planning phase (spec, design, plan, task design), the agent shows the result, settled decisions, and artifact path in chat, including a task's design verbatim, then asks for approval through the `ask` dialog in the same turn. No plan-mode toggle or Plan Review submission is required. Proceed authorizes the next step and the agent starts it in the same turn, without asking again; Revise updates the result and asks again. Approved tasks are built only as designed (through agent-skills' `task-builder` when installed), and run in parallel only when their notes show no shared files or generated outputs. Ad-hoc fixes, debugging and reviews are unaffected.
+A third always-on rule (`rules/lld-before-build.md`): every task from a written plan gets a low-level design artifact and your explicit approval before implementation. The main session keeps mutable progress in native todo; workers receive the approved artifact path. Design changes require fresh approval. Native task completion is not verification.
 
-A fourth always-on rule (`rules/ticket-tracking.md`): work tied to an agent-skills task note, or a vault or repo task file, updates its status as the work changes state, and records every final decision (approved designs, your `ask` answers, deviations, the outcome with its evidence) there when it is made. agent-skills task notes are updated through `work_state` (`set` for status, `log` for decisions, with "waiting on approval" as a log line); one writer per ticket. Issue trackers such as Jira are never commented on unless you ask, and any status transition is asked first.
+A fourth always-on rule (`rules/ticket-tracking.md`): native todo is the sole mutable progress checklist for the active session. Plans and decisions remain in static artifacts; native execution is not test proof. Issue trackers such as Jira are never commented on unless you ask, and any status transition is asked first.
 
 A fifth always-on rule (`rules/say-it-in-chat.md`): chat views that collapse tool calls to their one-line intent (herdr web's Chat view, for one) hide subagent briefs and paths, so the agent says in chat what a subagent will do (task, files, limits like "no push") and puts paths, branches and results in its prose, not only in tool arguments.
 
@@ -180,9 +171,14 @@ With the Jev step on, `rules/lsp-symbol-judged.md` replaces the regex LSP rule (
 
 The same Jev step turns on `extensions/lsp-guard.ts`, which blocks instead of reminding, in coding subagents only (`task-builder`, `task`, `code-reviewer`, `test-engineer`). Before an `rg`/`grep` runs, code drops what is text by construction: a grep reading another command's output, and searches whose every path is `/tmp`, an artifact, `node_modules`, docs, SQL/migrations, data or logs. Jev then judges the rest with the judged rule's own question. At p ≥ 0.85 the call is blocked with the exact `lsp`/`xd://lsp` call to make instead. Appending `# text-search` to the command lets it run, for a language with no server or a real text search. No key, a timeout or a bad answer lets the command run. On 94 labelled greps from real subagent sessions it blocked 27 of 36 symbol lookups and 3 of 58 other searches (two of those three also grepped identifiers).
 
-The `ask`-based rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder` (it updates its own task note). Other subagents can't use the `ask` tool, so they don't carry these rules.
+The `ask`-based rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder`. Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Release notes
+
+### Unreleased
+
+- **Removed:** task-vault synchronization into agent-skills and the primary-KB designation. Knowledge-base folder routing, memory and the commit gate remain independent.
+- **Changed:** task progress uses native todo/task with static requirement/design briefs; every task from a written plan still requires explicit LLD approval.
 
 ### 0.26.1 — 2026-10-29
 
@@ -239,9 +235,7 @@ The `ask`-based rules load in the main session only, except `lld-before-build` a
 
 ### 0.16.0 — 2026-10-28
 
-- **Removed:** the agent-skills `/resume` hint extension (`extensions/agent-skills-hint.ts`). agent-skills 0.6.23 registers the hint itself, with the `work_state` tool that replaced its `work-state.sh`. Upgrade both plugins together.
-- **Changed:** show planning results in the current chat and request explicit approval through `ask`, without requiring plan mode. Per-note approvals, batch gates, and re-approval after changes remain required.
-- **Changed:** large stories (more than about five tasks or several repos) are approved per repo-sized slice, not per task, through agent-skills' slice gates: each task keeps its own note and is recorded as approved, so the build tooling accepts it. An approval is acted on in the same turn and never re-asked.
+- **Changed:** planning results are shown in the current chat, with explicit user approval requested through `ask` without requiring plan mode.
 - **Changed:** `rules/how-means-plan.md` also recognises Vietnamese "how" phrasing ("làm sao", "như thế nào", "cách nào").
 - **Changed:** `rules/ask-user.md` keeps waits short: facts are looked up before a phase's first question, every independent question goes into one dialog, and nothing but the lookups the answers require runs between rounds.
 - **Added:** `rules/agent-sessions.md`: never answer another session's dialog or type into it, report a stall in chat instead of waiting, and report progress only from verified output.
@@ -254,7 +248,7 @@ The `ask`-based rules load in the main session only, except `lld-before-build` a
 ### 0.14.0 — 2026-10-27
 
 - **Added:** `kb_remember` and `kb_recall` tools to save and search memory notes without hand-editing `MEMORY.md`.
-- **Added:** one knowledge base per folder. `/starter kb` adds, replaces or removes knowledge bases and picks the primary one for agent-skills; the memory index, tools and commit gate follow the session's folder. Existing single-knowledge-base installs keep working unchanged.
+- **Added:** one knowledge base per folder. `/starter kb` adds, replaces or removes knowledge bases; the memory index, tools and commit gate follow the session's folder. Existing single-knowledge-base installs keep working unchanged.
 - **Changed:** the generated `AGENTS.md` documents nested `metadata:` frontmatter for memory notes and points at `kb_remember`. Rerun `/starter kb` to regenerate it, or edit yours by hand.
 
 ### 0.13.0 — 2026-10-26

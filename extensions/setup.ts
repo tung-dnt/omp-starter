@@ -4,7 +4,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { syncAgentSkillsStore } from "./lib/agent-skills-store";
 import { JEV_MODEL, setupJev } from "./lib/jev";
 import { setupModels } from "./lib/routing";
 import { EVERY_SESSION_DIR, doneSources, overlapProblem, servesEverySession, sourceFolder } from "./lib/kb-sources";
@@ -161,20 +160,13 @@ async function writeWithBackup(ui: WizardUi, file: string, content: string): Pro
 
 const ADD_SOURCE = "Add or replace a knowledge base for a folder";
 const REMOVE_SOURCE = "Remove a knowledge base";
-const PICK_PRIMARY = "Choose the primary knowledge base (agent-skills tasks)";
 const KB_DONE = "Done";
 const EVERY_SESSION = "Every omp session";
 const ONE_FOLDER = "Sessions under one folder";
 
 function sourceLabel(s: KbSource): string {
 	const scope = servesEverySession(s) ? "every session" : tildify(sourceFolder(s));
-	return `${scope} → ${s.kbRef}${s.primary ? " (primary)" : ""}`;
-}
-
-/** Marks exactly one source primary: the one at `index`, else the current primary, else the first. */
-function withPrimary(sources: KbSource[], index = sources.findIndex(s => s.primary)): KbSource[] {
-	const pick = index < 0 ? 0 : index;
-	return sources.map(({ primary: _, ...rest }, i) => (i === pick ? { ...rest, primary: true } : rest));
+	return `${scope} → ${s.kbRef}`;
 }
 
 /**
@@ -271,7 +263,6 @@ async function addSource(ui: WizardUi, sources: KbSource[]): Promise<KbSource | 
 		kbPaths: [...new Set([kbRootAbs, kbAbs])],
 		contextFile,
 		...(gate ? { gateDir } : {}),
-		...(replaced?.primary ? { primary: true } : {}),
 	};
 }
 
@@ -287,8 +278,8 @@ async function retireContextFile(ui: WizardUi, file: string): Promise<void> {
 }
 
 /**
- * First run: one knowledge base. Later runs: a menu to add or replace one per folder, remove one, or
- * pick the primary. Cancelling returns the current state unchanged.
+ * First run: one knowledge base. Later runs: a menu to add or replace one per folder or remove one.
+ * Cancelling returns the current state unchanged.
  */
 export async function setupKnowledgeBase(ui: WizardUi, current: KbState | undefined): Promise<KbState> {
 	let sources = doneSources(current);
@@ -297,29 +288,24 @@ export async function setupKnowledgeBase(ui: WizardUi, current: KbState | undefi
 			return { status: "skipped" };
 		}
 		const added = await addSource(ui, []);
-		return added ? { status: "done", sources: withPrimary([added]) } : { status: "skipped" };
+		return added ? { status: "done", sources: [added] } : { status: "skipped" };
 	}
 	for (;;) {
 		const choice = await ui.select(`Knowledge bases: ${sources.map(sourceLabel).join("; ")}`, [
 			ADD_SOURCE,
 			REMOVE_SOURCE,
-			...(sources.length > 1 ? [PICK_PRIMARY] : []),
 			KB_DONE,
 		]);
 		if (!choice || choice === KB_DONE) break;
 		if (choice === ADD_SOURCE) {
 			const added = await addSource(ui, sources);
-			if (added) sources = withPrimary([...sources.filter(s => s.contextFile !== added.contextFile), added]);
+			if (added) sources = [...sources.filter(s => s.contextFile !== added.contextFile), added];
 		} else if (choice === REMOVE_SOURCE) {
 			const picked = await ui.select("Remove which knowledge base?", sources.map(sourceLabel));
 			const target = sources.find(s => sourceLabel(s) === picked);
 			if (!target) continue;
 			await retireContextFile(ui, target.contextFile);
-			sources = withPrimary(sources.filter(s => s !== target));
-		} else {
-			const picked = await ui.select("Primary knowledge base (agent-skills stores tasks in its vault)", sources.map(sourceLabel));
-			const index = sources.findIndex(s => sourceLabel(s) === picked);
-			if (index >= 0) sources = withPrimary(sources, index);
+			sources = sources.filter(s => s !== target);
 		}
 	}
 	return sources.length ? { status: "done", sources } : { status: "skipped" };
@@ -386,12 +372,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 			}
 		}
 		if (steps.kb) {
-			const next = updateState({ kb: await setupKnowledgeBase(ui, readState().kb) });
-			try {
-				syncAgentSkillsStore(next);
-			} catch (error) {
-				ui.notify(`Could not point agent-skills at the vault: ${String(error)}`, "warning");
-			}
+			updateState({ kb: await setupKnowledgeBase(ui, readState().kb) });
 		}
 		if (steps.tools) {
 			try {
@@ -437,15 +418,6 @@ export default function ompStarter(pi: ExtensionAPI): void {
 		await deferred?.();
 	});
 
-	// Cheap sync so installs that predate the vault key pick it up without rerunning the wizard.
-	pi.on("session_start", (_event, ctx) => {
-		if (ctx.agent?.kind === "sub") return;
-		try {
-			syncAgentSkillsStore(readState());
-		} catch (error) {
-			if (ctx.hasUI) ctx.ui.notify(`Could not point agent-skills at the vault: ${String(error)}`, "warning");
-		}
-	});
 
 	pi.registerCommand("starter", {
 		description: "Rerun omp-starter setup. Args: skills | models | jev | kb | tools (default: all)",

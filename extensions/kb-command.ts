@@ -36,7 +36,7 @@ function status(cwd: string, snapshot: MemorySnapshot | undefined): string {
 		real = undefined;
 	}
 	const lines = [
-		`Knowledge base ${source.kbRef} serves ${served(source)}${source.primary ? " (primary, used by agent-skills)" : ""}.`,
+		`Knowledge base ${source.kbRef} serves ${served(source)}.`,
 		real ? `  Vault: ${tildify(real)}` : `  Vault: ${root} is not reachable (missing, unmounted or evicted)`,
 	];
 	const index = readIndex(dir);
