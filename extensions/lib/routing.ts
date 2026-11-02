@@ -1,5 +1,5 @@
 // Subscription model + effort presets and subscription-agnostic agent settings, written by the
-// setup wizard's "models" step. The Fable router shares the Claude model ids.
+// setup wizard's "models" step. The escalation router shares these model ids.
 import type { Exec, WizardUi } from "../setup";
 
 export const MODELS = {
@@ -12,6 +12,7 @@ export const MODELS = {
 export const CODEX_MODELS = {
 	sol: "openai-codex/gpt-6.1-sol",
 	luna: "openai-codex/gpt-6-luna",
+	astra: "openai-codex/gpt-6-astra",
 } as const;
 
 export const MODEL_PRESETS = {
@@ -20,7 +21,7 @@ export const MODEL_PRESETS = {
 			default: "openai-codex/gpt-6.1-sol",
 			slow: "openai-codex/gpt-6.1-sol:high",
 			plan: "@slow",
-			deep: "openai-codex/gpt-6.1-sol:high",
+			deep: "openai-codex/gpt-6-astra:high",
 			task: "openai-codex/gpt-6-luna:high",
 			smol: "openai-codex/gpt-6-luna",
 			tiny: "openai-codex/gpt-6-luna:low",
@@ -54,12 +55,21 @@ interface Setting {
 	merge?: boolean;
 }
 
-// Written on every subscription: none of these names a concrete model.
+// Shared settings and subscription-local fallback chains are saved for both presets.
 // Planning gets the effort (one plan feeds every slice); coders keep a `high` floor and the
-// parent raises risky slices to `max`; Fable is reserved for the `deep` role and the router.
+// parent raises risky slices to `max`; Fable/Astra are reserved for `deep` and the router.
 export const COMMON: Setting[] = [
 	{ key: "defaultThinkingLevel", value: "auto" },
 	{ key: "modelPresets", merge: true, value: MODEL_PRESETS },
+	{
+		key: "retry.fallbackChains",
+		merge: true,
+		value: {
+			[MODELS.fable]: [MODELS.opus],
+			[MODELS.opus]: [MODELS.sonnet],
+			[CODEX_MODELS.astra]: [CODEX_MODELS.sol],
+		},
+	},
 	{ key: "cycleOrder", value: ["smol", "default", "slow", "deep"] },
 	{ key: "task.enableEffort", value: true },
 	{ key: "task.maxEffort", value: "max" },
@@ -94,7 +104,6 @@ const ROUTING = {
 		models: Object.values(MODELS),
 		settings: [
 			{ key: "modelRoles", merge: true, value: MODEL_PRESETS.claude.modelRoles },
-			{ key: "retry.fallbackChains", merge: true, value: { [MODELS.fable]: [MODELS.opus], [MODELS.opus]: [MODELS.sonnet] } },
 		],
 	},
 	codex: {
@@ -147,7 +156,7 @@ export async function setupModels(ui: WizardUi, exec: Exec, judge?: string): Pro
 			"LSP diagnostics after every edit and repeating LSP/debugger reminders, on any subscription. " +
 			"Then apply routing for the subscription whose models are available: Claude first (Opus for the main session " +
 			"and planning, Sonnet for coding and review, Haiku 5.5 for exploration and mechanical work, Fable for deep consultation), " +
-			"otherwise Codex (GPT-6.1 Sol and GPT-6 Luna). With neither, routing stays unchanged. " +
+			"otherwise Codex (GPT-6.1 Sol, GPT-6 Luna, and GPT-6 Astra for deep consultation). With neither, routing stays unchanged. " +
 			"Existing roles and presets with the same names are replaced; others are kept.",
 	);
 	if (!ok) return "skipped";

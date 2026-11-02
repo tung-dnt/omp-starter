@@ -1,8 +1,8 @@
 {
   "name": "omp-starter",
-  "version": "0.26.1",
+  "version": "0.27.0",
   "private": true,
-  "description": "First-run setup for omp: Claude-first routing with Codex/Claude subscription presets and capped Fable escalation, Obsidian vaults as knowledge base + memory per folder with kb_remember/kb_recall tools, optional agent-skills, and optional guided LSP/debugger tooling for JavaScript/TypeScript, Python, Go, Rust and C/C++",
+  "description": "First-run setup for omp: Claude-first routing with Codex/Claude subscription presets and capped Fable/Astra escalation, Obsidian vaults as knowledge base + memory per folder with kb_remember/kb_recall tools, optional agent-skills, and optional guided LSP/debugger tooling for JavaScript/TypeScript, Python, Go, Rust and C/C++",
   "license": "MIT",
   "omp": {
     "extensions": [
@@ -14,5 +14,8 @@
       "./extensions/fable-router.ts",
       "./extensions/lsp-guard.ts"
     ]
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6"
   }
 }
