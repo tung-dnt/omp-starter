@@ -103,7 +103,8 @@ const FAKE = [
 	'const cp = require("node:child_process");',
 	"const scenario = __SCENARIO__;",
 	"const argv = process.argv.slice(2);",
-	'fs.appendFileSync(scenario.record, JSON.stringify({ kind: argv[0] === "config" ? "config" : "rpc", argv, cwd: process.cwd(), env: process.env }) + "\\n");',
+	'const dapFile = ".omp/dap.json";',
+	'fs.appendFileSync(scenario.record, JSON.stringify({ kind: argv[0] === "config" ? "config" : "rpc", argv, cwd: process.cwd(), env: process.env, dap: fs.existsSync(dapFile) ? JSON.parse(fs.readFileSync(dapFile, "utf8")) : null }) + "\\n");',
 	"function flat(value, prefix, out) {",
 	"  for (const key of Object.keys(value)) {",
 	"    const member = value[key];",
@@ -204,6 +205,8 @@ interface Invocation {
 	argv: string[];
 	cwd: string;
 	env: Record<string, string>;
+	/** The fixture's `.omp/dap.json` as the verifier wrote it, when it wrote one. */
+	dap: { adapters: Record<string, Record<string, unknown>> } | null;
 }
 
 function invocations(record: string): Invocation[] {
@@ -292,9 +295,10 @@ test("private TMPDIR leaves room for js-debug Unix sockets on all supported plat
 	await verifyLanguage(plan(b, "javascript"), await contextFor(b, omp, { tempRoot: undefined }));
 	const run = invocations(record).find(invocation => invocation.kind === "rpc");
 	if (!run?.env.TMPDIR) throw new Error("helper temporary directory was not recorded");
-	// Darwin's sun_path is 104 bytes; reserve js-debug's real name including a long Linux PID.
-	const socket = path.join(run.env.TMPDIR, "node-cdp.4194304-01234567-0.sock");
-	expect(Buffer.byteLength(socket)).toBeLessThan(104);
+	// Darwin's sun_path is 104 bytes; reserve js-debug's real name including a long Linux PID, and the Bun debugger's `<32 hex>.sock`.
+	for (const name of ["node-cdp.4194304-01234567-0.sock", "0123456789abcdef0123456789abcdef.sock"]) {
+		expect(Buffer.byteLength(path.join(run.env.TMPDIR, name))).toBeLessThan(104);
+	}
 }, SLOW);
 
 test("every required variant is verified, each in its own fixture directory", async () => {
@@ -443,8 +447,9 @@ test("a subset, empty or padded list of fixtures is not a verification of the gr
 	const { omp, record } = fakeOmp(b, {});
 	const context = await contextFor(b, omp);
 	const cases: LanguagePlan[] = [
+		plan(b, "javascript", { fixtures: [fixture("javascript"), fixture("typescript")] }),
+		plan(b, "javascript", { fixtures: [fixture("typescript"), fixture("bun")] }),
 		plan(b, "javascript", { fixtures: [fixture("javascript")] }),
-		plan(b, "javascript", { fixtures: [fixture("typescript")] }),
 		plan(b, "cpp", { fixtures: [fixture("c")] }),
 		plan(b, "python", { fixtures: [] }),
 		plan(b, "go", { fixtures: [fixture("go"), fixture("go")] }),
@@ -457,7 +462,7 @@ test("a subset, empty or padded list of fixtures is not a verification of the gr
 		expect(outcome.lsp.detail).toContain("variants");
 	}
 	expect(invocations(record)).toEqual([]);
-	expect(REQUIRED_VARIANTS.javascript).toEqual(["javascript", "typescript"]);
+	expect(REQUIRED_VARIANTS.javascript).toEqual(["javascript", "typescript", "bun"]);
 	expect(REQUIRED_VARIANTS.cpp).toEqual(["c", "cpp"]);
 }, SLOW);
 
@@ -628,6 +633,108 @@ test("known fixture-safe SDK bindings and the preserve-ASLR command are accepted
 	const outcome = await verifyLanguage(plan(b, "python"), await contextFor(b, omp));
 
 	expect(outcome.dap.status).toBe("ready");
+}, SLOW);
+
+// ── Companion tools: one integration, several launches ──────────────────────────────────────────
+
+/** A JavaScript group whose `adp` fixtures use the primary launch and whose `bun` fixture uses the companion `adp2` with its own. */
+function companionPlan(b: Box, companion: Partial<{ command: string; args: string[]; runtime: string; type: string; granted: string }> = {}): { plan: LanguagePlan; primary: string; bun: string; adapter: string } {
+	const primary = script(path.join(b.tools, "primary"), "exit 0");
+	const bun = script(path.join(b.tools, "bun"), "exit 0");
+	const adapter = script(path.join(b.tools, "adapter.ts"), "exit 0");
+	const launch = { command: companion.command ?? bun, args: companion.args ?? [adapter] };
+	const bunEntry = { kind: "dap" as const, key: "adp2", value: { command: launch.command, args: launch.args, connectMode: "stdio" as const, launchDefaults: { type: companion.type ?? "bun", request: "launch", runtime: companion.runtime ?? bun } } };
+	const base = plan(b, "javascript");
+	return {
+		primary,
+		bun,
+		adapter,
+		plan: {
+			...base,
+			dap: reuse("dap", primary, {
+				prerequisites: [{ name: "bun", requirement: "bun", satisfied: true, found: { path: companion.granted ?? companion.runtime ?? bun } }],
+				entries: [bunEntry],
+				companions: [{ key: "adp2", tool: { name: "bun-debug-adapter", sources: [] }, launch }],
+			}),
+			fixtures: [fixture("javascript"), fixture("typescript"), fixture("bun", { dap: { adapter: "adp2", program: "main.src", breakpoint: { file: "util.src", line: 2 }, variable: { name: "answer", value: "42" } } })],
+		},
+	};
+}
+
+test("a companion's fixtures run with the companion's own launch and the primary's keep theirs", async () => {
+	const b = box();
+	const { omp, record } = fakeOmp(b, {});
+	const { plan: companions, primary, bun, adapter } = companionPlan(b);
+	const outcome = await verifyLanguage(companions, await contextFor(b, omp));
+
+	expect(outcome.dap.status).toBe("ready");
+	expect(outcome.lsp.status).toBe("ready");
+	const written = invocations(record).filter(item => item.kind === "rpc").map(item => item.dap?.adapters);
+	expect(written).toHaveLength(3);
+	expect(written[0]).toEqual({ adp: expect.objectContaining({ command: primary, args: ["--stdio"], launchDefaults: { stopOnEntry: true } }) });
+	expect(written[2]).toEqual({ adp2: expect.objectContaining({ command: bun, args: [adapter], connectMode: "stdio", launchDefaults: { type: "bun", request: "launch", runtime: bun, stopOnEntry: true } }) });
+}, SLOW);
+
+test("a companion launch that fails the path rules is refused like the primary's, naming that launch", async () => {
+	const b = box();
+	const { omp, record } = fakeOmp(b, {});
+	const context = await contextFor(b, omp);
+
+	const relative = await verifyLanguage(companionPlan(b, { command: "bun" }).plan, context);
+	expect(relative.dap.status).toBe("unverified");
+	expect(relative.dap.detail).toContain("absolute launch command");
+
+	const absent = path.join(b.tools, "no-such-bun");
+	const missing = await verifyLanguage(companionPlan(b, { command: absent }).plan, context);
+	expect(missing.dap.status).toBe("missing");
+	expect(missing.dap.detail).toContain(absent);
+	expect(missing.dap.command?.command).toBe(absent);
+
+	const inProject = path.join(b.project, "node_modules", "adapter.ts");
+	script(inProject, "exit 0");
+	const argument = await verifyLanguage(companionPlan(b, { args: [inProject] }).plan, context);
+	expect(argument.dap.status).toBe("unverified");
+	expect(argument.dap.detail).toContain("a launch argument points into your project");
+
+	const projectBun = script(path.join(b.project, "bin", "bun"), "exit 0");
+	const local = companionPlan(b, { command: projectBun, runtime: projectBun });
+	const withheld = await verifyLanguage(local.plan, context);
+	expect(withheld.dap.status).toBe("unverified");
+	expect(withheld.dap.detail).toContain("comes from your project");
+	const granted = await verifyLanguage(local.plan, await contextFor(b, omp, { approvedProjectLocal: [projectBun] }));
+	expect(granted.dap.status).toBe("ready");
+	// The language server was still verified every time, but no debugger ran for a refusal: only the granted plan wrote a dap.json.
+	expect(invocations(record).filter(item => item.kind === "rpc" && item.dap !== null)).toHaveLength(3);
+}, SLOW);
+
+test("a Bun debugger entry may name only the granted Bun as its runtime and only the known debug types", async () => {
+	const b = box();
+	const { omp, record } = fakeOmp(b, {});
+	const context = await contextFor(b, omp);
+
+	for (const patch of [{ runtime: "/usr/bin/evil-runtime", granted: path.join(b.tools, "bun") }, { type: "node-terminal" }]) {
+		const refused = await verifyLanguage(companionPlan(b, patch).plan, context);
+		expect(refused.dap.status).toBe("unverified");
+		expect(refused.dap.detail).toContain("runtime" in patch ? "launchDefaults.runtime" : "launchDefaults.type");
+	}
+	expect(invocations(record).filter(item => item.kind === "rpc" && item.dap !== null)).toEqual([]);
+
+	const pwa = await verifyLanguage(companionPlan(b, { type: "pwa-node" }).plan, context);
+	expect(pwa.dap.status).toBe("ready");
+}, SLOW);
+
+test("a companion key is proposed only by its own entry", async () => {
+	const b = box();
+	const { omp } = fakeOmp(b, {});
+	const context = await contextFor(b, omp);
+	const { plan: companions } = companionPlan(b);
+	const dap = companions.dap;
+	if (dap.status !== "reuse") throw new Error("expected a reuse plan");
+	// The companion's entry has been renamed, so the plan proposes an entry no fixture exercises.
+	const renamed = { ...companions, dap: { ...dap, entries: dap.entries.map(entry => ({ ...entry, key: "other" })) } };
+	const outcome = await verifyLanguage(renamed, context);
+	expect(outcome.dap.status).toBe("unverified");
+	expect(outcome.dap.detail).toContain("proposes other");
 }, SLOW);
 
 // ── Helper-side observation logic (the public SDK tools replaced by scripted ones) ──────────────

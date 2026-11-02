@@ -368,12 +368,8 @@ export function buildChildEnv(options: ChildEnvOptions): Record<string, string> 
 		LANG: "C",
 		TERM: "dumb",
 		NO_COLOR: "1",
-		// npm: empty user/global config, private cache, lifecycle scripts off. The lock file's integrity checks stay on.
-		npm_config_userconfig: path.join(scratch.config, "npmrc"),
-		npm_config_globalconfig: path.join(scratch.config, "npmrc-global"),
-		npm_config_cache: path.join(scratch.cache, "npm"),
-		npm_config_ignore_scripts: "true",
-		npm_config_update_notifier: "false",
+		// Bun: installs use a cache inside the private tree. Lifecycle scripts stay off through `--ignore-scripts` on every install command; the lock files' integrity checks stay on. No outside BUN_* variable is inherited.
+		BUN_INSTALL_CACHE_DIR: path.join(scratch.cache, "bun"),
 		// pip: no user config or startup hooks; callers pass --isolated and hash-locked requirements.
 		PIP_CONFIG_FILE: NULL_DEVICE,
 		PIP_CACHE_DIR: path.join(scratch.cache, "pip"),
@@ -469,7 +465,7 @@ const PYTHON_ROOT_MARKERS = [
 
 /** omp's project-local bin directories, checked before PATH when the root marker exists in the cwd. */
 const LOCAL_BIN_RULES: readonly { readonly markers: readonly string[]; readonly binDir: string }[] = [
-	{ markers: ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"], binDir: "node_modules/.bin" },
+	{ markers: ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"], binDir: "node_modules/.bin" },
 	{ markers: PYTHON_ROOT_MARKERS, binDir: ".venv/bin" },
 	{ markers: PYTHON_ROOT_MARKERS, binDir: "venv/bin" },
 	{ markers: PYTHON_ROOT_MARKERS, binDir: ".env/bin" },
@@ -2386,8 +2382,6 @@ class RuntimeImpl implements Runtime {
 			};
 			const workRoot = path.join(root, "work");
 			for (const dir of [...Object.values(dirs), workRoot]) await fsp.mkdir(dir, { mode: 0o700 });
-			await fsp.writeFile(path.join(dirs.config, "npmrc"), "", { mode: 0o600 });
-			await fsp.writeFile(path.join(dirs.config, "npmrc-global"), "", { mode: 0o600 });
 			return { ...dirs, root, workRoot };
 		})().catch((error: unknown) => {
 			// A failed preparation can be retried (for example once the listed processes are stopped).

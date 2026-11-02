@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { inspectConfig } from "./config";
-import { planGo, planJavascript, planPython } from "./managed";
+import { bunDebuggerRequest, planGo, planJavascript, planPython, typescriptServerOperations } from "./managed";
 import { createRuntime, ensureToolingRoots, INSTALL_MANIFEST_FILE, RuntimeError } from "./runtime";
 import type {
 	BlockedPlan,
@@ -159,9 +159,33 @@ async function installError(runtime: Runtime, plan: InstallPlan): Promise<Runtim
 
 // ── JavaScript / TypeScript ─────────────────────────────────────────────────────────────────────
 
+/**
+ * A fake `bun`: answers its own version for `--version`, and `serverVersion` when asked for the version of a script it
+ * was told to run (`bun --bun <script> --version`), which is how the language server is probed. Every call is logged to
+ * `marker` when given.
+ */
+function bunSdk(b: Box, options: { version?: string; serverVersion?: string; marker?: string } = {}): string {
+	return script(
+		path.join(b.bin, "bun"),
+		[
+			...(options.marker === undefined ? [] : [`echo "$*" >> "${options.marker}"`]),
+			'case "$*" in',
+			`"--bun "*" --version") echo "${options.serverVersion ?? "6.0.2"}" ;;`,
+			`*) echo "${options.version ?? "1.4.4"}" ;;`,
+			"esac",
+		].join("\n"),
+	);
+}
+
+/** Node, Bun and an npm-style TypeScript 6 SDK: everything the JavaScript group needs. */
+function javascriptToolchain(b: Box, tscVersion = "6.0.3"): { bun: string; tsc: string; lib: string } {
+	tool(b, "node", "v24.22.0");
+	const bun = bunSdk(b);
+	return { bun, ...typescript(b, tscVersion) };
+}
 
 test(
-	"an existing TypeScript 7 uses its native server: no install, no npm, and a missing Node blocks only the debugger",
+	"an existing TypeScript 7 uses its native server: no install, no npm, and a missing Bun blocks only the debugger",
 	async () => {
 		const b = box();
 		const sdk = typescript(b, "7.0.2");
@@ -177,16 +201,18 @@ test(
 
 		const dap = blockedOf(plan.dap);
 		expect(dap.result.status).toBe("needs-sdk");
-		expect(dap.result.detail).toContain("22.22.2");
+		expect(dap.result.detail).toContain("bun >= 1.4.4");
+		expect("companions" in dap).toBe(false);
 	},
 	SLOW,
 );
 
 test(
-	"TypeScript 5 blocks only the language server; the debugger and both fixtures use its compiler",
+	"TypeScript 5 blocks only the language server; the debugger and every fixture use its compiler",
 	async () => {
 		const old = box();
 		tool(old, "node", "v22.22.2");
+		bunSdk(old);
 		const oldSdk = typescript(old, "5.9.3");
 		const plan = await planJavascript(await contextFor(old));
 		const lsp = blockedOf(plan.lsp);
@@ -194,34 +220,151 @@ test(
 		expect(lsp.result.detail).toContain("5.9.3");
 		expect(lsp.result.detail).toContain("typescript@6");
 		expect(installOf(plan.dap).install.tool).toBe("js-debug");
-		expect(plan.fixtures.map(item => item.id)).toEqual(["javascript", "typescript"]);
+		expect(plan.fixtures.map(item => item.id)).toEqual(["javascript", "typescript", "bun"]);
 		expect(fixture(plan, "typescript").build?.[0]?.command).toBe(oldSdk.tsc);
 	},
 	SLOW,
 );
 
 test(
-	"Node 22.22.2 is the boundary for both JavaScript integrations",
+	"Bun 1.4.4 is the boundary for the language server and for both debuggers, and a missing Bun is never installed",
 	async () => {
 		const below = box();
-		tool(below, "node", "v22.22.1");
-		tool(below, "npm", "10.9.2");
+		tool(below, "node", "v24.22.0");
+		bunSdk(below, { version: "1.4.3" });
 		typescript(below, "6.0.3");
 		const blockedPlan = await planJavascript(await contextFor(below));
 		for (const integration of [blockedPlan.lsp, blockedPlan.dap]) {
 			const plan = blockedOf(integration);
 			expect(plan.result.status).toBe("needs-sdk");
-			expect(plan.result.detail).toContain("22.22.2");
-			expect(plan.result.detail).toContain("22.22.1");
+			expect(plan.result.detail).toContain("1.4.4");
+			expect(plan.result.detail).toContain("1.4.3");
 		}
+		expect(blockedPlan.dap.notes.join(" ")).toContain("Both debuggers run on Bun");
 
 		const exact = box();
-		tool(exact, "node", "v22.22.2");
-		tool(exact, "npm", "10.9.2");
+		tool(exact, "node", "v24.22.0");
+		bunSdk(exact, { version: "1.4.4" });
 		typescript(exact, "6.0.3");
 		const okPlan = await planJavascript(await contextFor(exact));
 		expect(okPlan.lsp.status).toBe("install");
 		expect(okPlan.dap.status).toBe("install");
+
+		const absent = box();
+		tool(absent, "node", "v24.22.0");
+		typescript(absent, "6.0.3");
+		const none = await planJavascript(await contextFor(absent));
+		expect(blockedOf(none.lsp).prerequisites.map(item => [item.name, item.satisfied])).toEqual([
+			["bun", false],
+			["typescript", true],
+		]);
+		expect(blockedOf(none.dap).result.status).toBe("needs-sdk");
+	},
+	SLOW,
+);
+
+test(
+	"Node 22.22.2 is the boundary for the programs js-debug debugs, and a missing Node does not touch the language server",
+	async () => {
+		const below = box();
+		tool(below, "node", "v22.22.1");
+		bunSdk(below);
+		typescript(below, "6.0.3");
+		const plan = await planJavascript(await contextFor(below));
+		expect(plan.lsp.status).toBe("install");
+		const dap = blockedOf(plan.dap);
+		expect(dap.result.status).toBe("needs-sdk");
+		expect(dap.result.detail).toContain("22.22.2");
+		expect(dap.result.detail).toContain("22.22.1");
+
+		const exact = box();
+		tool(exact, "node", "v22.22.2");
+		bunSdk(exact);
+		typescript(exact, "6.0.3");
+		expect((await planJavascript(await contextFor(exact))).dap.status).toBe("install");
+	},
+	SLOW,
+);
+
+test(
+	"the language server installs from the committed Bun lock and runs its own script on Bun, never through the Node shebang",
+	async () => {
+		const b = box();
+		const sdk = javascriptToolchain(b);
+		const runtime = runtimeFor(b);
+		const plan = installOf((await planJavascript(await contextFor(b, runtime))).lsp);
+
+		const destination = runtime.installDirectory("typescript-language-server", "6.0.2");
+		const cli = path.join(destination, "node_modules", "typescript-language-server", "lib", "cli.mjs");
+		expect(plan.launch).toEqual({ command: sdk.bun, args: ["--bun", cli, "--stdio"] });
+		expect(plan.entries[0]).toMatchObject({ key: "typescript-language-server", value: { command: sdk.bun, args: ["--bun", cli, "--stdio"], initOptions: { tsserver: { fallbackPath: sdk.lib } } } });
+		expect(plan.prerequisites.map(item => item.name)).toEqual(["bun", "typescript"]);
+
+		const runs = plan.install.operations.filter(operation => operation.type === "run");
+		expect(runs[0]).toMatchObject({ command: "bun", args: ["install", "--frozen-lockfile", "--ignore-scripts"] });
+		const written = plan.install.operations.filter(operation => operation.type === "write-file").map(operation => operation.path);
+		expect(written).toEqual(["package.json", "bun.lock"]);
+		// No npm process and no package-lock.json anywhere in the recipe.
+		expect(JSON.stringify(plan.install.operations)).not.toContain("npm");
+		expect(JSON.stringify(plan.install.operations)).not.toContain("package-lock");
+	},
+	SLOW,
+);
+
+test(
+	"a lock file that does not pin the server is refused before anything runs, so a missing lock never means an unpinned install",
+	() => {
+		expect(() => typescriptServerOperations("")).toThrow("refusing an unpinned install");
+		expect(() => typescriptServerOperations('{ "packages": { "typescript-language-server": ["typescript-language-server@5.1.3", "", {}, "sha512-AAAA"] } }')).toThrow("unpinned");
+		const withoutIntegrity = '{ "packages": { "typescript-language-server": ["typescript-language-server@6.0.2", "", {}] } }';
+		expect(() => typescriptServerOperations(withoutIntegrity)).toThrow("integrity");
+		const committed = fs.readFileSync(new URL("./typescript-bun.lock", import.meta.url), "utf8");
+		expect(typescriptServerOperations(committed).map(operation => operation.type)).toEqual(["write-file", "write-file", "run", "run"]);
+	},
+	SLOW,
+);
+
+test(
+	"the language server recipe installs through the runtime, and an installed version other than the pinned one fails it before anything is published",
+	async () => {
+		// A `bun` whose `install` lays down the server at a version the test chooses; every other call (the version check runs `bun --bun -e`) is the real Bun.
+		for (const [installed, ok] of [
+			["6.0.2", true],
+			["6.0.3", false],
+		] as const) {
+			const room = box();
+			tool(room, "node", "v24.22.0");
+			typescript(room, "6.0.3");
+			// The private PATH holds no coreutils, so the fake lays the files down with the real Bun.
+			const lay =
+				'const fs = require("node:fs");' +
+				'fs.mkdirSync("node_modules/typescript-language-server", { recursive: true });' +
+				'fs.mkdirSync("node_modules/.bin", { recursive: true });' +
+				`fs.writeFileSync("node_modules/typescript-language-server/package.json", JSON.stringify({ version: "${installed}" }));` +
+				'fs.writeFileSync("node_modules/typescript-language-server/cli.mjs", "#!/bin/sh\\n", { mode: 0o755 });' +
+				'fs.symlinkSync("../typescript-language-server/cli.mjs", "node_modules/.bin/typescript-language-server");';
+			script(
+				path.join(room.bin, "bun"),
+				[
+					'if [ "$1" = "install" ]; then',
+					'  [ -f bun.lock ] && [ -f package.json ] || { echo "no lock" >&2; exit 1; }',
+					`  exec "${process.execPath}" -e '${lay}'`,
+					"fi",
+					`exec "${process.execPath}" "$@"`,
+				].join("\n"),
+			);
+			const runtime = runtimeFor(room);
+			await ensureToolingRoots(room.agentDir);
+			const plan = installOf((await planJavascript(await contextFor(room, runtime))).lsp);
+			if (ok) {
+				expect((await runtime.install(plan.install)).status).toBe("installed");
+			} else {
+				const failure = await installError(runtime, plan);
+				expect(failure.code).toBe("exit");
+				expect(failure.message).toContain("6.0.3 was installed");
+				expect(fs.existsSync(runtime.installDirectory("typescript-language-server", "6.0.2"))).toBe(false);
+			}
+		}
 	},
 	SLOW,
 );
@@ -230,23 +373,44 @@ test(
 	"an installed typescript-language-server is reused only when it is 6.0.2 or newer 6.x, and an old one is left alone",
 	async () => {
 		const good = box();
-		tool(good, "node", "v24.22.0");
-		const sdk = typescript(good, "6.0.3");
+		const sdk = javascriptToolchain(good);
 		const server = tool(good, "typescript-language-server", "6.0.4");
 		const reused = reuseOf((await planJavascript(await contextFor(good))).lsp);
 		expect(reused.source).toBe("path");
+		// A native tool is reused as it is; only Node scripts are re-launched on Bun.
 		expect(reused.launch.command).toBe(server);
 		expect(reused.tool.version).toBe("6.0.4");
 		expect(reused.entries[0]).toMatchObject({ key: "typescript-language-server", value: { command: server, initOptions: { tsserver: { fallbackPath: sdk.lib } } } });
 
 		const old = box();
-		tool(old, "node", "v24.22.0");
-		tool(old, "npm", "10.9.2");
-		typescript(old, "6.0.3");
+		javascriptToolchain(old);
 		tool(old, "typescript-language-server", "5.1.3");
 		const plan = installOf((await planJavascript(await contextFor(old))).lsp);
 		expect(plan.install.version).toBe("6.0.2");
 		expect(plan.notes.join(" ")).toContain("5.1.3");
+	},
+	SLOW,
+);
+
+test(
+	"an installed Node-script typescript-language-server on PATH is reused as `bun --bun <script>`, checked the same way",
+	async () => {
+		const b = box();
+		const marker = path.join(b.root, "node-ran");
+		tool(b, "node", "v24.22.0");
+		// If this shim ran on Node through its shebang, it would leave the marker.
+		const real = script(path.join(b.root, "global", "lib", "cli.mjs"), `echo ran >> "${marker}"\necho 6.0.4`);
+		fs.writeFileSync(real, `#!/usr/bin/env node\necho ran >> "${marker}"\n`, { mode: 0o755 });
+		fs.symlinkSync(real, path.join(b.bin, "typescript-language-server"));
+		const bunPath = bunSdk(b, { serverVersion: "6.0.4" });
+		const sdk = typescript(b, "6.0.3");
+
+		const reused = reuseOf((await planJavascript(await contextFor(b))).lsp);
+		expect(reused.source).toBe("path");
+		expect(reused.launch).toEqual({ command: bunPath, args: ["--bun", real, "--stdio"] });
+		expect(reused.tool.version).toBe("6.0.4");
+		expect(reused.entries[0]).toMatchObject({ value: { command: bunPath, args: ["--bun", real, "--stdio"], initOptions: { tsserver: { fallbackPath: sdk.lib } } } });
+		expect(fs.existsSync(marker)).toBe(false);
 	},
 	SLOW,
 );
@@ -262,6 +426,8 @@ test(
 		expect(reused.source).toBe("configured");
 		expect(reused.entries).toEqual([]);
 		expect(reused.launch.command).toBe(server);
+		// The plan says that an entry which does not go through Bun may still run on Node.
+		expect(reused.notes.join(" ")).toContain("may run on Node");
 
 		const disabled = box();
 		lspConfig(path.join(disabled.agentDir, "lsp.json"), "typescript-language-server", { command: tool(disabled, "my-tls", "6.1.0"), disabled: true, fileTypes: [".ts"], rootMarkers: ["package.json"] });
@@ -283,12 +449,27 @@ test(
 );
 
 test(
+	"a configured server that launches through Bun is probed with its own script, not with `bun --version`, and needs no Node note",
+	async () => {
+		const b = box();
+		const marker = path.join(b.root, "bun-calls");
+		const bunPath = bunSdk(b, { serverVersion: "6.0.7", marker });
+		const cli = put(path.join(b.root, "tls", "cli.mjs"), "// server\n");
+		lspConfig(path.join(b.agentDir, "lsp.json"), "typescript-language-server", { command: bunPath, args: ["--bun", cli, "--stdio"], fileTypes: [".ts"], rootMarkers: ["package.json"] });
+
+		const reused = reuseOf((await planJavascript(await contextFor(b))).lsp);
+		expect(reused.tool.version).toBe("6.0.7");
+		expect(reused.notes.join(" ")).not.toContain("may run on Node");
+		expect(fs.readFileSync(marker, "utf8")).toContain(`--bun ${cli} --version`);
+	},
+	SLOW,
+);
+
+test(
 	"a project-local server is never executed before approval, and only that approved path runs afterwards",
 	async () => {
 		const b = box();
-		tool(b, "node", "v24.22.0");
-		tool(b, "npm", "10.9.2");
-		typescript(b, "6.0.3");
+		javascriptToolchain(b);
 		put(path.join(b.project, "package.json"), { name: "app" });
 		const marker = path.join(b.root, "ran-local-tls");
 		const local = printer(path.join(b.project, "node_modules", ".bin", "typescript-language-server"), "6.0.2", marker);
@@ -305,6 +486,22 @@ test(
 		expect(reused.launch.command).toBe(local);
 		// omp already resolves project bin directories itself, so nothing is written to the user's configuration.
 		expect(reused.entries).toEqual([]);
+	},
+	SLOW,
+);
+
+test(
+	"a Bun project's own node_modules/.bin is found through bun.lock and still needs approval before it runs",
+	async () => {
+		const b = box();
+		javascriptToolchain(b);
+		put(path.join(b.project, "bun.lock"), "{}\n");
+		const marker = path.join(b.root, "ran-bun-project-tls");
+		const local = printer(path.join(b.project, "node_modules", ".bin", "typescript-language-server"), "6.0.2", marker);
+
+		const plan = await planJavascript(await contextFor(b));
+		expect(plan.projectLocalExecutables).toEqual([local]);
+		expect(fs.existsSync(marker)).toBe(false);
 	},
 	SLOW,
 );
@@ -333,9 +530,7 @@ test(
 	"configuration that omp may read but this tool cannot confirm is disclosed and never counted as effective",
 	async () => {
 		const b = box();
-		tool(b, "node", "v24.22.0");
-		tool(b, "npm", "10.9.2");
-		typescript(b, "6.0.3");
+		javascriptToolchain(b);
 		lspConfig(path.join(b.home, ".claude", "lsp.json"), "typescript-language-server", { command: "foreign-tls", fileTypes: [".ts"], rootMarkers: ["package.json"] });
 		const plan = installOf((await planJavascript(await contextFor(b))).lsp);
 		expect(plan.notes.join(" ")).toContain(path.join(b.home, ".claude", "lsp.json"));
@@ -344,11 +539,125 @@ test(
 );
 
 test(
+	"js-debug's adapter is launched on Bun while the programs it debugs stay on Node, and both debuggers carry root markers",
+	async () => {
+		const b = box();
+		const sdk = javascriptToolchain(b);
+		const runtime = runtimeFor(b);
+		const dap = installOf((await planJavascript(await contextFor(b, runtime))).dap);
+
+		const server = path.join(runtime.installDirectory("js-debug", "1.140.0"), "js-debug", "src", "dapDebugServer.js");
+		expect(dap.launch).toEqual({ command: sdk.bun, args: ["--bun", server, "${port}", "127.0.0.1"] });
+		expect(dap.entries.find(entry => entry.key === "js-debug-adapter")).toEqual({
+			kind: "dap",
+			key: "js-debug-adapter",
+			value: { command: sdk.bun, args: ["--bun", server, "${port}", "127.0.0.1"], connectMode: "tcp", rootMarkers: ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "package.json"] },
+		});
+		expect(dap.prerequisites.map(item => [item.name, item.satisfied])).toEqual([
+			["node", true],
+			["bun", true],
+			["typescript", true],
+		]);
+	},
+	SLOW,
+);
+
+test(
+	"the Bun debugger is a companion exactly when Bun exists: pinned vendored source, stdio launch, Bun root markers and the granted runtime",
+	async () => {
+		const b = box();
+		const sdk = javascriptToolchain(b);
+		const runtime = runtimeFor(b);
+		const plan = await planJavascript(await contextFor(b, runtime));
+		const dap = installOf(plan.dap);
+
+		const destination = runtime.installDirectory("bun-dap", "38afee6c");
+		const entry = path.join(destination, "stdio-adapter.ts");
+		expect(dap.companions).toHaveLength(1);
+		const companion = dap.companions?.[0];
+		expect(companion?.key).toBe("bun-debug-adapter");
+		expect(companion?.launch).toEqual({ command: sdk.bun, args: [entry] });
+		expect(companion?.tool.destination).toBe(destination);
+		expect(companion?.tool.sources.join(" ")).toContain("38afee6c84fcf48c0edb2466aa4b27d287a59c30");
+		expect(dap.entries.find(item => item.key === "bun-debug-adapter")).toEqual({
+			kind: "dap",
+			key: "bun-debug-adapter",
+			value: {
+				command: sdk.bun,
+				args: [entry],
+				connectMode: "stdio",
+				rootMarkers: ["bun.lock", "bun.lockb", "bunfig.toml"],
+				launchDefaults: { type: "bun", request: "launch", runtime: sdk.bun, stopOnEntry: true },
+			},
+		});
+		expect(fixture(plan, "bun").dap).toMatchObject({ adapter: "bun-debug-adapter", program: "main.ts", variable: { name: "answer", value: "42" } });
+		expect(fixture(plan, "bun").files.map(file => file.path)).toContain("bun.lock");
+
+		// The recipe: the vendored files, then a frozen install from the vendored lock; the entry point must be executable.
+		const request = companion?.install;
+		expect(request).toMatchObject({ tool: "bun-dap", version: "38afee6c", executables: ["stdio-adapter.ts"] });
+		const files = request?.operations.filter(operation => operation.type === "write-file") ?? [];
+		expect(files.map(operation => operation.path)).toEqual(expect.arrayContaining(["stdio-adapter.ts", "package.json", "bun.lock", "bun-debug-adapter-protocol/src/debugger/adapter.ts", "bun-inspector-protocol/src/inspector/websocket.ts"]));
+		expect(files.find(operation => operation.path === "stdio-adapter.ts")).toMatchObject({ executable: true });
+		expect(files.some(operation => operation.path.endsWith(".d.ts") || operation.path.endsWith("protocol.json"))).toBe(false);
+		expect(request?.operations.at(-1)).toEqual({ type: "run", command: "bun", args: ["install", "--frozen-lockfile", "--ignore-scripts"] });
+
+		// Without Bun the Bun debugger is not offered at all.
+		const noBun = box();
+		tool(noBun, "node", "v24.22.0");
+		typescript(noBun, "6.0.3");
+		const blockedDap = blockedOf((await planJavascript(await contextFor(noBun))).dap);
+		expect("companions" in blockedDap).toBe(false);
+	},
+	SLOW,
+);
+
+test(
+	"a vendored Bun debugger without its lock file is refused before anything is installed",
+	() => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "omp-bun-dap-test-"));
+		cleanups.push(() => fs.rmSync(directory, { recursive: true, force: true }));
+		put(path.join(directory, "stdio-adapter.ts"), "// adapter\n");
+		put(path.join(directory, "package.json"), { name: "x" });
+		expect(() => bunDebuggerRequest(directory)).toThrow("bun.lock");
+		put(path.join(directory, "bun.lock"), "{}\n");
+		put(path.join(directory, "node_modules", "ws", "index.js"), "// never copied\n");
+		const operations = bunDebuggerRequest(directory).operations.filter(operation => operation.type === "write-file").map(operation => operation.path);
+		expect(operations).toEqual(["bun.lock", "package.json", "stdio-adapter.ts"]);
+	},
+	SLOW,
+);
+
+test(
+	"an already configured js-debug is reused, the Bun debugger is still added next to it, and a configured Bun debugger is reused too",
+	async () => {
+		const b = box();
+		const sdk = javascriptToolchain(b);
+		const adapter = tool(b, "my-js-debug", "1.0.0");
+		put(path.join(b.agentDir, "dap.json"), { adapters: { "js-debug-adapter": { command: adapter, connectMode: "tcp" } } });
+		const dap = reuseOf((await planJavascript(await contextFor(b))).dap);
+		expect(dap.source).toBe("configured");
+		expect(dap.entries.map(entry => entry.key)).toEqual(["bun-debug-adapter"]);
+		expect(dap.companions?.[0]?.install?.tool).toBe("bun-dap");
+		expect(dap.companions?.[0]?.launch.command).toBe(sdk.bun);
+
+		const both = box();
+		javascriptToolchain(both);
+		const mine = tool(both, "my-bun-dap", "1.0.0");
+		put(path.join(both.agentDir, "dap.json"), { adapters: { "js-debug-adapter": { command: tool(both, "my-js-debug", "1.0.0"), connectMode: "tcp" }, "bun-debug-adapter": { command: mine, connectMode: "stdio" } } });
+		const reused = reuseOf((await planJavascript(await contextFor(both))).dap);
+		expect(reused.entries).toEqual([]);
+		expect(reused.companions).toEqual([expect.objectContaining({ key: "bun-debug-adapter", launch: { command: mine, args: [] } })]);
+		expect(reused.companions?.[0]?.install).toBeUndefined();
+	},
+	SLOW,
+);
+
+test(
 	"an existing install directory is never short-circuited: the plan stays an install and the runtime validates the recipe",
 	async () => {
 		const b = box();
-		tool(b, "node", "v24.22.0");
-		typescript(b, "6.0.3");
+		javascriptToolchain(b);
 		const runtime = runtimeFor(b);
 		await ensureToolingRoots(b.agentDir);
 		const destination = runtime.installDirectory("js-debug", "1.140.0");
@@ -369,14 +678,15 @@ test(
 	async () => {
 		const b = box();
 		tool(b, "node", "v24.22.0");
-		tool(b, "npm", "10.9.2");
+		bunSdk(b);
 		const plan = await planJavascript(await contextFor(b));
-		// Both approved variants stay in the plan; the group is not silently narrowed to JavaScript.
-		expect(plan.fixtures.map(item => item.id)).toEqual(["javascript", "typescript"]);
+		// Every approved variant stays in the plan; the group is not silently narrowed to JavaScript.
+		expect(plan.fixtures.map(item => item.id)).toEqual(["javascript", "typescript", "bun"]);
 		const dap = blockedOf(plan.dap);
 		expect(dap.result.status).toBe("needs-sdk");
 		expect(dap.prerequisites.map(item => [item.name, item.satisfied])).toEqual([
 			["node", true],
+			["bun", true],
 			["typescript", false],
 		]);
 		expect(blockedOf(plan.lsp).result.status).toBe("needs-sdk");
@@ -384,11 +694,12 @@ test(
 		// An effective configured js-debug adapter does not turn the same gap into a ready integration.
 		const configured = box();
 		tool(configured, "node", "v24.22.0");
+		bunSdk(configured);
 		const adapter = tool(configured, "my-js-debug", "1.0.0");
 		put(path.join(configured.agentDir, "dap.json"), { adapters: { "js-debug-adapter": { command: adapter, connectMode: "tcp" } } });
 		const reused = await planJavascript(await contextFor(configured));
 		expect(blockedOf(reused.dap).result.status).toBe("needs-sdk");
-		expect(reused.fixtures.map(item => item.id)).toEqual(["javascript", "typescript"]);
+		expect(reused.fixtures.map(item => item.id)).toEqual(["javascript", "typescript", "bun"]);
 	},
 	SLOW,
 );
@@ -398,7 +709,7 @@ test(
 	async () => {
 		const b = box();
 		tool(b, "node", "v24.22.0");
-		tool(b, "npm", "10.9.2");
+		bunSdk(b);
 		put(path.join(b.project, "package.json"), { name: "app" });
 		const marker = path.join(b.root, "ran-project-tsc");
 		const local = printer(path.join(b.project, "node_modules", ".bin", "tsc"), "Version 6.0.3", marker);
@@ -408,7 +719,7 @@ test(
 		expect(before.projectLocalExecutables).toEqual([local]);
 		expect(blockedOf(before.lsp).result.status).toBe("needs-sdk");
 		expect(blockedOf(before.dap).result.status).toBe("needs-sdk");
-		expect(blockedOf(before.dap).prerequisites[1]?.remediation).toContain("approve that path");
+		expect(blockedOf(before.dap).prerequisites[2]?.remediation).toContain("approve that path");
 
 		const after = await planJavascript(await contextFor(b), { approvedProjectLocal: [local] });
 		expect(fs.existsSync(marker)).toBe(true);
@@ -554,13 +865,14 @@ test(
 		const b = box();
 		tool(b, "go", "go version go1.27.2 linux/amd64");
 		tool(b, "node", "v24.22.0");
+		bunSdk(b);
 		typescript(b, "6.0.3");
 		python(path.join(b.bin, "python3"));
 		const runtime = runtimeFor(b, { platform: "freebsd", arch: "x64" });
 		const go = await planGo(await contextFor(b, runtime));
 		const py = await planPython(await contextFor(b, runtime));
 		const js = await planJavascript(await contextFor(b, runtime));
-		for (const integration of [go.lsp, go.dap, py.lsp, py.dap, js.dap]) {
+		for (const integration of [go.lsp, go.dap, py.lsp, py.dap, js.lsp, js.dap]) {
 			expect(blockedOf(integration).result.status).toBe("unsupported");
 		}
 	},

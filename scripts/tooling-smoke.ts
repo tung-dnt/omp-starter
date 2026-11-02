@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 // Strict end-to-end smoke for guided language tooling (`/starter tools`).
 //
-//   bun scripts/tooling-smoke.ts                  all five groups, seven fixture variants (JS and mapped TS, Python, Go, Rust, C and C++)
+//   bun scripts/tooling-smoke.ts                  all five groups, eight fixture variants (JS, mapped TS and Bun, Python, Go, Rust, C and C++)
 //   bun scripts/tooling-smoke.ts --typescript7    separate follow-up: JavaScript/TypeScript only, with an existing TypeScript 7 `tsc`
-//   options: --report=<file> writes the JSON evidence, --keep keeps the private tree (it holds the installed tools)
+//   options: --report=<file> writes the JSON evidence, --keep keeps the private tree (it holds the installed tools),
+//            --groups=javascript,go limits a local run to some groups (reported as PARTIAL, never as the full matrix)
 //
 // There is no stand-in anywhere in this file. The production `/starter` command is registered from
 // extensions/setup.ts and its `tools` handler runs against a scripted terminal UI, so the real wizard installs the
@@ -36,7 +37,7 @@ type Mode = "full" | "typescript7";
 const ALL_GROUPS: readonly LanguageId[] = ["javascript", "python", "go", "rust", "cpp"];
 /** The fixture variants every group must prove. A missing, extra or duplicated one is not a smaller check, it is no check. */
 const VARIANTS: Readonly<Record<LanguageId, readonly string[]>> = {
-	javascript: ["javascript", "typescript"],
+	javascript: ["javascript", "typescript", "bun"],
 	python: ["python"],
 	go: ["go"],
 	rust: ["rust"],
@@ -50,6 +51,27 @@ const LABELS: Readonly<Record<LanguageId, string>> = {
 	cpp: "C / C++",
 };
 const GROUPS: Readonly<Record<Mode, readonly LanguageId[]>> = { full: ALL_GROUPS, typescript7: ["javascript"] };
+/**
+ * `--groups=javascript,go` limits a local run to some groups, for a machine that lacks the SDKs of the others. Such a run
+ * says PARTIAL and proves only what it ran; CI never passes it.
+ */
+function selectedGroups(args: readonly string[]): readonly LanguageId[] | undefined {
+	const raw = args.find(arg => arg.startsWith("--groups="))?.slice("--groups=".length);
+	if (raw === undefined) return undefined;
+	const chosen = raw.split(",").filter(Boolean);
+	const unknown = chosen.filter(name => !ALL_GROUPS.includes(name as LanguageId));
+	if (chosen.length === 0 || unknown.length > 0) throw new Error(`--groups takes a comma list of ${ALL_GROUPS.join(", ")} (got "${raw}")`);
+	return ALL_GROUPS.filter(group => chosen.includes(group));
+}
+
+const SELECTED = selectedGroups(process.argv.slice(2));
+
+function groupsOf(mode: Mode): readonly LanguageId[] {
+	const groups = SELECTED ?? GROUPS[mode];
+	if (!groups.every(group => GROUPS[mode].includes(group))) throw new Error(`--groups includes groups that mode "${mode}" does not run (${GROUPS[mode].join(", ")})`);
+	return groups;
+}
+
 const TSC_MAJOR: Readonly<Record<Mode, number>> = { full: 6, typescript7: 7 };
 
 const CHILD_TIMEOUT_MS = 55 * 60_000;
@@ -378,7 +400,7 @@ async function childMain(args: readonly string[]): Promise<void> {
 async function runChild(report: ChildReport, root: string, mode: Mode): Promise<void> {
 	const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 	const load = (relative: string): Promise<any> => import(pathToFileURL(path.join(repo, relative)).href);
-	const languages = GROUPS[mode];
+	const languages = groupsOf(mode);
 	const project = report.isolation.project;
 	const realRoot = fs.realpathSync(root);
 
@@ -576,7 +598,7 @@ function preservationProblems(name: string, files: FilesEvidence | undefined, se
 
 function validate(report: ChildReport, mode: Mode): string[] {
 	const found: string[] = [...report.fatal.map(item => `child failed: ${item.split("\n")[0]}`)];
-	const groups = GROUPS[mode];
+	const groups = groupsOf(mode);
 	if (report.schema !== 1 || report.mode !== mode) found.push("the child report has the wrong schema or mode");
 	if (!report.isolation.homeIsPrivate) found.push("the child did not run with a private HOME");
 	if (report.isolation.credentialVariables.length > 0) found.push(`credential-like variables reached the child: ${report.isolation.credentialVariables.join(", ")}`);
@@ -645,27 +667,35 @@ function probe(name: string, command: string, args: readonly string[], env: Node
 
 /** Existing SDKs and tools exactly as the product will see them. Nothing is installed; a missing one is a failure. */
 function inspectToolchain(mode: Mode, env: NodeJS.ProcessEnv, cwd: string): { probes: Probe[]; problems: string[] } {
-	const probes: Probe[] = [
-		probe("omp", "omp", ["--version"], env, cwd),
-		probe("node", "node", ["--version"], env, cwd),
-		probe("npm", "npm", ["--version"], env, cwd),
-		probe("tsc", "tsc", ["--version"], env, cwd),
-	];
-	const problems: string[] = [];
-	const required = new Set(["omp", "node", "npm", "tsc"]);
-	if (mode === "full") {
-		probes.push(
-			probe("python3", "python3", ["--version"], env, cwd),
-			probe("python venv/ensurepip", "python3", ["-c", "import ensurepip, venv; print('ensurepip and venv available')"], env, cwd),
-			probe("go", "go", ["version"], env, cwd),
-			probe("rustc", "rustc", ["--version"], env, cwd),
-			probe("cargo", "cargo", ["--version"], env, cwd),
-			probe("rustc sysroot", "rustc", ["--print", "sysroot"], env, cwd),
-			probe("cc", "cc", ["--version"], env, cwd),
-			probe("c++", "c++", ["--version"], env, cwd),
-		);
-		for (const name of ["python3", "python venv/ensurepip", "go", "rustc", "cargo", "rustc sysroot", "cc", "c++"]) required.add(name);
+	const groups = groupsOf(mode);
+	const wants = (name: LanguageId): boolean => groups.includes(name);
+	const probes: Probe[] = [probe("omp", "omp", ["--version"], env, cwd)];
+	const required = new Set(["omp"]);
+	const need = (name: string, command: string, args: readonly string[]): void => {
+		probes.push(probe(name, command, args, env, cwd));
+		required.add(name);
+	};
+	if (wants("javascript")) {
+		// Node stays required: js-debug runs on Bun but still debugs Node programs on Node.
+		need("node", "node", ["--version"]);
+		need("bun", "bun", ["--version"]);
+		need("tsc", "tsc", ["--version"]);
 	}
+	if (wants("python")) {
+		need("python3", "python3", ["--version"]);
+		need("python venv/ensurepip", "python3", ["-c", "import ensurepip, venv; print('ensurepip and venv available')"]);
+	}
+	if (wants("go")) need("go", "go", ["version"]);
+	if (wants("rust")) {
+		need("rustc", "rustc", ["--version"]);
+		need("cargo", "cargo", ["--version"]);
+		need("rustc sysroot", "rustc", ["--print", "sysroot"]);
+	}
+	if (wants("cpp")) {
+		need("cc", "cc", ["--version"]);
+		need("c++", "c++", ["--version"]);
+	}
+	const problems: string[] = [];
 	for (const item of probes) {
 		if (required.has(item.name) && !item.ok) problems.push(`required prerequisite "${item.name}" is unavailable (${item.command}): ${item.output || "no output"}`);
 	}
@@ -750,7 +780,7 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
 }
 
 async function runChildProcess(script: string, root: string, mode: Mode, env: NodeJS.ProcessEnv): Promise<{ exit: string; timedOut: boolean; stray: boolean }> {
-	const child: ChildProcess = spawn(process.execPath, [script, "--child", `--root=${root}`, `--mode=${mode}`], {
+	const child: ChildProcess = spawn(process.execPath, [script, "--child", `--root=${root}`, `--mode=${mode}`, ...(SELECTED === undefined ? [] : [`--groups=${SELECTED.join(",")}`])], {
 		cwd: path.join(root, "project"),
 		env,
 		detached: true,
@@ -789,7 +819,7 @@ async function runChildProcess(script: string, root: string, mode: Mode, env: No
 
 function summarize(report: ChildReport | undefined, mode: Mode): string[] {
 	const lines: string[] = [];
-	for (const group of GROUPS[mode]) {
+	for (const group of groupsOf(mode)) {
 		const evidence = report?.groups[group];
 		if (evidence === undefined) {
 			lines.push(`${LABELS[group]}: no evidence`);
@@ -806,7 +836,7 @@ function summarize(report: ChildReport | undefined, mode: Mode): string[] {
 
 async function parentMain(args: readonly string[]): Promise<number> {
 	if (args.includes("--help") || args.includes("-h")) {
-		process.stdout.write("usage: bun scripts/tooling-smoke.ts [--typescript7] [--report=<file>] [--keep]\n");
+		process.stdout.write("usage: bun scripts/tooling-smoke.ts [--typescript7] [--groups=<list>] [--report=<file>] [--keep]\n");
 		return 0;
 	}
 	if (process.versions.bun === undefined) {
@@ -873,8 +903,10 @@ async function parentMain(args: readonly string[]): Promise<number> {
 		process.stdout.write(`\nFAILED (${mode}): ${problems.length} problem(s)\n${problems.map(item => `- ${item}`).join("\n")}\n`);
 		return 1;
 	}
-	const variants = GROUPS[mode].reduce((total, group) => total + VARIANTS[group].length, 0);
-	process.stdout.write(`\nPASSED (${mode}): ${GROUPS[mode].length} group(s), ${variants} fixture variant(s); every LSP and DAP ready with observed definition, breakpoint stop and answer=42\n`);
+	const run = groupsOf(mode);
+	const variants = run.reduce((total, group) => total + VARIANTS[group].length, 0);
+	const partial = SELECTED === undefined ? "" : ` PARTIAL: only ${run.join(", ")} were run, so this is not the full matrix.`;
+	process.stdout.write(`\nPASSED (${mode}): ${run.length} group(s), ${variants} fixture variant(s); every LSP and DAP ready with observed definition, breakpoint stop and answer=42.${partial}\n`);
 	return 0;
 }
 

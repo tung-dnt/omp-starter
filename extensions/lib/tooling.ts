@@ -16,6 +16,7 @@ import {
 	LANGUAGE_IDS,
 	type BlockedPlan,
 	type ConfigSnapshot,
+	type InstallRequest,
 	type IntegrationKind,
 	type IntegrationPlan,
 	type LanguageId,
@@ -186,6 +187,15 @@ function describe(language: LanguageId, plan: LanguagePlan, snapshot: ConfigSnap
 				lines.push(`    from ${integration.tool.sources.map(source => clip(source, 200)).join(", ")}`);
 			}
 		}
+		for (const companion of integration.status === "blocked" ? [] : (integration.companions ?? [])) {
+			const label = `${KIND_LABEL[kind]} ${companion.tool.name}${companion.tool.version === undefined ? "" : ` ${companion.tool.version}`}`;
+			if (companion.install === undefined) {
+				lines.push(`  ${label}: use the existing tool ${companion.launch.command}; nothing is installed`);
+			} else {
+				lines.push(`  ${label}: install into ${companion.tool.destination ?? `${companion.install.tool}@${companion.install.version}`}`);
+				lines.push(`    from ${companion.tool.sources.map(source => clip(source, 200)).join(", ")}`);
+			}
+		}
 		for (const need of integration.prerequisites) {
 			const found = need.found === undefined ? "" : ` (found ${need.found.path}${need.found.version === undefined ? "" : ` ${need.found.version}`})`;
 			const missing = need.remediation === undefined ? "" : `: ${clip(need.remediation, 200)}`;
@@ -267,19 +277,27 @@ async function runGroup(plan: LanguagePlan, run: Run): Promise<{ result: Languag
 	let working = plan;
 	for (const kind of KINDS) {
 		const integration = working[kind];
-		if (integration.status !== "install") continue;
-		if (signal.aborted) {
-			working = replaceIntegration(working, kind, blocked(integration, toolResult("unverified", "Cancelled before this tool was installed.")));
-			continue;
-		}
-		try {
-			run.progress(`Installing ${integration.tool.name}`);
-			const done = await run.runtime.install(integration.install, { signal, onProgress: run.progress });
-			if (done.status === "installed") run.installed.push(`${integration.tool.name} ${integration.install.version} at ${done.destination}`);
-		} catch (error) {
-			const cancelled = signal.aborted;
-			const detail = cancelled ? "Installation was cancelled; nothing was verified." : `Installation failed: ${errorMessage(error)}`;
-			working = replaceIntegration(working, kind, blocked(integration, toolResult(cancelled ? "unverified" : "failed", detail)));
+		if (integration.status === "blocked") continue;
+		// The primary tool first, then each companion. The first failure blocks this integration (the other kind is unaffected).
+		const installs: { name: string; request: InstallRequest }[] = [
+			...(integration.status === "install" ? [{ name: integration.tool.name, request: integration.install }] : []),
+			...(integration.companions ?? []).flatMap(companion => (companion.install === undefined ? [] : [{ name: companion.tool.name, request: companion.install }])),
+		];
+		for (const { name, request } of installs) {
+			if (signal.aborted) {
+				working = replaceIntegration(working, kind, blocked(integration, toolResult("unverified", "Cancelled before this tool was installed.")));
+				break;
+			}
+			try {
+				run.progress(`Installing ${name}`);
+				const done = await run.runtime.install(request, { signal, onProgress: run.progress });
+				if (done.status === "installed") run.installed.push(`${name} ${request.version} at ${done.destination}`);
+			} catch (error) {
+				const cancelled = signal.aborted;
+				const detail = cancelled ? "Installation was cancelled; nothing was verified." : `Installation of ${name} failed: ${errorMessage(error)}`;
+				working = replaceIntegration(working, kind, blocked(integration, toolResult(cancelled ? "unverified" : "failed", detail)));
+				break;
+			}
 		}
 	}
 

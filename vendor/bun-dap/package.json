@@ -1,0 +1,12 @@
+{
+  "name": "omp-starter-bun-dap",
+  "version": "1.4.4",
+  "private": true,
+  "type": "module",
+  "description": "Pinned runtime dependencies of the vendored bun-debug-adapter-protocol and bun-inspector-protocol sources (oven-sh/bun 38afee6c).",
+  "dependencies": {
+    "semver": "^7.5.4",
+    "source-map-js": "^1.0.2",
+    "ws": "^8.18.3"
+  }
+}

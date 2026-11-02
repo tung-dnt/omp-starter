@@ -225,6 +225,9 @@ test("real children get a private home, no inherited secrets and no hidden SDK d
 		NODE_OPTIONS: "--require /tmp/hook.js",
 		npm_config_registry: "https://registry.evil.example",
 		npm_config_userconfig: "/home/real-user/.npmrc",
+		BUN_CONFIG_REGISTRY: "https://registry.evil.example",
+		BUN_INSTALL: "/home/real-user/.bun",
+		BUN_INSTALL_CACHE_DIR: "/home/real-user/.bun/install/cache",
 		GOFLAGS: "-mod=mod",
 		GOPROXY: "https://evil.example",
 		GOPRIVATE: "*.corp",
@@ -242,12 +245,14 @@ test("real children get a private home, no inherited secrets and no hidden SDK d
 	const result = await runtime.run(process.execPath, [file("env.cjs")], { cwd: dir, timeoutMs: 20_000 });
 	const seen: { env: Record<string, string | undefined>; cwd: string } = JSON.parse(result.stdout);
 
-	for (const name of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN", "MCP_SERVERS", "NODE_OPTIONS", "npm_config_registry", "PYTHONSTARTUP", "PYTHONPATH"]) {
+	for (const name of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN", "MCP_SERVERS", "NODE_OPTIONS", "npm_config_registry", "npm_config_userconfig", "BUN_CONFIG_REGISTRY", "BUN_INSTALL", "PYTHONSTARTUP", "PYTHONPATH"]) {
 		expect(seen.env[name]).toBeUndefined();
 	}
 	expect(seen.cwd).toBe(dir);
 	expect(seen.env.HOME?.startsWith(path.join(b.tooling, ".work"))).toBe(true);
-	expect(fs.readFileSync(seen.env.npm_config_userconfig ?? "", "utf8")).toBe("");
+	// Bun installs go through a cache inside the private tree, never the user's own.
+	expect(seen.env.BUN_INSTALL_CACHE_DIR).toBe(path.join(seen.env.XDG_CACHE_HOME ?? "", "bun"));
+	expect(seen.env.BUN_INSTALL_CACHE_DIR?.startsWith(path.join(b.tooling, ".work"))).toBe(true);
 	expect(seen.env.PATH).toBe(absolutePathDirs(parent.PATH).join(path.delimiter));
 	expect(seen.env[MARKER_VARIABLE]).toBeDefined();
 	expect(seen.env).toMatchObject({
@@ -263,7 +268,6 @@ test("real children get a private home, no inherited secrets and no hidden SDK d
 		PIP_CONFIG_FILE: "/dev/null",
 		GIT_CONFIG_GLOBAL: "/dev/null",
 		PYTHONNOUSERSITE: "1",
-		npm_config_ignore_scripts: "true",
 		HTTPS_PROXY: "http://proxy.example:3128",
 		SSL_CERT_FILE: "/etc/ssl/corp.pem",
 		GOROOT: "/opt/go",

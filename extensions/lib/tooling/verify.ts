@@ -48,7 +48,7 @@ import { CASE_VARIABLE, type DapObservation, type LspObservation, type Observati
 
 /** Every fixture a language group must prove. A missing, extra or duplicated one is not a smaller check, it is no check. */
 export const REQUIRED_VARIANTS: Readonly<Record<LanguageId, readonly string[]>> = {
-	javascript: ["javascript", "typescript"],
+	javascript: ["javascript", "typescript", "bun"],
 	python: ["python"],
 	go: ["go"],
 	rust: ["rust"],
@@ -297,6 +297,8 @@ interface Safety {
 	readonly policy: Policy;
 	/** `<typescript>/lib` of the plan's TypeScript SDK when its executable is usable (outside the project, or exactly granted). */
 	readonly tsLibrary: string | undefined;
+	/** The Bun SDK the plan detected: the only runtime a Bun debugger entry may name. */
+	readonly bun: string | undefined;
 	readonly problems: string[];
 }
 
@@ -326,6 +328,8 @@ const tsserverPath: Rule = (value, safety) => {
 	if (!safety.policy.isProjectLocal(value)) return value;
 	return safety.tsLibrary !== undefined && (value === safety.tsLibrary || value === path.join(safety.tsLibrary, "tsserver.js")) ? value : undefined;
 };
+/** The `runtime` of a Bun debugger entry is the granted Bun SDK, never another program the fixture would execute. */
+const bunRuntime: Rule = (value, safety) => (typeof value === "string" && safety.bun !== undefined && value === safety.bun ? value : undefined);
 
 const LSP_SHAPE: Shape = {
 	fileTypes: strings,
@@ -347,7 +351,8 @@ const DAP_SHAPE: Shape = {
 	acceptsDirectoryProgram: bool,
 	launchDefaults: {
 		request: oneOf("launch"),
-		type: oneOf("pwa-node"),
+		type: oneOf("pwa-node", "bun"),
+		runtime: bunRuntime,
 		mode: oneOf("debug", "exec"),
 		terminal: oneOf("console"),
 		stopOnEntry: bool,
@@ -410,46 +415,56 @@ function samePath(a: string, b: string): boolean {
 function buildSetup(kind: IntegrationKind, plan: LanguagePlan, integration: ReusePlan | InstallPlan, scope: Static): { readonly setup: Setup } | { readonly result: ToolResult } {
 	const { config, policy } = scope;
 	const launch = integration.launch;
-	const refuse = (status: ToolStatus, detail: string): { result: ToolResult } => ({ result: result(status, detail, launch) });
-	if (!isRecord(launch) || typeof launch.command !== "string" || !path.isAbsolute(launch.command) || !Array.isArray(launch.args) || launch.args.some(arg => typeof arg !== "string" || arg.includes("\0"))) {
-		return { result: result("unverified", "the plan has no absolute launch command to verify") };
+	const companions = integration.companions ?? [];
+	const refuse = (status: ToolStatus, detail: string, on: Command = launch): { result: ToolResult } => ({ result: result(status, detail, on) });
+	// Every launch the fixtures will run (the primary and each companion's) passes the same checks.
+	for (const candidate of [launch, ...companions.map(companion => companion.launch)]) {
+		if (!isRecord(candidate) || typeof candidate.command !== "string" || !path.isAbsolute(candidate.command) || !Array.isArray(candidate.args) || candidate.args.some(arg => typeof arg !== "string" || arg.includes("\0"))) {
+			return { result: result("unverified", "the plan has no absolute launch command to verify") };
+		}
+		if (!isExecutableFile(candidate.command)) return refuse("missing", `${candidate.command} is not an executable file. Install or repair it first; nothing was run.`, candidate);
+		if (candidate.args.some(arg => path.isAbsolute(arg.slice(arg.indexOf("=") + 1)) && policy.isProjectLocal(arg.slice(arg.indexOf("=") + 1)))) {
+			return refuse("unverified", "a launch argument points into your project; it is never read by the disposable check.", candidate);
+		}
 	}
-	if (!isExecutableFile(launch.command)) return refuse("missing", `${launch.command} is not an executable file. Install or repair it first; nothing was run.`);
 	if (config.unresolved.some(issue => issue.kind === kind)) {
 		return refuse("unverified", `omp reads ${kind === "lsp" ? "language server" : "debug adapter"} configuration that could not be inspected (${config.unresolved.filter(issue => issue.kind === kind).map(issue => issue.path).join(", ")}), so shadowing cannot be ruled out.`);
 	}
-	if (launch.args.some(arg => path.isAbsolute(arg.slice(arg.indexOf("=") + 1)) && policy.isProjectLocal(arg.slice(arg.indexOf("=") + 1)))) {
-		return refuse("unverified", "a launch argument points into your project; it is never read by the disposable check.");
-	}
-	let projectSupplied = integration.status === "reuse" && integration.source === "project-local";
+	// Whether the entry that will run a launch comes from the project's own configuration.
+	const supplied = new Map<Command, boolean>([[launch, integration.status === "reuse" && integration.source === "project-local"]]);
+	for (const companion of companions) supplied.set(companion.launch, false);
+	const launchFor = new Map<string, Command>(companions.map(companion => [companion.key, companion.launch]));
 	const tsc = plan.lsp.prerequisites.find(item => item.name === "typescript")?.found?.path;
 	const tsUsable = tsc !== undefined && (!policy.isProjectLocal(tsc) || policy.grants.has(path.resolve(tsc)));
-	const safety: Safety = { policy, tsLibrary: tsc !== undefined && tsUsable ? tsserverLibrary(tsc) : undefined, problems: [] };
+	const bun = integration.prerequisites.find(item => item.name === "bun")?.found?.path;
+	const safety: Safety = { policy, tsLibrary: tsc !== undefined && tsUsable ? tsserverLibrary(tsc) : undefined, bun, problems: [] };
 	const entries = new Map<string, JsonObject>();
 	const keys = new Set(plan.fixtures.map(fixture => (kind === "lsp" ? fixture.lsp.server : fixture.dap.adapter)));
 	for (const key of keys) {
-		const proposals = integration.entries.filter(entry => entry.kind === kind);
+		const keyLaunch = launchFor.get(key) ?? launch;
+		// A companion's key is proposed only by its own entry, and the primary key never by a companion's.
+		const proposals = integration.entries.filter(entry => entry.kind === kind && (launchFor.has(key) ? entry.key === key : !launchFor.has(entry.key)));
 		const proposal = proposals.find(entry => entry.key === key);
-		if (proposals.length > 0 && proposal === undefined) return refuse("unverified", `the plan proposes ${proposals.map(entry => entry.key).join(", ")} but its fixtures exercise ${key}.`);
+		if (proposals.length > 0 && proposal === undefined) return refuse("unverified", `the plan proposes ${proposals.map(entry => entry.key).join(", ")} but its fixtures exercise ${key}.`, keyLaunch);
 		const unknown = config.sources.filter(source => source.kind === kind && source.enablement === "unknown" && source.entries.has(key));
-		if (unknown.length > 0) return refuse("unverified", `${unknown.map(source => source.path).join(", ")} may also define ${key}; whether omp reads it cannot be determined statically, so shadowing cannot be ruled out.`);
+		if (unknown.length > 0) return refuse("unverified", `${unknown.map(source => source.path).join(", ")} may also define ${key}; whether omp reads it cannot be determined statically, so shadowing cannot be ruled out.`, keyLaunch);
 		const effective = effectiveEntry(config, kind, key);
 		if (effective !== undefined) {
-			if (effective.disabled) return refuse("failed", `${key} is disabled in ${effective.source.path}; the verified entry would not run. Re-enable or remove it yourself.`);
-			if (effective.command !== undefined && !samePath(effective.command.path, launch.command)) {
-				return refuse("failed", `omp would run ${effective.command.path} for ${key} (configured in ${effective.source.path}), not the verified ${launch.command}; the check does not apply to it.`);
+			if (effective.disabled) return refuse("failed", `${key} is disabled in ${effective.source.path}; the verified entry would not run. Re-enable or remove it yourself.`, keyLaunch);
+			if (effective.command !== undefined && !samePath(effective.command.path, keyLaunch.command)) {
+				return refuse("failed", `omp would run ${effective.command.path} for ${key} (configured in ${effective.source.path}), not the verified ${keyLaunch.command}; the check does not apply to it.`, keyLaunch);
 			}
-			if (Array.isArray(effective.value.args) && (effective.value.args.length !== launch.args.length || effective.value.args.some((arg, index) => arg !== launch.args[index]))) {
-				return refuse("failed", `${key} is configured in ${effective.source.path} with different arguments than the verified launch; the check does not apply to it.`);
+			if (Array.isArray(effective.value.args) && (effective.value.args.length !== keyLaunch.args.length || effective.value.args.some((arg, index) => arg !== keyLaunch.args[index]))) {
+				return refuse("failed", `${key} is configured in ${effective.source.path} with different arguments than the verified launch; the check does not apply to it.`, keyLaunch);
 			}
-			projectSupplied ||= effective.projectSupplied;
+			supplied.set(keyLaunch, supplied.get(keyLaunch) === true || effective.projectSupplied);
 		}
 		const { command: _command, args: _args, disabled: _disabled, attachDefaults: _attach, ...merged } = mergeEntry(kind, effective?.value, proposal?.value);
 		const accepted = check(merged, kind === "lsp" ? LSP_SHAPE : DAP_SHAPE, key, safety);
 		if (safety.problems.length > 0 || !isRecord(accepted)) {
-			return refuse("unverified", `${key} carries settings the disposable check never copies because they could read or run your application (${safety.problems.slice(0, 6).join(", ")}). Nothing was dropped silently: this integration stays unverified.`);
+			return refuse("unverified", `${key} carries settings the disposable check never copies because they could read or run your application (${safety.problems.slice(0, 6).join(", ")}). Nothing was dropped silently: this integration stays unverified.`, keyLaunch);
 		}
-		const value: JsonObject = { ...accepted, command: launch.command, args: [...launch.args] };
+		const value: JsonObject = { ...accepted, command: keyLaunch.command, args: [...keyLaunch.args] };
 		if (kind === "dap") value.launchDefaults = { ...(isRecord(accepted.launchDefaults) ? accepted.launchDefaults : {}), stopOnEntry: true };
 		const tsserver = isRecord(accepted.initOptions) && isRecord(accepted.initOptions.tsserver) ? accepted.initOptions.tsserver : {};
 		if (key === "typescript-language-server" && tsserver.path === undefined && tsserver.fallbackPath === undefined) {
@@ -459,8 +474,10 @@ function buildSetup(kind: IntegrationKind, plan: LanguagePlan, integration: Reus
 		}
 		entries.set(key, value);
 	}
-	if ((projectSupplied || policy.isProjectLocal(launch.command)) && !policy.grants.has(path.resolve(launch.command))) {
-		return refuse("unverified", `${launch.command} comes from your project. It was not run; approve that exact path to verify it.`);
+	for (const [candidate, projectSupplied] of supplied) {
+		if ((projectSupplied || policy.isProjectLocal(candidate.command)) && !policy.grants.has(path.resolve(candidate.command))) {
+			return refuse("unverified", `${candidate.command} comes from your project. It was not run; approve that exact path to verify it.`, candidate);
+		}
 	}
 	return { setup: { launch, entries } };
 }

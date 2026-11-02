@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "omp-starter-typescript-language-server",
+      "dependencies": {
+        "typescript-language-server": "6.0.2",
+      },
+    },
+  },
+  "packages": {
+    "typescript-language-server": ["typescript-language-server@6.0.2", "", { "bin": { "typescript-language-server": "lib/cli.mjs" } }, "sha512-Ph7Ql+xkUJvMamnkh1h+aKP6HxLR7lrWIYkPn9/LZBkJdJZgtIj7OoVhkDYtQ7zFPTPmqZHOVXaUKGyz9M2q1Q=="],
+  }
+}

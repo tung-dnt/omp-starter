@@ -347,6 +347,67 @@ test("a failed install is a failed integration, and installs that did land are d
 	expect(await effective(box, "dap", "delve")).toBeUndefined();
 });
 
+/** A DAP install plan for the Go group whose companion has its own install and its own configuration entry. */
+function companionInstallPlan(box: Box): LanguagePlan {
+	const entries = goEntries(box);
+	const companionEntry: ConfigEntry = { kind: "dap", key: "companion-dap", value: { command: join(box.home, "bin", "companion"), args: [], languages: ["go"] } };
+	return planFor(box, "go", {
+		dap: {
+			kind: "dap",
+			tool: { name: "delve", version: "1.0.0", sources: ["https://github.com/example/release"], destination: "/managed/delve" },
+			prerequisites: [],
+			notes: [],
+			status: "install",
+			install: { tool: "delve", version: "1.0.0", operations: [] },
+			launch: { command: join(box.home, "bin", "dlv"), args: ["dap"] },
+			entries: [...entries.dap, companionEntry],
+			companions: [
+				{
+					key: "companion-dap",
+					tool: { name: "companion-adapter", version: "2.0.0", sources: ["https://github.com/example/companion"], destination: "/managed/companion" },
+					install: { tool: "companion", version: "2.0.0", operations: [] },
+					launch: { command: join(box.home, "bin", "companion"), args: [] },
+				},
+			],
+		},
+	});
+}
+
+test("a companion tool is disclosed, installed after the primary, verified with it and configured with it", async () => {
+	const box = sandbox();
+	const script = scriptedUi(["go"]);
+	const { runtime, installs } = fakeRuntime();
+	const { context } = build(box, { plan: async () => companionInstallPlan(box), verify: verifier().verify }, { runtime });
+
+	const state = await setupTools(script.ui, context);
+
+	expect(installs).toEqual(["delve", "companion"]);
+	expect(state.results.go?.dap.status).toBe("ready");
+	expect(script.confirms.map(item => item.message).join("\n")).toContain("/managed/companion");
+	expect(script.notes.at(-1)?.message).toContain("/managed/companion");
+	expect(await effective(box, "dap", "delve")).toBeDefined();
+	expect(await effective(box, "dap", "companion-dap")).toBeDefined();
+});
+
+test("a companion that fails to install blocks that debugger integration only, and none of its entries are written", async () => {
+	const box = sandbox();
+	const script = scriptedUi(["go"]);
+	const { runtime, installs } = fakeRuntime(["companion"]);
+	const { context } = build(box, { plan: async () => companionInstallPlan(box), verify: verifier().verify }, { runtime });
+
+	const state = await setupTools(script.ui, context);
+
+	// The primary tool had already landed and is disclosed; the language server is untouched by the failure.
+	expect(installs).toEqual(["delve"]);
+	expect(state.results.go?.lsp.status).toBe("ready");
+	expect(state.results.go?.dap.status).toBe("failed");
+	expect(state.results.go?.dap.detail).toContain("Installation of companion-adapter failed");
+	expect(state.results.go?.dap.detail).toContain("could not download companion");
+	expect(script.notes.at(-1)?.message).toContain("/managed/delve");
+	expect(await effective(box, "dap", "delve")).toBeUndefined();
+	expect(await effective(box, "dap", "companion-dap")).toBeUndefined();
+});
+
 test("Esc stops the run after the group in flight, keeps earlier results and a rerun finishes the job", async () => {
 	const box = sandbox();
 	const prior: ToolingState = {

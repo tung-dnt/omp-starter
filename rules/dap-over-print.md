@@ -12,7 +12,7 @@ interruptMode: never
 
 You just added a print call (`console.log`, `fmt.Print*`, `println!`/`eprintln!`/`dbg!`, `printf`/`fprintf(stderr, …)`, `std::cout`/`std::cerr`). If this is temporary print debugging (add print, rerun, read output, repeat), consider `xd://debug` instead: set a breakpoint, launch or attach, and inspect variables and the call stack in one run, without editing and reverting source.
 
-- JS/TS: use `js-debug-adapter` (`/starter tools` installs it); launch the failing test or script under it.
+- JS/TS: pick the adapter by the project's runtime and always pass it. omp's default for JS/TS is `js-debug-adapter` whatever the lockfiles say, so Bun projects (`bun.lock`, `bun.lockb` or `bunfig.toml`) need `adapter: "bun-debug-adapter"`. Node projects use `adapter: "js-debug-adapter"`. The Bun adapter starts paused (`stopOnEntry` is on by default): set your breakpoints, then continue. `/starter tools` installs both.
 - Rust, C/C++ and Go: omp has built-in `lldb-dap`, `codelldb`, `gdb` and `dlv` adapters (`/starter tools` installs CodeLLDB and Delve), but each needs its binary installed. If none is installed, print debugging is acceptable.
 
 If the print is intended output (CLI output, a program's result, a permanent log line the code needs), ignore this. If it is temporary, remove it before finishing.

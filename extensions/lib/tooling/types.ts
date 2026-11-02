@@ -627,12 +627,27 @@ interface IntegrationPlanBase {
 	readonly notes: readonly string[];
 }
 
+/**
+ * A further tool the same integration verifies and configures next to its primary one, with its own pinned install and
+ * launch. The JavaScript debugger group uses it: js-debug is the primary tool and the Bun debugger a companion, because
+ * a project can need either and one `dap.json` serves every project.
+ */
+export interface CompanionTool {
+	/** Config key of the entry this tool serves; it is also the `adapter` (or `server`) key its fixtures use. */
+	readonly key: string;
+	readonly tool: ToolDescription;
+	/** Absent when the tool is already installed. */
+	readonly install?: InstallRequest;
+	readonly launch: ToolLaunch;
+}
+
 /** A compatible tool is already available: nothing is installed, and `entries` is empty unless config must still be added. */
 export interface ReusePlan extends IntegrationPlanBase {
 	readonly status: "reuse";
 	readonly launch: ToolLaunch;
 	readonly source: "configured" | "project-local" | "path" | "managed";
 	readonly entries: readonly ConfigEntry[];
+	readonly companions?: readonly CompanionTool[];
 }
 
 /** Install the pinned tool user-locally, then merge `entries`. Executes only after the plan is confirmed. */
@@ -641,6 +656,7 @@ export interface InstallPlan extends IntegrationPlanBase {
 	readonly install: InstallRequest;
 	readonly launch: ToolLaunch;
 	readonly entries: readonly ConfigEntry[];
+	readonly companions?: readonly CompanionTool[];
 }
 
 /** Not installable here: missing SDK, unsupported profile, conflicting configuration, or similar. */

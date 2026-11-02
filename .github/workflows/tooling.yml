@@ -2,7 +2,7 @@
 #
 # Each job provisions its SDKs here, in a disposable runner (the product itself never installs SDKs), then runs
 # `bun scripts/tooling-smoke.ts`. That script drives the production `/starter tools` command in a private HOME and
-# exits nonzero unless all five language groups (seven fixture variants) have a ready LSP and DAP with an observed
+# exits nonzero unless all five language groups (eight fixture variants) have a ready LSP and DAP with an observed
 # definition, breakpoint stop and `answer=42`. A missing SDK, ptrace refusal or skipped check fails the job.
 #
 # A second, separate run proves JavaScript/TypeScript against an existing native TypeScript 7 `tsc`.
@@ -26,7 +26,7 @@ concurrency:
 
 env:
   # Tested baselines. Exact versions found at run time are printed by "Show toolchain".
-  BUN_VERSION: "1.4.3"
+  BUN_VERSION: "1.4.4"
   NODE_VERSION: "24.22"
   PYTHON_VERSION: "3.12"
   GO_VERSION: "1.27.2"
@@ -93,7 +93,10 @@ jobs:
           rustup default stable
 
       - name: Set up TypeScript ${{ env.TYPESCRIPT6_VERSION }}
-        run: npm install --global "typescript@${TYPESCRIPT6_VERSION}"
+        run: |
+          bun add --global "typescript@${TYPESCRIPT6_VERSION}"
+          echo "$(bun pm bin --global)" >> "$GITHUB_PATH"
+          "$(bun pm bin --global)/tsc" --version
 
       - name: Allow debugging on macOS
         if: runner.os == 'macOS'
@@ -115,7 +118,7 @@ jobs:
       - name: Show toolchain
         run: |
           uname -a
-          for line in "omp --version" "bun --version" "node --version" "npm --version" "tsc --version" "python3 --version" "go version" "rustc --version" "cargo --version" "cc --version" "c++ --version"; do
+          for line in "omp --version" "bun --version" "node --version" "tsc --version" "python3 --version" "go version" "rustc --version" "cargo --version" "cc --version" "c++ --version"; do
             echo "+ $line"
             $line 2>&1 | sed -n 1p
           done
@@ -123,8 +126,7 @@ jobs:
           echo "sysroot: $(rustc --print sysroot)"
           ls "$(rustc --print sysroot)/lib/rustlib/src"
 
-
-      - name: Tooling smoke (five groups, seven variants)
+      - name: Tooling smoke (five groups, eight variants)
         if: ${{ !cancelled() }}
         run: bun scripts/tooling-smoke.ts --report="$RUNNER_TEMP/smoke/tooling-smoke-full.json"
 
@@ -132,7 +134,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           mkdir -p "$RUNNER_TEMP/typescript7"
-          npm install --prefix "$RUNNER_TEMP/typescript7" "typescript@${TYPESCRIPT7_VERSION}"
+          bun add --cwd "$RUNNER_TEMP/typescript7" "typescript@${TYPESCRIPT7_VERSION}"
           "$RUNNER_TEMP/typescript7/node_modules/.bin/tsc" --version
 
       - name: Tooling smoke, JavaScript/TypeScript with TypeScript 7
@@ -203,7 +205,10 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Set up TypeScript ${{ env.TYPESCRIPT6_VERSION }}
-        run: npm install --global "typescript@${TYPESCRIPT6_VERSION}"
+        run: |
+          bun add --global "typescript@${TYPESCRIPT6_VERSION}"
+          echo "$(bun pm bin --global)" >> "$GITHUB_PATH"
+          "$(bun pm bin --global)/tsc" --version
 
       - name: Install omp ${{ env.OMP_VERSION }}
         run: |
@@ -218,7 +223,7 @@ jobs:
       - name: Show toolchain
         run: |
           uname -a
-          for line in "omp --version" "bun --version" "node --version" "npm --version" "tsc --version" "python3 --version" "go version" "rustc --version" "cargo --version" "cc --version" "c++ --version"; do
+          for line in "omp --version" "bun --version" "node --version" "tsc --version" "python3 --version" "go version" "rustc --version" "cargo --version" "cc --version" "c++ --version"; do
             echo "+ $line"
             $line 2>&1 | sed -n 1p
           done
@@ -227,8 +232,7 @@ jobs:
           ls "$(rustc --print sysroot)/lib/rustlib/src"
           cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo "no yama ptrace_scope"
 
-
-      - name: Tooling smoke (five groups, seven variants)
+      - name: Tooling smoke (five groups, eight variants)
         if: ${{ !cancelled() }}
         run: bun scripts/tooling-smoke.ts --report="$RUNNER_TEMP/smoke/tooling-smoke-full.json"
 
@@ -236,7 +240,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           mkdir -p "$RUNNER_TEMP/typescript7"
-          npm install --prefix "$RUNNER_TEMP/typescript7" "typescript@${TYPESCRIPT7_VERSION}"
+          bun add --cwd "$RUNNER_TEMP/typescript7" "typescript@${TYPESCRIPT7_VERSION}"
           "$RUNNER_TEMP/typescript7/node_modules/.bin/tsc" --version
 
       - name: Tooling smoke, JavaScript/TypeScript with TypeScript 7

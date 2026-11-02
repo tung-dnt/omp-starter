@@ -5,7 +5,7 @@
 // directories, and returns exact pins, install operations, proposed config entries and the
 // disposable fixtures the verifier later exercises. Nothing is installed or written here: the
 // returned `InstallPlan`s run through `Runtime.install` only after the user confirmed them, and
-// SDKs (Node, TypeScript, CPython, Go) are prerequisites that are reported, never installed.
+// SDKs (Bun, Node, TypeScript, CPython, Go) are prerequisites that are reported, never installed.
 //
 // Detection order for every integration: effective configured entry -> approved project-local tool
 // -> compatible tool on PATH -> pinned user-local install. LSP and DAP plans never depend on each
@@ -19,9 +19,11 @@ import type {
 	Artifact,
 	BlockedPlan,
 	Command,
+	CompanionTool,
 	ConfigEntry,
 	ConfigSnapshot,
 	FixtureCase,
+	InstallOperation,
 	InstallPlan,
 	InstallRequest,
 	IntegrationKind,
@@ -50,6 +52,8 @@ const TLS_PACKAGE_JSON = `${JSON.stringify(
 	null,
 	2,
 )}\n`;
+/** Committed Bun lock of typescript-language-server (generated from `TLS_PACKAGE_JSON` with `bun install --lockfile-only`). */
+const TLS_LOCK_FILE = "typescript-bun.lock";
 
 const JS_DEBUG_VERSION = "1.140.0";
 const JS_DEBUG_ARTIFACT: Artifact = {
@@ -115,7 +119,7 @@ function show(value: Version): string {
 }
 
 const NODE_MINIMUM = version(22, 22, 2);
-const NPM_MINIMUM = version(7, 0, 0);
+const BUN_MINIMUM = version(1, 4, 4);
 const GO_MINIMUM = version(1, 27, 0);
 const PYTHON_MINIMUM = version(3, 10, 0);
 const PYTHON_MAXIMUM_MINOR = 14;
@@ -239,13 +243,13 @@ const NODE_SDK: SdkSpec = {
 	remediation: `Install Node.js ${show(NODE_MINIMUM)} or newer yourself (nodejs.org or your version manager); this tool never installs runtimes.`,
 };
 
-const NPM_SDK: SdkSpec = {
-	name: "npm",
-	requirement: `npm >= ${show(NPM_MINIMUM)} (reads the committed lockfile)`,
-	names: ["npm"],
+const BUN_SDK: SdkSpec = {
+	name: "bun",
+	requirement: `bun >= ${show(BUN_MINIMUM)}`,
+	names: ["bun"],
 	args: ["--version"],
-	accepts: found => atLeast(found, NPM_MINIMUM),
-	remediation: "Install npm yourself; Debian and Ubuntu split it from the nodejs package.",
+	accepts: found => atLeast(found, BUN_MINIMUM),
+	remediation: `Install Bun ${show(BUN_MINIMUM)} or newer yourself (bun.sh or your version manager); this tool never installs runtimes. The language server and js-debug run on Bun.`,
 };
 
 const TSC_SDK: SdkSpec = {
@@ -366,7 +370,11 @@ const TLS_SPEC: ToolSpec = {
 	key: "typescript-language-server",
 	names: ["typescript-language-server"],
 	args: ["--stdio"],
-	versionArgs: launchArgs => (launchArgs[0] !== undefined && !launchArgs[0].startsWith("-") ? [launchArgs[0], "--version"] : ["--version"]),
+	// The server script is the first non-flag argument; runner flags (`--bun`) before it stay, flags after it are replaced by `--version`.
+	versionArgs: launchArgs => {
+		const script = launchArgs.findIndex(arg => !arg.startsWith("-"));
+		return script === -1 ? ["--version"] : [...launchArgs.slice(0, script + 1), "--version"];
+	},
 	check: found => (found.major === 6 && atLeast(found, version(6, 0, 2)) ? undefined : "is not 6.0.2 or a newer 6.x, the TypeScript 6 line"),
 };
 
@@ -499,8 +507,11 @@ async function inspectConfigured(ctx: Ctx, kind: IntegrationKind, spec: ToolSpec
 /**
  * Approved project-local tool first (omp itself prefers it inside the project), then a compatible PATH tool.
  * Incompatible or unusable ones are disclosed in `notes` and never replaced.
+ *
+ * `runOn` re-launches a JavaScript tool on that runtime (`<runOn> --bun <real file> ...`): a PATH tool whose file is a
+ * Node script would otherwise run on Node through its shebang. Native tools are reused as they are.
  */
-async function discoverExisting(ctx: Ctx, spec: ToolSpec, notes: string[]): Promise<Found | undefined> {
+async function discoverExisting(ctx: Ctx, spec: ToolSpec, notes: string[], runOn?: string): Promise<Found | undefined> {
 	const candidates: { path: string; local: boolean }[] = [];
 	for (const projectLocal of [true, false]) {
 		for (const name of spec.names) {
@@ -513,7 +524,10 @@ async function discoverExisting(ctx: Ctx, spec: ToolSpec, notes: string[]): Prom
 	for (const candidate of candidates) {
 		if (seen.has(candidate.path)) continue;
 		seen.add(candidate.path);
-		const probed = await probeVersion(ctx, candidate.path, spec.versionArgs(spec.args), candidate.local);
+		// A project-local tool is launched by omp itself, exactly as found, so it is checked and planned the same way.
+		const script = runOn === undefined || candidate.local ? undefined : javascriptScript(candidate.path);
+		const launch: Command = script === undefined || runOn === undefined ? { command: candidate.path, args: [...spec.args] } : { command: runOn, args: ["--bun", script, ...spec.args] };
+		const probed = await probeVersion(ctx, launch.command, spec.versionArgs(launch.args), candidate.local);
 		if (!probed.ok) {
 			notes.push(
 				probed.reason === "unapproved"
@@ -527,9 +541,28 @@ async function discoverExisting(ctx: Ctx, spec: ToolSpec, notes: string[]): Prom
 			notes.push(`Existing ${candidate.path} is ${show(probed.version)}, which ${reason}; it is left untouched.`);
 			continue;
 		}
-		return { source: candidate.local ? "project-local" : "path", path: candidate.path, version: probed.version, launch: { command: candidate.path, args: [...spec.args] } };
+		return { source: candidate.local ? "project-local" : "path", path: candidate.path, version: probed.version, launch };
 	}
 	return undefined;
+}
+
+/** The real file of `executable` when it is a Node script (a `.js`/`.mjs`/`.cjs` file or a `#!...node` shebang), otherwise undefined. */
+function javascriptScript(executable: string): string | undefined {
+	let real: string;
+	try {
+		real = fs.realpathSync(executable);
+		if (/\.(?:[cm]?js)$/.test(real)) return real;
+		const fd = fs.openSync(real, "r");
+		try {
+			const head = Buffer.alloc(128);
+			const read = fs.readSync(fd, head, 0, head.length, 0);
+			return /^#!.*\bnode\b/.test(head.subarray(0, read).toString("latin1").split("\n")[0] ?? "") ? real : undefined;
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch {
+		return undefined;
+	}
 }
 
 /** A compatible tool exists, so nothing is installed. Configured and project-local tools already resolve in omp, so they add no entries. */
@@ -600,13 +633,13 @@ function tsserverLibrary(tsc: string): string | undefined {
 	}
 }
 
-function tlsEntry(command: string, tsserverPath: string | undefined): ConfigEntry {
+function tlsEntry(launch: Command, tsserverPath: string | undefined): ConfigEntry {
 	return {
 		kind: "lsp",
 		key: TLS_SPEC.key,
 		value: {
-			command,
-			args: [...TLS_SPEC.args],
+			command: launch.command,
+			args: [...launch.args],
 			fileTypes: [...JS_FILE_TYPES],
 			rootMarkers: [...JS_ROOT_MARKERS],
 			// `fallbackPath` (a typescript `lib` directory or tsserver.js, per the server docs), not `path`: a project's own TypeScript still wins.
@@ -615,19 +648,51 @@ function tlsEntry(command: string, tsserverPath: string | undefined): ConfigEntr
 	};
 }
 
+/**
+ * Install recipe of typescript-language-server: the committed Bun lock is written next to `package.json` and installed
+ * with `--frozen-lockfile`, which refuses a lock that disagrees with `package.json` and checks every tarball's
+ * integrity against it. Without a lock file Bun would install unpinned and say nothing, so a lock that does not pin
+ * exactly this package is refused before anything runs. The last step checks what actually landed on disk.
+ */
+export function typescriptServerOperations(lock: string): InstallOperation[] {
+	if (!lock.includes(`"typescript-language-server@${TLS_VERSION}"`) || !/sha512-[A-Za-z0-9+/]+={0,2}/.test(lock)) {
+		throw new RuntimeError("invalid-argument", `${TLS_LOCK_FILE} does not pin typescript-language-server ${TLS_VERSION} with an integrity hash; refusing an unpinned install`);
+	}
+	const installed = JSON.stringify(TLS_VERSION);
+	const check =
+		`const v = JSON.parse(require("node:fs").readFileSync("node_modules/typescript-language-server/package.json", "utf8")).version;` +
+		` if (v !== ${installed}) { console.error("typescript-language-server " + v + " was installed, not " + ${installed}); process.exit(1); }`;
+	return [
+		{ type: "write-file", path: "package.json", content: TLS_PACKAGE_JSON },
+		{ type: "write-file", path: "bun.lock", content: lock },
+		// `bun` resolves on PATH at run time, so the recipe survives Bun upgrades. Scripts of dependencies stay off.
+		{ type: "run", command: "bun", args: ["install", "--frozen-lockfile", "--ignore-scripts"] },
+		{ type: "run", command: "bun", args: ["--bun", "-e", check] },
+	];
+}
+
 interface JsLsp {
 	readonly plan: IntegrationPlan;
 	/** The configured server expected to answer the fixture's definition lookup. */
 	readonly server: string;
 }
 
-async function javascriptLsp(ctx: Ctx, node: Sdk, ts: Sdk): Promise<JsLsp> {
+/** A configured or project-local server omp starts itself, exactly as found; it may still run on Node. */
+function runsOnNodeNote(found: Found): string | undefined {
+	if (path.basename(found.launch.command) === "bun") return undefined;
+	return `typescript-language-server at ${found.path} is started by omp as configured or as found in your project and is left untouched, so it may run on Node rather than Bun.`;
+}
+
+async function javascriptLsp(ctx: Ctx, bun: Sdk, ts: Sdk): Promise<JsLsp> {
 	const name = "typescript-language-server";
 	const notes: string[] = [];
 	for (const spec of [TLS_SPEC, TS_NATIVE_SPEC]) {
 		const configured = await inspectConfigured(ctx, "lsp", spec);
 		const plan = configuredPlan("lsp", spec === TLS_SPEC ? name : "typescript-native", configured, [ts.prerequisite]);
-		if (plan !== undefined) return { plan, server: spec.key };
+		if (plan !== undefined) {
+			const note = spec === TLS_SPEC && configured.kind === "reuse" ? runsOnNodeNote(configured.found) : undefined;
+			return { plan: note === undefined ? plan : { ...plan, notes: [...plan.notes, note] }, server: spec.key };
+		}
 		notes.push(...configured.notes);
 	}
 	const tool = describeTool(name, TLS_VERSION, [`https://registry.npmjs.org/${name}/${TLS_VERSION}`]);
@@ -639,54 +704,150 @@ async function javascriptLsp(ctx: Ctx, node: Sdk, ts: Sdk): Promise<JsLsp> {
 		return { plan: reusePlan("lsp", "typescript-native (tsc --lsp)", found, [ts.prerequisite], nativeNotes, []), server: TS_NATIVE_SPEC.key };
 	}
 
-	// TypeScript 6: typescript-language-server 6.x drives the existing tsserver.
-	const prerequisites = [node.prerequisite, ts.prerequisite];
-	if (!node.prerequisite.satisfied) return { plan: blockedBy("lsp", tool, prerequisites, node.prerequisite, notes), server };
+	// TypeScript 6: typescript-language-server 6.x drives the existing tsserver, running on Bun.
+	const prerequisites = [bun.prerequisite, ts.prerequisite];
+	if (!bun.prerequisite.satisfied) return { plan: blockedBy("lsp", tool, prerequisites, bun.prerequisite, notes), server };
 	// An approved project-local TypeScript is used in place: the server finds the workspace's own tsserver, so no path is written to user config.
 	const library = ts.projectLocal === true ? undefined : tsserverLibrary(ts.path as string);
 	if (library === undefined && ts.projectLocal !== true) {
-		const detail = `Could not find lib/tsserver.js next to ${ts.path}. Use a regular npm installation of TypeScript 6 (for example \`npm install -g typescript@6\`).`;
+		const detail = `Could not find lib/tsserver.js next to ${ts.path}. Use a regular installation of TypeScript 6 (for example \`bun add -g typescript@6\`).`;
 		return { plan: blocked("lsp", tool, prerequisites, "needs-sdk", detail, notes), server };
 	}
-	const existing = await discoverExisting(ctx, TLS_SPEC, notes);
-	if (existing !== undefined) return { plan: reusePlan("lsp", name, existing, prerequisites, notes, [tlsEntry(existing.path, library)]), server };
+	const existing = await discoverExisting(ctx, TLS_SPEC, notes, bun.path);
+	if (existing !== undefined) {
+		const note = existing.source === "project-local" ? runsOnNodeNote(existing) : undefined;
+		return { plan: reusePlan("lsp", name, existing, prerequisites, note === undefined ? notes : [...notes, note], [tlsEntry(existing.launch, library)]), server };
+	}
 
-	const npm = await detectSdk(ctx, NPM_SDK);
-	const installPrerequisites = [...prerequisites, npm.prerequisite];
-	if (!npm.prerequisite.satisfied) return { plan: blockedBy("lsp", tool, installPrerequisites, npm.prerequisite, notes), server };
-	if (!ctx.runtime.platform.supported) return { plan: unsupportedPlatform("lsp", tool, installPrerequisites, notes, ctx.runtime.platform), server };
+	if (!ctx.runtime.platform.supported) return { plan: unsupportedPlatform("lsp", tool, prerequisites, notes, ctx.runtime.platform), server };
+	let operations: InstallOperation[];
+	try {
+		operations = typescriptServerOperations(readCommitted(TLS_LOCK_FILE));
+	} catch (error) {
+		return { plan: blocked("lsp", tool, prerequisites, "failed", `The pinned install recipe cannot be used: ${errorMessage(error)}. Nothing was installed.`, notes), server };
+	}
 	const binary = "node_modules/.bin/typescript-language-server";
-	const request: InstallRequest = {
-		tool: name,
-		version: TLS_VERSION,
-		operations: [
-			{ type: "write-file", path: "package.json", content: TLS_PACKAGE_JSON },
-			{ type: "write-file", path: "package-lock.json", content: readCommitted("typescript-package-lock.json") },
-			// The committed lock pins integrity and scripts stay off. `npm` resolves on PATH at run time, so the recipe survives Node upgrades.
-			{ type: "run", command: "npm", args: ["ci", "--ignore-scripts", "--no-audit", "--no-fund"] },
-		],
-		executables: [binary],
-	};
+	// The server's own script is launched directly on Bun, so the `.bin` shim and its Node shebang are never followed.
+	const script = "node_modules/typescript-language-server/lib/cli.mjs";
+	const request: InstallRequest = { tool: name, version: TLS_VERSION, operations, executables: [binary] };
 	const destination = ctx.runtime.installDirectory(name, TLS_VERSION);
-	const command = path.join(destination, binary);
+	const launch: Command = { command: bun.path as string, args: ["--bun", path.join(destination, script), ...TLS_SPEC.args] };
 	const plan = installPlan(
 		"lsp",
 		{ ...tool, destination },
 		request,
-		{ command, args: [...TLS_SPEC.args] },
-		[tlsEntry(command, library)],
-		installPrerequisites,
-		[...notes, "Only typescript-language-server is installed; it drives your existing TypeScript SDK's tsserver."],
+		launch,
+		[tlsEntry(launch, library)],
+		prerequisites,
+		[...notes, "Only typescript-language-server is installed; it runs on Bun and drives your existing TypeScript SDK's tsserver."],
 	);
 	return { plan, server };
 }
 
+// ── Bun debugger (vendored source, pinned) ──────────────────────────────────────────────────────
+
+const BUN_DAP_COMMIT = "38afee6c84fcf48c0edb2466aa4b27d287a59c30";
+const BUN_DAP_VERSION = BUN_DAP_COMMIT.slice(0, 8);
+const BUN_DAP_ENTRY = "stdio-adapter.ts";
+const BUN_DAP_SPEC: ToolSpec = {
+	key: "bun-debug-adapter",
+	names: [],
+	args: [],
+	versionArgs: () => [],
+	check: () => undefined,
+	versionless: true,
+};
+const BUN_DAP_ROOT_MARKERS = ["bun.lock", "bun.lockb", "bunfig.toml"];
+const JS_DEBUG_ROOT_MARKERS = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "package.json"];
+
+/** Every file of `directory` (relative, sorted, `node_modules` excluded) the adapter needs at run time: type declarations and protocol definition JSON are only read by build tools. */
+function bunDapFiles(directory: string): string[] {
+	const found: string[] = [];
+	const visit = (relative: string): void => {
+		for (const entry of fs.readdirSync(path.join(directory, relative), { withFileTypes: true })) {
+			const child = path.join(relative, entry.name);
+			if (entry.isDirectory()) {
+				if (entry.name !== "node_modules") visit(child);
+			} else if (entry.isFile() && !entry.name.endsWith(".d.ts") && entry.name !== "protocol.json") {
+				found.push(child.split(path.sep).join("/"));
+			}
+		}
+	};
+	visit("");
+	return found.sort();
+}
+
 /**
- * JavaScript/TypeScript debugging is one integration with two required variants: plain JavaScript and source-mapped
- * TypeScript. Without a runnable `tsc` the mapped variant cannot be exercised, so the integration is blocked instead of
- * being allowed to look ready after JavaScript-only proof.
+ * Install recipe of the Bun debugger: the vendored, pinned sources are written file by file, then `bun install
+ * --frozen-lockfile` fetches the three pinned dependencies from the vendored lock. A missing lock is refused before
+ * anything runs for the same reason as the language server's.
  */
-async function javascriptDap(ctx: Ctx, node: Sdk, ts: Sdk, compiler: string | undefined): Promise<IntegrationPlan> {
+export function bunDebuggerRequest(directory: string = fileURLToPath(new URL("../../../vendor/bun-dap/", import.meta.url))): InstallRequest {
+	const files = bunDapFiles(directory);
+	for (const required of [BUN_DAP_ENTRY, "package.json", "bun.lock"]) {
+		if (!files.includes(required)) throw new RuntimeError("invalid-argument", `the vendored Bun debugger is missing ${required}; refusing an unpinned install`);
+	}
+	return {
+		tool: "bun-dap",
+		version: BUN_DAP_VERSION,
+		operations: [
+			...files.map((file): InstallOperation => ({ type: "write-file", path: file, content: fs.readFileSync(path.join(directory, file), "utf8"), ...(file === BUN_DAP_ENTRY ? { executable: true } : {}) })),
+			{ type: "run", command: "bun", args: ["install", "--frozen-lockfile", "--ignore-scripts"] },
+		],
+		executables: [BUN_DAP_ENTRY],
+	};
+}
+
+interface BunDebugger {
+	readonly companion: CompanionTool;
+	/** Empty when the user's own entry serves the key. */
+	readonly entries: readonly ConfigEntry[];
+}
+
+/** The Bun debugger as a companion of the JavaScript debugger plan, or the reason it cannot be offered. */
+async function bunDebugger(ctx: Ctx, bun: Sdk): Promise<BunDebugger | { readonly blocked: Inventory & { kind: "blocked" } } | { readonly failure: string }> {
+	const name = "bun-debug-adapter";
+	const configured = await inspectConfigured(ctx, "dap", BUN_DAP_SPEC);
+	if (configured.kind === "blocked") return { blocked: configured };
+	if (configured.kind === "reuse") {
+		return { companion: { key: BUN_DAP_SPEC.key, tool: describeTool(name, undefined, [configured.found.path]), launch: configured.found.launch }, entries: [] };
+	}
+	let request: InstallRequest;
+	try {
+		request = bunDebuggerRequest();
+	} catch (error) {
+		return { failure: errorMessage(error) };
+	}
+	const destination = ctx.runtime.installDirectory(request.tool, request.version);
+	const launch: Command = { command: bun.path as string, args: [path.join(destination, BUN_DAP_ENTRY)] };
+	const tool = describeTool(name, BUN_DAP_VERSION, [`https://github.com/oven-sh/bun/tree/${BUN_DAP_COMMIT}/packages/bun-debug-adapter-protocol`, "vendored in this plugin with per-file SHA-256 (vendor/bun-dap/PROVENANCE.md)"]);
+	return {
+		companion: { key: BUN_DAP_SPEC.key, tool: { ...tool, destination }, install: request, launch },
+		entries: [
+			{
+				kind: "dap",
+				key: BUN_DAP_SPEC.key,
+				value: {
+					command: launch.command,
+					args: [...launch.args],
+					connectMode: "stdio",
+					rootMarkers: [...BUN_DAP_ROOT_MARKERS],
+					// Bun 1.4.4 ignores `break=1`, so a short program can finish before breakpoints set after launch apply.
+					launchDefaults: { type: "bun", request: "launch", runtime: bun.path as string, stopOnEntry: true },
+				},
+			},
+		],
+	};
+}
+
+/**
+ * JavaScript/TypeScript debugging is one integration with three required variants: plain JavaScript (js-debug, for
+ * Node projects), source-mapped TypeScript (js-debug) and a Bun program (the Bun debugger, a companion tool). Without
+ * a runnable `tsc` the mapped variant cannot be exercised, so the integration is blocked instead of being allowed to
+ * look ready after JavaScript-only proof. One `dap.json` serves every project, so both debuggers are configured with
+ * root markers and the agent picks with `adapter` when a project matches both.
+ */
+async function javascriptDap(ctx: Ctx, node: Sdk, bun: Sdk, ts: Sdk, compiler: string | undefined): Promise<IntegrationPlan> {
 	const name = "vscode-js-debug";
 	const notes = ["js-debug accepts DAP clients on a short-lived loopback TCP port (127.0.0.1) for the length of a session; other users on a shared machine could reach it meanwhile."];
 	const mapped: Prerequisite = {
@@ -696,42 +857,55 @@ async function javascriptDap(ctx: Ctx, node: Sdk, ts: Sdk, compiler: string | un
 		...(compiler === undefined || ts.version === undefined ? {} : { found: { path: compiler, version: show(ts.version) } }),
 		...(compiler === undefined ? { remediation: ts.prerequisite.remediation ?? TSC_SDK.remediation } : {}),
 	};
-	const prerequisites = [node.prerequisite, mapped];
+	const prerequisites = [node.prerequisite, bun.prerequisite, mapped];
+	const tool = describeTool(name, `v${JS_DEBUG_VERSION}`, [JS_DEBUG_ARTIFACT.url, `sha256:${JS_DEBUG_ARTIFACT.sha256}`]);
 	if (compiler === undefined) {
-		const tool = describeTool(name, `v${JS_DEBUG_VERSION}`, [JS_DEBUG_ARTIFACT.url, `sha256:${JS_DEBUG_ARTIFACT.sha256}`]);
 		const detail = `${mapped.requirement} is missing, so the required source-mapped TypeScript debug check cannot run and JavaScript/TypeScript debugging stays unverified. ${mapped.remediation ?? ""}`;
 		return blocked("dap", tool, prerequisites, "needs-sdk", detail, notes);
 	}
+	// js-debug itself runs on Bun (the programs it debugs still run on Node), and the Bun debugger needs it too.
+	if (!bun.prerequisite.satisfied) return blockedBy("dap", tool, prerequisites, bun.prerequisite, [...notes, "Both debuggers run on Bun: js-debug's adapter and the Bun debugger. Node is only the runtime of the programs js-debug debugs."]);
 	const configured = await inspectConfigured(ctx, "dap", JS_DEBUG_SPEC);
-	const configuredResult = configuredPlan("dap", name, configured, prerequisites);
-	if (configuredResult !== undefined) return { ...configuredResult, notes: [...configuredResult.notes, ...notes] };
 	const carried = [...configured.notes, ...notes];
-	const tool = describeTool(name, `v${JS_DEBUG_VERSION}`, [JS_DEBUG_ARTIFACT.url, `sha256:${JS_DEBUG_ARTIFACT.sha256}`]);
-	if (!node.prerequisite.satisfied) return blockedBy("dap", tool, prerequisites, node.prerequisite, carried);
+	const configuredResult = configuredPlan("dap", name, configured, prerequisites);
+	if (configuredResult === undefined && !node.prerequisite.satisfied) return blockedBy("dap", tool, prerequisites, node.prerequisite, carried);
 	if (!ctx.runtime.platform.supported) return unsupportedPlatform("dap", tool, prerequisites, carried, ctx.runtime.platform);
+	const companion = await bunDebugger(ctx, bun);
+	if ("blocked" in companion) return blocked("dap", tool, prerequisites, companion.blocked.status, companion.blocked.detail, [...carried, ...companion.blocked.notes]);
+	if ("failure" in companion) return blocked("dap", tool, prerequisites, "failed", `The pinned Bun debugger recipe cannot be used: ${companion.failure}. Nothing was installed.`, carried);
+	if (configuredResult !== undefined) {
+		if (configuredResult.status !== "reuse") return { ...configuredResult, notes: [...configuredResult.notes, ...notes] };
+		return { ...configuredResult, notes: [...configuredResult.notes, ...notes], entries: [...companion.entries], companions: [companion.companion] };
+	}
 	const request: InstallRequest = { tool: "js-debug", version: JS_DEBUG_VERSION, operations: [{ type: "artifact", artifact: JS_DEBUG_ARTIFACT }] };
 	const destination = ctx.runtime.installDirectory(request.tool, request.version);
 	const server = path.join(destination, JS_DEBUG_SERVER);
-	const args = [server, "${port}", "127.0.0.1"];
-	return installPlan(
+	const args = ["--bun", server, "${port}", "127.0.0.1"];
+	const launch: Command = { command: bun.path as string, args };
+	const plan = installPlan(
 		"dap",
 		{ ...tool, destination },
 		request,
-		{ command: node.path as string, args },
-		[{ kind: "dap", key: JS_DEBUG_SPEC.key, value: { command: node.path as string, args: [...args], connectMode: "tcp" } }],
+		launch,
+		[
+			{ kind: "dap", key: JS_DEBUG_SPEC.key, value: { command: launch.command, args: [...args], connectMode: "tcp", rootMarkers: [...JS_DEBUG_ROOT_MARKERS] } },
+			...companion.entries,
+		],
 		prerequisites,
 		carried,
 	);
+	return { ...plan, companions: [companion.companion] };
 }
 
 export async function planJavascript(context: PlanContext, options: ManagedPlanOptions = {}): Promise<LanguagePlan> {
 	const ctx = makeCtx(context, options);
 	const node = await detectSdk(ctx, NODE_SDK);
+	const bun = await detectSdk(ctx, BUN_SDK);
 	const ts = await detectSdk(ctx, TSC_SDK);
 	// Any `tsc` that runs can compile the mapped fixture, even one too old for the language server.
 	const compiler = ts.version === undefined ? undefined : ts.path;
-	const lsp = await javascriptLsp(ctx, node, ts);
-	const dap = await javascriptDap(ctx, node, ts, compiler);
+	const lsp = await javascriptLsp(ctx, bun, ts);
+	const dap = await javascriptDap(ctx, node, bun, ts, compiler);
 	return { language: "javascript", lsp: lsp.plan, dap, fixtures: javascriptFixtures(lsp.server, compiler), projectLocalExecutables: [...ctx.disclosed].sort() };
 }
 
@@ -1153,7 +1327,32 @@ function javascriptFixtures(server: string, compiler: string | undefined): Fixtu
 		lsp: { server, file: "main.ts", line: 8, symbol: "greet", definition: { file: "util.ts", line: 1 } },
 		dap: { adapter: "js-debug-adapter", program: "dist/main.js", breakpoint: { file: "main.ts", line: 5 }, variable: { name: "answer", value: "42" } },
 	};
-	return [plain, mapped];
+	// Bun runs the TypeScript directly; `bun.lock` is the project marker that selects the Bun debugger.
+	const bun: FixtureCase = {
+		id: "bun",
+		label: "Bun (TypeScript run directly by Bun)",
+		files: [
+			{ path: "package.json", content: text("{", '  "name": "omp-fixture-bun",', '  "private": true,', '  "type": "module"', "}") },
+			{ path: "bun.lock", content: `${JSON.stringify({ lockfileVersion: 1, workspaces: { "": { name: "omp-fixture-bun" } }, packages: {} }, null, 2)}\n` },
+			{ path: "util.ts", content: text("export function greet(name: string): string {", '  return "hello " + name;', "}") },
+			{
+				path: "main.ts",
+				content: text(
+					'import { greet } from "./util";',
+					"",
+					"function compute(a: number, b: number): number {",
+					"  const answer: number = a * b;",
+					"  return answer;",
+					"}",
+					"",
+					'console.log(greet("omp"), compute(6, 7));',
+				),
+			},
+		],
+		lsp: { server, file: "main.ts", line: 8, symbol: "greet", definition: { file: "util.ts", line: 1 } },
+		dap: { adapter: BUN_DAP_SPEC.key, program: "main.ts", breakpoint: { file: "main.ts", line: 5 }, variable: { name: "answer", value: "42" } },
+	};
+	return [plain, mapped, bun];
 }
 
 function pythonFixtures(): FixtureCase[] {
