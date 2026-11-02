@@ -194,6 +194,36 @@ The same Jev step turns on `extensions/lsp-guard.ts`, which blocks instead of re
 
 The `ask`-based rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder`. Other subagents can't use the `ask` tool, so they don't carry these rules.
 
+## Usage report
+
+A read-only report on how agents actually use the knowledge base and the native todo, mined from omp's session transcripts. It calls no model and no network.
+
+```bash
+bun run usage                      # or: bun scripts/usage-report.ts
+bun run usage --since 2026-10-15   # only sessions that started on or after that day
+bun scripts/usage-report.ts --json /tmp/usage-report.json   # same numbers plus one row per session
+# options: --sessions <dir> (default ~/.omp/agent/sessions), --vault <KnowledgeBase dir> (default: the folder `/kb` uses)
+```
+
+It prints one markdown table per metric, for main sessions and subagents separately (todo and memory duties belong to the main session), then a coverage line with files read, skipped files, malformed lines and schema versions.
+
+| Metric | Question |
+|---|---|
+| M1 | Before the first edit of a repo file, did the agent recall (`kb_recall`, a `_memory/<note>.md` read, or the repo's `projects/<repo>.md` page)? Counts only repos whose memory scope has notes; the injected index does not count. |
+| M2 | Before the first `git commit`, did the agent save a note? Commits marked `[skip-mem]` are their own bucket. |
+| M3 | Is each saved note indexed under the session's repo section or Global in `MEMORY.md`? |
+| M4 | Vault hygiene: dangling index lines, unindexed notes, near-duplicate notes (word overlap of name and description ≥ 0.8). |
+| M5 | Todo: did the session end with open items, how many edit/write/bash calls ran after the last todo update, how many turns held only `todo` calls? |
+| M6 | Counts of `kb_remember`, `kb_recall`, `_memory/` file writes and `todo` calls. |
+
+| Do | Don't |
+|---|---|
+| Read it as a trend: compare runs with `--since`. | Treat a rate as a verdict: M1 can't tell whether a recall was needed. |
+| Write `--json` outside the repo, for example under `/tmp`. | Commit the JSON; session rows name your sessions and repos. |
+| Check the coverage line first: skipped files and unresolved repos shrink what a table covers. | Compare numbers across omp upgrades without it; the transcript format can change (only schema version 3 is read). |
+
+Limits: M3 and M1's scope check use today's vault, so notes moved later are judged at their new place. A session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names, tool names and note slugs; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder or the vault; its only write is the `--json` file.
+
 ## Release notes
 
 ### 0.29.0 — 2026-11-02
