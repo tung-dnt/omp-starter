@@ -19,7 +19,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  BUN_VERSION: "1.4.3"
+  BUN_VERSION: "1.4.4"
+  # The routing and Jev tests drive omp's real `config` command. Same pin and integrity check as tooling.yml.
+  OMP_VERSION: "18.12.6"
+  OMP_INTEGRITY: "sha512-Wo+FcJ7A3RY/OFuafj4hcdIAXc/W7NMxbanwQh3Cmy8s57+ihLOLgAv+HROxHBkssEMg0MaScwkQ9xwqLPiC/g=="
 
 jobs:
   test:
@@ -39,6 +42,16 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install omp ${{ env.OMP_VERSION }}
+        run: |
+          actual="$(bun pm view "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" dist.integrity)"
+          if [ "$actual" != "$OMP_INTEGRITY" ]; then
+            echo "::error::registry integrity for @oh-my-pi/pi-coding-agent@${OMP_VERSION} is ${actual}, expected ${OMP_INTEGRITY}"
+            exit 1
+          fi
+          bun install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
+          echo "$(bun pm bin --global)" >> "$GITHUB_PATH"
 
       - name: Install
         run: bun install --frozen-lockfile --ignore-scripts
