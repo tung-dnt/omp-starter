@@ -70,7 +70,13 @@ test("a Codex-only client gets Codex routing, never Claude models", async () => 
 
 	expect(await setupModels(ui, exec)).toBe("done");
 	const roles = await config("get", "modelRoles") as Record<string, string>;
-	expect(roles).toMatchObject({ default: "openai-codex/gpt-6.1-sol", tiny: "openai-codex/gpt-6-luna:low", custom: "@default" });
+	expect(roles).toMatchObject({
+		default: "openai-codex/gpt-6.1-sol", tiny: "openai-codex/gpt-6-luna:low",
+		deep: "openai-codex/gpt-6-astra:high", custom: "@default",
+	});
+	expect(await config("get", "retry.fallbackChains")).toMatchObject({
+		"openai-codex/gpt-6-astra": ["openai-codex/gpt-6.1-sol"],
+	});
 	expect(Object.values(roles).some(model => model.startsWith("anthropic/"))).toBe(false);
 }, 60_000);
 

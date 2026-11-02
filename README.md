@@ -36,7 +36,7 @@ Applied with `omp config set` after you confirm, on any subscription. Setup alwa
 | Security agents | Opus 5.5 | `high` (never Fable) |
 | `deep` agent, Ctrl+P `deep` role | Fable 5.1 | `high` |
 
-The idea: spend effort on the plan, since it runs once and feeds every coding slice. Keep coders at a `high` floor and use `max` only for concurrency, migrations and shared contracts. Fallbacks run Fable → Opus → Sonnet for outages; a subscription limit stops the session instead of switching to paid API usage.
+The idea: spend effort on the plan, since it runs once and feeds every coding slice. Keep coders at a `high` floor and use `max` only for concurrency, migrations and shared contracts. Fallbacks stay within the subscription: Fable → Opus → Sonnet on Claude, Astra → Sol on Codex. A subscription limit stops the session instead of switching to paid API usage.
 
 ### Subscription presets
 
@@ -45,7 +45,7 @@ The model step saves two complete role setups, even when neither provider is log
 | Preset | Main session | Planning / deep consultation | Helpers |
 |---|---|---|---|
 | `claude` | Opus 5.5 (`auto`) | Opus 5.5 / Fable 5.1 (`high`) | Sonnet 5.5; Haiku 5.5 for exploration, tiny work and judgments |
-| `codex` | GPT-6.1 Sol (`auto`) | GPT-6.1 Sol (`high`) | GPT-6 Luna; `high` for tasks, `low` for tiny work and judgments |
+| `codex` | GPT-6.1 Sol (`auto`) | GPT-6.1 Sol / GPT-6 Astra (`high`) | GPT-6 Luna; `high` for tasks, `low` for tiny work and judgments |
 
 Existing installs: update the plugin and run `/starter models` to save the presets. Restart open sessions to load the routing changes, then switch inside omp:
 
@@ -56,17 +56,23 @@ Existing installs: update the plugin and run `/starter models` to save the prese
 
 `/modelpreset` opens the picker. Switching replaces the model-role setup, not just the main conversation model; the security agents follow `@slow` rather than staying pinned to Claude. Other agent overrides and explicitly requested models are not part of a preset.
 
-Both presets save `defaultThinkingLevel: auto`; the advisor uses Luna or Sonnet at `medium`. Presets do not change authentication, enable the advisor, or bypass subscription quotas. Use `/login openai-codex` for the Codex subscription and `/login anthropic` for Claude. No API key is installed by this step. The Fable router does not escalate or consume its local daily allowance while the active model is outside Anthropic, so the Codex preset stays on Codex for its deep/review paths.
+Both presets save `defaultThinkingLevel: auto`; the advisor uses Luna or Sonnet at `medium`. Presets do not change authentication, enable the advisor, or bypass subscription quotas. Use `/login openai-codex` for the Codex subscription and `/login anthropic` for Claude. No API key is installed by this step. The escalation router selects Fable only in Anthropic sessions and Astra only in OpenAI Codex sessions; other providers are untouched. Setup saves both subscriptions' fallback chains, so switching presets does not require rerunning setup.
 
 
-### Fable escalation
+### Fable / Astra escalation
 
-Fable is never the default. While the active model is Anthropic, the `fable-router` extension escalates to it only when:
+Neither escalation model is the default. The `fable-router` extension uses Fable for an active Anthropic model and Astra for an active OpenAI Codex model:
 
 - **Stuck:** the same command fails twice in one run (searches like `grep` that just find nothing don't count). The agent is told it may delegate to the read-only `deep` agent. The notice is advisory: expected failures, such as a red test, and "don't spawn agents" instructions take precedence.
 - **Risky review:** a `reviewer` or `code-reviewer` starts while the git diff touches migrations, `*.sql`, auth/RBAC, infra or CI workflows.
 
-Every Fable spawn counts toward a daily cap: `FABLE_ROUTER_DAILY_CAP`, default 5, tracked in `~/.omp/agent/fable-router.json`. Past the cap, the spawn runs on Opus and the task panel shows a note saying so.
+Every routed escalation spawn counts toward its subscription's daily cap. Claude uses `FABLE_ROUTER_DAILY_CAP` (default 5), tracked in `~/.omp/agent/fable-router.json`, then falls back to Opus. Codex uses `ASTRA_ROUTER_DAILY_CAP` (default 5), tracked separately in `~/.omp/agent/astra-router.json`, then falls back to Sol. The task panel shows the escalation reason or cap fallback. The `deep` agent stays read-only, and security agents stay on `@slow`.
+
+**Do:** delegate an unexpectedly stuck investigation to `deep`, with evidence and the commands already tried. Keep routine work on Sol/Luna or Opus/Sonnet.
+
+**Don't:** make Astra/Fable the default, repeatedly escalate expected red tests, or treat the local daily counter as the provider's subscription quota.
+
+**Verify:** run `bun test extensions/fable-router.test.ts extensions/lib/routing.test.ts`. After `/starter models`, the Codex preset's `deep` role is `openai-codex/gpt-6-astra:high`; the main role remains Sol. Restart open sessions after updating the plugin.
 
 ### TypeSafe Jev judge (`/starter jev`)
 
@@ -189,6 +195,12 @@ The same Jev step turns on `extensions/lsp-guard.ts`, which blocks instead of re
 The `ask`-based rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder`. Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Release notes
+
+### 0.29.0 — 2026-11-02
+
+- **Added:** GPT-6 Astra as Codex's `deep` model and escalation equivalent of Claude Fable: risky reviews, repeated-failure notices, a separate five-spawn daily cap (`ASTRA_ROUTER_DAILY_CAP`), and Sol fallback. Routine Sol/Luna roles and the optional Jev judge are unchanged.
+- **Changed:** setup saves fallback chains for both subscriptions, including when switching presets later. The read-only `deep` agent documents both subscription routes.
+- **Added:** `@types/node` as a development dependency.
 
 ### 0.28.0 — 2026-10-30
 

@@ -5,8 +5,8 @@
   "plugins": [
     {
       "name": "starter",
-      "description": "First-run wizard: Claude-first routing with Codex/Claude subscription presets and capped Fable escalation, Obsidian vaults as knowledge base + memory per folder with kb_remember/kb_recall tools, optional agent-skills, optional guided LSP/debugger tooling (JavaScript/TypeScript, Python, Go, Rust, C/C++)",
-      "version": "0.28.0",
+      "description": "First-run wizard: Claude-first routing with Codex/Claude subscription presets and capped Fable/Astra escalation, Obsidian vaults as knowledge base + memory per folder with kb_remember/kb_recall tools, optional agent-skills, optional guided LSP/debugger tooling (JavaScript/TypeScript, Python, Go, Rust, C/C++)",
+      "version": "0.29.0",
       "license": "MIT",
       "source": "./"
     }

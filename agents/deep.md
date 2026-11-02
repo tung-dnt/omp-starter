@@ -1,6 +1,6 @@
 ---
 name: deep
-description: "Fable-tier consultant for escalations. Use ONLY when (a) the same fix, build, or test keeps failing unexpectedly after two attempts, (b) a design decision spans services/repos or needs an ADR, or (c) a [fable-router] notice suggests it and the failure is unexpected. Give a self-contained brief: goal, what was tried, exact error output, relevant files. Read-only: returns a diagnosis and recommended approach; the caller implements it."
+description: "Escalation consultant: Fable on Claude, Astra on Codex. Use ONLY when (a) the same fix, build, or test keeps failing unexpectedly after two attempts, (b) a design decision spans services/repos or needs an ADR, or (c) a [fable-router] or [astra-router] notice suggests it and the failure is unexpected. Give a self-contained brief: goal, what was tried, exact error output, relevant files. Read-only: returns a diagnosis and recommended approach; the caller implements it."
 model: "@deep"
 tools: read, grep, glob, bash, web_search
 ---
