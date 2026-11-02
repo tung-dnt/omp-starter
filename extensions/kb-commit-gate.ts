@@ -30,8 +30,8 @@ function targetPaths(toolName: string, input: Record<string, unknown>): string[]
 }
 
 /** Directory a `git commit` command runs in: bash `cwd`, a leading `cd <p> &&`, then each `git -C <p>`. */
-function commitDir(command: string, match: RegExpExecArray, input: Record<string, unknown>, sessionCwd: string): string {
-	let dir = resolveFrom(sessionCwd, typeof input.cwd === "string" && input.cwd ? input.cwd : ".");
+function commitDir(command: string, match: RegExpExecArray, cwd: unknown, sessionCwd: string): string {
+	let dir = resolveFrom(sessionCwd, typeof cwd === "string" && cwd ? cwd : ".");
 	const cd = LEADING_CD.exec(command);
 	if (cd) dir = resolveFrom(dir, cd[1]);
 	for (const c of match[0].matchAll(GIT_DASH_C)) dir = resolveFrom(dir, c[1]);
@@ -61,7 +61,7 @@ export default function kbCommitGate(pi: ExtensionAPI): void {
 		const command = String(event.input.command ?? "");
 		const match = GIT_COMMIT.exec(command);
 		if (!match || command.includes("[skip-mem]")) return;
-		const dir = commitDir(command, match, event.input, ctx.cwd);
+		const dir = commitDir(command, match, event.input.cwd, ctx.cwd);
 		// The deepest gate folder holding the commit decides which KB must have been written.
 		const source = doneSources(readState().kb)
 			.filter(s => s.gateDir && inside(dir, path.resolve(expandHome(s.gateDir))))

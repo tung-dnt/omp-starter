@@ -99,7 +99,7 @@ export default function fableRouter(pi: ExtensionAPI): void {
 		const provider: string | undefined = ctx.model?.provider;
 		const route = provider === "anthropic" || provider === "openai-codex" ? ROUTES[provider] : undefined;
 		if (!route) return;
-		const agent = typeof event.agent === "string" ? event.agent : String(event.agent?.name ?? "");
+		const agent = event.agent;
 		let reason: string;
 		if (agent === "deep") {
 			reason = "deep escalation";

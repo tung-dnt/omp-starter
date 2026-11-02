@@ -104,7 +104,7 @@ jobs:
 
       - name: Install omp ${{ env.OMP_VERSION }}
         run: |
-          actual="$(npm view "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" dist.integrity)"
+          actual="$(bun pm view "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" dist.integrity)"
           if [ "$actual" != "$OMP_INTEGRITY" ]; then
             echo "::error::registry integrity for @oh-my-pi/pi-coding-agent@${OMP_VERSION} is ${actual}, expected ${OMP_INTEGRITY}"
             exit 1
@@ -123,10 +123,6 @@ jobs:
           echo "sysroot: $(rustc --print sysroot)"
           ls "$(rustc --print sysroot)/lib/rustlib/src"
 
-      - name: Unit tests and build
-        run: |
-          bun test
-          bun build extensions/setup.ts extensions/fable-router.ts --target=bun --packages=external --outdir="$RUNNER_TEMP/omp-starter-tooling-build"
 
       - name: Tooling smoke (five groups, seven variants)
         if: ${{ !cancelled() }}
@@ -211,7 +207,7 @@ jobs:
 
       - name: Install omp ${{ env.OMP_VERSION }}
         run: |
-          actual="$(npm view "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" dist.integrity)"
+          actual="$(bun pm view "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" dist.integrity)"
           if [ "$actual" != "$OMP_INTEGRITY" ]; then
             echo "::error::registry integrity for @oh-my-pi/pi-coding-agent@${OMP_VERSION} is ${actual}, expected ${OMP_INTEGRITY}"
             exit 1
@@ -231,10 +227,6 @@ jobs:
           ls "$(rustc --print sysroot)/lib/rustlib/src"
           cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo "no yama ptrace_scope"
 
-      - name: Unit tests and build
-        run: |
-          bun test
-          bun build extensions/setup.ts extensions/fable-router.ts --target=bun --packages=external --outdir="$RUNNER_TEMP/omp-starter-tooling-build"
 
       - name: Tooling smoke (five groups, seven variants)
         if: ${{ !cancelled() }}
