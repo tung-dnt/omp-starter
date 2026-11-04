@@ -228,7 +228,7 @@ Limits: M3 and M1's scope check use today's vault, so notes moved later are judg
 
 ## Spec plans
 
-`plan.md` is the machine-readable plan of a spec-workflow story or task. Only fenced blocks count: exactly one `yaml plan` block (`id`, `kind: story | task`, `shared_paths`) and one `yaml task` block per task (`id`, `repo`, `depends_on`, `foundation`, `owns`, `new_paths`, `reads`, `risk`, `lld_required`, `security_review`, `lld`, `lld_skip_reason`, `required_tests`, `acceptance`). All other text is ignored. `risk` answers `yes` or `no` for `shared_state`, `external_io`, `retries`, `concurrent_writers`, `non_idempotent_effects`, `async_messaging`, `multi_step_saga` and `sensitive_data`; a `yes` needs a `reason`.
+`plan.md` is the machine-readable plan of a spec-workflow story or task. Only fenced blocks count: exactly one `yaml plan` block (`id`, `kind: story | task`, `shared_paths`) and one `yaml task` block per task (`id`, `repo`, `depends_on`, `foundation`, `owns`, `new_paths`, `reads`, `risk`, `lld_required`, `security_review`, `lld`, `lld_skip_reason`, `size`, `required_tests`, `acceptance`). `size` is optional: `small` or `normal` (the default). All other text is ignored. `risk` answers `yes` or `no` for `shared_state`, `external_io`, `retries`, `concurrent_writers`, `non_idempotent_effects`, `async_messaging`, `multi_step_saga` and `sensitive_data`; a `yes` needs a `reason`.
 
 ```bash
 bun run validate-plan path/to/plan.md --repo path/to/checkout          # one violation per line
@@ -253,8 +253,36 @@ The validator reads the repo's file list with `git ls-files` and runs every rule
 | `lld-missing` | `lld_required` is true and there is neither `lld` nor a `lld_skip_reason`. |
 | `router-mismatch`, `required-tests` | `lld_required` or `security_review` differs from what the risks require, or an implied test is not in `required_tests`. |
 | `task-plan-size` | `kind: task` with anything other than one task block, or `kind: story` with no task block. |
+| `size-risk` | A task has `size: small` and any risk is `yes`. |
 
 Risk routing: any `yes` except `sensitive_data` requires an LLD; `external_io` and `sensitive_data` require a security review; so does owning a dependency manifest (`package.json`, `bun.lock`, `go.mod`, `go.sum`, `requirements*.txt`, `pyproject.toml`, `Cargo.toml`). Each `yes` implies test ids: `shared_state` → `concurrent-writes`; `external_io` → `io-failure-injection`, `timeout`; `retries` and `non_idempotent_effects` → `duplicate-request`; `concurrent_writers` → `concurrent-writes`, `race-detector`; `async_messaging` → `duplicate-delivery`, `out-of-order`, `poison-to-dlq`, `crash-before-ack`; `multi_step_saga` → `compensation`.
+
+### Status
+
+Task and story status come from git alone: the plan, commit trailers and check notes. Nothing is stored except the notes.
+
+- `Task: <task-id>` on every task commit (repeat the trailer for a commit that serves several tasks); `Task-Lock: <task-id>` on the task's lock commit; `Plan-Rev: <vault-sha>` on scheduler commits.
+- A check note lives in `refs/notes/spec-checks` on a commit SHA and holds JSON: `{"v": 1, "task", "plan_rev", "checks": {"tests": "pass", "guard": "pass", …}, "attempts", "blocked", "reason", "at"}`. Each check is `pass`, `fail` or `skip`; `blocked: true` carries the stop verdict in `reason`. Notes are local: the status command never pushes them. A note that is not valid JSON, has another `v` or misses a field is ignored with a warning.
+
+```bash
+bun run spec-status path/to/plan.md --repo path/to/backend --repo path/to/frontend --branch PAC2-1234
+bun run spec-status path/to/plan.md --repo path/to/checkout --branch PAC2-1234 --base origin/main --json
+bun run spec-status path/to/plan.md --repo path/to/checkout --branch PAC2-1234 --pr
+```
+
+`--repo` is repeatable; each clone serves the plan tasks whose `repo` equals the `org/name` of the clone's `origin` URL (SSH or HTTPS). `--base` defaults to the clone's `origin/HEAD`, else `main`. The command reads `<base>..<branch>` in each repo and refuses a plan that fails the validator. `--json` prints `{"id", "state", "tasks": [{"id", "state", "lastSha", "reason", "attempts"}]}`. Warnings (a repo without the branch, a `Task:` id outside the plan, an invalid note, `gh` trouble) go to stderr.
+
+| Task state | When (first matching row wins) |
+|---|---|
+| `blocked` | The latest note on any of the task's commits has `blocked: true`. |
+| `done` | The task's last commit has a note whose checks are all `pass` or `skip`, with `guard: pass`. A note on an older commit never counts. |
+| `failing` | The task's last commit has a note with a `fail`. |
+| `checking` | The task has a `Task-Lock` commit and its last commit has no passing note yet. |
+| `awaiting-lock` | The task has commits but no `Task-Lock` commit. |
+| `ready` | No commits, and every `depends_on` task is `done`. |
+| `waiting` | No commits, and some dependency is not `done`. |
+
+The story is `in-progress` until every task is `done`, then `tasks-done`. With `--pr` it becomes `done` once `gh pr list --head <branch> --state merged` lists a PR in every task repo; without `--pr` there is no network call, and a missing or unauthenticated `gh` leaves `tasks-done` with a warning. Exit codes: 0 when the status is computed (whatever the states), 2 on a usage or IO error or an invalid plan.
 
 ## Release notes
 

@@ -8,6 +8,7 @@
 import * as fs from "node:fs";
 import { parsePlan } from "../extensions/lib/spec-plan";
 import { type Violation, validatePlan } from "../extensions/lib/spec-validate";
+import { listFiles } from "../extensions/lib/spec-git";
 import { errorMessage } from "../extensions/lib/tooling/runtime";
 
 const USAGE = "Usage: bun scripts/validate-plan.ts <plan.md> --repo <path> [--json]";
@@ -39,15 +40,6 @@ function parseArgs(argv: string[]): CliArgs {
 	return { plan, repo, json };
 }
 
-/** Tracked files of the work tree at `repo`, relative to its root. */
-function gitFiles(repo: string): string[] {
-	const result = Bun.spawnSync({ cmd: ["git", "-C", repo, "ls-files", "-z"], stdout: "pipe", stderr: "pipe" });
-	if (result.exitCode !== 0) {
-		throw new Error(`${repo} is not a git work tree: ${result.stderr.toString().trim() || `git exited ${result.exitCode}`}`);
-	}
-	return result.stdout.toString().split("\0").filter(Boolean);
-}
-
 function render(violations: Violation[]): string {
 	if (violations.length === 0) return "valid";
 	return violations.map(v => `${v.rule}${v.task === undefined ? "" : ` [${v.task}]`}: ${v.detail}`).join("\n");
@@ -66,7 +58,7 @@ export function main(argv: string[]): number {
 	let files: string[];
 	try {
 		markdown = fs.readFileSync(args.plan, "utf8");
-		files = gitFiles(args.repo);
+		files = listFiles(args.repo);
 	} catch (error) {
 		console.error(errorMessage(error));
 		return 2;

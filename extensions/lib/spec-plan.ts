@@ -17,6 +17,8 @@ export interface RiskEntry {
 	reason?: string;
 }
 
+export type TaskSize = "small" | "normal";
+
 export interface TaskBlock {
 	id: string;
 	repo: string;
@@ -32,6 +34,7 @@ export interface TaskBlock {
 	lld_skip_reason?: string;
 	required_tests: string[];
 	acceptance: string[];
+	size: TaskSize;
 }
 
 export interface Plan {
@@ -112,6 +115,15 @@ class Reader {
 		return undefined;
 	}
 
+	/** An optional one-of string; an absent key reads as `fallback`. */
+	choice<T extends string>(key: string, allowed: readonly T[], fallback: T): T | undefined {
+		const value = this.data[key];
+		if (value === undefined) return fallback;
+		const match = allowed.find(item => item === value);
+		if (match === undefined) this.fail(`field "${key}" must be one of ${allowed.join(", ")}`);
+		return match;
+	}
+
 	strings(key: string): string[] | undefined {
 		const value = this.data[key];
 		if (isStringList(value)) return value;
@@ -175,16 +187,17 @@ function parseTask(data: Record<string, unknown>, label: string, errors: Violati
 	const security_review = reader.boolean("security_review");
 	const lld = reader.string("lld", { optional: true });
 	const lld_skip_reason = reader.string("lld_skip_reason", { optional: true });
+	const size = reader.choice("size", ["small", "normal"], "normal");
 	const required_tests = reader.strings("required_tests");
 	const acceptance = reader.strings("acceptance");
 	if (
 		errors.length > before || id === undefined || repo === undefined || !depends_on || foundation === undefined || !owns || !new_paths ||
-		!reads || !risk || lld_required === undefined || security_review === undefined || !required_tests || !acceptance
+		!reads || !risk || lld_required === undefined || security_review === undefined || size === undefined || !required_tests || !acceptance
 	) {
 		return undefined;
 	}
 	return {
-		id, repo, depends_on, foundation, owns, new_paths, reads, risk, lld_required, security_review,
+		id, repo, depends_on, foundation, owns, new_paths, reads, risk, lld_required, security_review, size,
 		...(lld === undefined ? {} : { lld }),
 		...(lld_skip_reason === undefined ? {} : { lld_skip_reason }),
 		required_tests, acceptance,

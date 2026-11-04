@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { type Plan, type RiskEntry, type RiskField, type TaskBlock, parsePlan } from "./spec-plan";
+import { type ParseResult, type Plan, type RiskEntry, type RiskField, type TaskBlock, parsePlan } from "./spec-plan";
 import { IMPLIED_TESTS, RISK_FIELDS, routeRisk } from "./spec-risk";
 import { type Violation, validatePlan } from "./spec-validate";
 
@@ -24,7 +24,7 @@ function risk(yes: Partial<Record<RiskField, string>> = {}): Record<RiskField, R
 function task(id: string, over: Partial<TaskBlock> = {}): TaskBlock {
 	return {
 		id, repo: "org/backend", depends_on: [], foundation: false, owns: [], new_paths: [], reads: [],
-		risk: risk(), lld_required: false, security_review: false, required_tests: [], acceptance: ["it works"],
+		risk: risk(), lld_required: false, security_review: false, size: "normal", required_tests: [], acceptance: ["it works"],
 		...over,
 	};
 }
@@ -138,6 +138,22 @@ describe("parsePlan", () => {
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(only(result.errors)).toEqual(["field"]);
 	});
+
+	test("size defaults to normal and accepts small", () => {
+		const parsed = (over: Record<string, string | null>) => parsePlan(doc(block("yaml plan", PLAN_YAML), block("yaml task", taskYaml(over))));
+		const sizeOf = (result: ParseResult) => (result.ok ? result.plan.tasks[0].size : undefined);
+		expect(sizeOf(parsed({}))).toBe("normal");
+		expect(sizeOf(parsed({ size: "size: small" }))).toBe("small");
+		expect(sizeOf(parsed({ size: "size: normal" }))).toBe("normal");
+	});
+
+	test("field: size must be small or normal", () => {
+		const result = parsePlan(doc(block("yaml plan", PLAN_YAML), block("yaml task", taskYaml({ size: "size: huge" }))));
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(only(result.errors)).toEqual(["field:T01"]);
+		expect(result.errors[0].detail).toContain('field "size" must be one of small, normal');
+	});
 });
 
 describe("validatePlan rules", () => {
@@ -207,6 +223,15 @@ describe("validatePlan rules", () => {
 	test("risk-reason", () => {
 		const found = validatePlan(plan([routed("T01", { shared_state: "  " })]), FILES);
 		expect(only(found)).toEqual(["risk-reason:T01"]);
+	});
+
+	test("size-risk: small is rejected when any risk is yes", () => {
+		const small = routed("T01", { retries: "re-sends on timeout" }, { size: "small" });
+		const found = validatePlan(plan([small]), FILES);
+		expect(only(found)).toEqual(["size-risk:T01"]);
+		expect(found[0].detail).toContain("retries");
+		expect(validatePlan(plan([{ ...small, size: "normal" }]), FILES)).toEqual([]);
+		expect(validatePlan(plan([task("T01", { size: "small" })]), FILES)).toEqual([]);
 	});
 
 	test("lld-missing: needs lld or a skip reason", () => {

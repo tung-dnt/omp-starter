@@ -10,6 +10,7 @@ export type RuleId =
 	| "owns-overlap"
 	| "shared-path"
 	| "risk-reason"
+	| "size-risk"
 	| "lld-missing"
 	| "router-mismatch"
 	| "required-tests"
@@ -193,6 +194,11 @@ export function validatePlan(plan: Plan, repoFiles: readonly string[]): Violatio
 			const entry = task.risk[field];
 			if (entry.value === "yes" && !entry.reason?.trim()) report("risk-reason", i, `risk "${field}" is yes without a reason`);
 		}
+	});
+
+	tasks.forEach((task, i) => {
+		const yes = RISK_FIELDS.filter(field => task.risk[field].value === "yes");
+		if (task.size === "small" && yes.length > 0) report("size-risk", i, `size is small but risk is yes for: ${yes.join(", ")}`);
 	});
 
 	tasks.forEach((task, i) => {
