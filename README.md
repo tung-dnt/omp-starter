@@ -226,6 +226,36 @@ It prints one markdown table per metric, for main sessions and subagents separat
 
 Limits: M3 and M1's scope check use today's vault, so notes moved later are judged at their new place. A session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names, tool names and note slugs; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder or the vault; its only write is the `--json` file.
 
+## Spec plans
+
+`plan.md` is the machine-readable plan of a spec-workflow story or task. Only fenced blocks count: exactly one `yaml plan` block (`id`, `kind: story | task`, `shared_paths`) and one `yaml task` block per task (`id`, `repo`, `depends_on`, `foundation`, `owns`, `new_paths`, `reads`, `risk`, `lld_required`, `security_review`, `lld`, `lld_skip_reason`, `required_tests`, `acceptance`). All other text is ignored. `risk` answers `yes` or `no` for `shared_state`, `external_io`, `retries`, `concurrent_writers`, `non_idempotent_effects`, `async_messaging`, `multi_step_saga` and `sensitive_data`; a `yes` needs a `reason`.
+
+```bash
+bun run validate-plan path/to/plan.md --repo path/to/checkout          # one violation per line
+bun run validate-plan path/to/plan.md --repo path/to/checkout --json   # {"ok": …, "violations": […]}
+```
+
+The validator reads the repo's file list with `git ls-files` and runs every rule, so one run reports all violations, ordered by task and then by rule. It makes no network calls, calls no model and writes nothing.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | The plan is valid. |
+| 1 | The plan is invalid; violations are on stdout. |
+| 2 | Usage or IO error: unreadable plan file, `--repo` is not a git work tree, bad arguments. |
+
+| Rule | Fails when |
+|---|---|
+| `parse`, `field` | Not exactly one `yaml plan` block, a `yaml plan` / `yaml task` fence that is never closed, a YAML syntax error, a missing or wrongly typed field, an unknown risk field, or an `owns` pattern that matches no repo file and no `new_paths` entry. |
+| `duplicate-id`, `missing-dep`, `cycle` | Two tasks share an id, `depends_on` names an unknown task, or the dependencies loop. |
+| `owns-overlap` | Two tasks with no dependency path between them own the same file or create paths where one prefix contains the other. |
+| `shared-path` | A task that is not `foundation` owns or creates something inside `shared_paths`. |
+| `risk-reason`, `acceptance-empty` | A `yes` risk has no reason, or `acceptance` is empty. |
+| `lld-missing` | `lld_required` is true and there is neither `lld` nor a `lld_skip_reason`. |
+| `router-mismatch`, `required-tests` | `lld_required` or `security_review` differs from what the risks require, or an implied test is not in `required_tests`. |
+| `task-plan-size` | `kind: task` with anything other than one task block, or `kind: story` with no task block. |
+
+Risk routing: any `yes` except `sensitive_data` requires an LLD; `external_io` and `sensitive_data` require a security review; so does owning a dependency manifest (`package.json`, `bun.lock`, `go.mod`, `go.sum`, `requirements*.txt`, `pyproject.toml`, `Cargo.toml`). Each `yes` implies test ids: `shared_state` → `concurrent-writes`; `external_io` → `io-failure-injection`, `timeout`; `retries` and `non_idempotent_effects` → `duplicate-request`; `concurrent_writers` → `concurrent-writes`, `race-detector`; `async_messaging` → `duplicate-delivery`, `out-of-order`, `poison-to-dlq`, `crash-before-ack`; `multi_step_saga` → `compensation`.
+
 ## Release notes
 
 ### 0.30.0 — 2026-11-02

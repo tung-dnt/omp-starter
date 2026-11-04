@@ -8,7 +8,8 @@
     "test": "bun test",
     "typecheck": "bun x --bun tsc -p .",
     "smoke": "bun scripts/tooling-smoke.ts",
-    "usage": "bun scripts/usage-report.ts"
+    "usage": "bun scripts/usage-report.ts",
+    "validate-plan": "bun scripts/validate-plan.ts"
   },
   "omp": {
     "extensions": [
