@@ -146,3 +146,21 @@ export function listFiles(repoPath: string): string[] {
 	if (!result.ok) throw new Error(`${repoPath} is not a git work tree: ${result.stderr || "git failed"}`);
 	return result.stdout.split("\0").filter(Boolean);
 }
+
+/** Clone paths keyed by the `org/name` of each clone's `origin`. Throws on a clone without such an origin and on two clones of one repo. */
+export function cloneIdentities(paths: readonly string[]): Map<string, string> {
+	const byIdentity = new Map<string, string>();
+	for (const path of paths) {
+		const identity = repoIdentity(path);
+		if (identity === undefined) throw new Error(`--repo ${path}: not a git clone with an org/name origin URL`);
+		const earlier = byIdentity.get(identity);
+		if (earlier !== undefined) throw new Error(`--repo ${path} and ${earlier} are both clones of ${identity}`);
+		byIdentity.set(identity, path);
+	}
+	return byIdentity;
+}
+
+/** Tracked files of each clone, keyed like `clones` (`org/name`). */
+export function listFilesByRepo(clones: ReadonlyMap<string, string>): Map<string, string[]> {
+	return new Map([...clones].map(([repo, path]) => [repo, listFiles(path)]));
+}

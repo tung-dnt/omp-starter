@@ -231,24 +231,25 @@ Limits: M3 and M1's scope check use today's vault, so notes moved later are judg
 `plan.md` is the machine-readable plan of a spec-workflow story or task. Only fenced blocks count: exactly one `yaml plan` block (`id`, `kind: story | task`, `shared_paths`) and one `yaml task` block per task (`id`, `repo`, `depends_on`, `foundation`, `owns`, `new_paths`, `reads`, `risk`, `lld_required`, `security_review`, `lld`, `lld_skip_reason`, `size`, `required_tests`, `acceptance`). `size` is optional: `small` or `normal` (the default). All other text is ignored. `risk` answers `yes` or `no` for `shared_state`, `external_io`, `retries`, `concurrent_writers`, `non_idempotent_effects`, `async_messaging`, `multi_step_saga` and `sensitive_data`; a `yes` needs a `reason`.
 
 ```bash
-bun run validate-plan path/to/plan.md --repo path/to/checkout          # one violation per line
-bun run validate-plan path/to/plan.md --repo path/to/checkout --json   # {"ok": …, "violations": […]}
+bun run validate-plan path/to/plan.md --repo path/to/checkout                          # one violation per line
+bun run validate-plan path/to/plan.md --repo path/to/backend --repo path/to/frontend   # one clone per plan repo
+bun run validate-plan path/to/plan.md --repo path/to/checkout --json                   # {"ok": …, "violations": […]}
 ```
 
-The validator reads the repo's file list with `git ls-files` and runs every rule, so one run reports all violations, ordered by task and then by rule. It makes no network calls, calls no model and writes nothing.
+`--repo` is repeatable. Each clone serves the tasks whose `repo` (`org/name`) equals the clone's `origin` URL (SSH or HTTPS); a single `--repo` for a single-repo plan needs no origin. The validator reads each repo's file list with `git ls-files` and runs every rule, so one run reports all violations, ordered by task and then by rule. It makes no network calls, calls no model and writes nothing.
 
 | Exit code | Meaning |
 |---|---|
 | 0 | The plan is valid. |
 | 1 | The plan is invalid; violations are on stdout. |
-| 2 | Usage or IO error: unreadable plan file, `--repo` is not a git work tree, bad arguments. |
+| 2 | Usage or IO error: unreadable plan file, a `--repo` that is not a git work tree or has no `org/name` origin (except a lone `--repo` for a single-repo plan), two clones of one repo, bad arguments. |
 
 | Rule | Fails when |
 |---|---|
-| `parse`, `field` | Not exactly one `yaml plan` block, a `yaml plan` / `yaml task` fence that is never closed, a YAML syntax error, a missing or wrongly typed field, an unknown risk field, or an `owns` pattern that matches no repo file and no `new_paths` entry. |
+| `parse`, `field` | Not exactly one `yaml plan` block, a `yaml plan` / `yaml task` fence that is never closed, a YAML syntax error, a missing or wrongly typed field, an unknown risk field, a task `repo` with no `--repo` clone, or an `owns` pattern that matches no file of the task's repo and no `new_paths` entry. |
 | `duplicate-id`, `missing-dep`, `cycle` | Two tasks share an id, `depends_on` names an unknown task, or the dependencies loop. |
-| `owns-overlap` | Two tasks with no dependency path between them own the same file or create paths where one prefix contains the other. |
-| `shared-path` | A task that is not `foundation` owns or creates something inside `shared_paths`. |
+| `owns-overlap` | Two tasks of the same `repo` with no dependency path between them own the same file or create paths where one prefix contains the other. The same path in two different repos never overlaps. |
+| `shared-path` | A task that is not `foundation` owns or creates something inside `shared_paths`; the globs are matched against the files of the task's own repo. |
 | `risk-reason`, `acceptance-empty` | A `yes` risk has no reason, or `acceptance` is empty. |
 | `lld-missing` | `lld_required` is true and there is neither `lld` nor a `lld_skip_reason`. |
 | `router-mismatch`, `required-tests` | `lld_required` or `security_review` differs from what the risks require, or an implied test is not in `required_tests`. |

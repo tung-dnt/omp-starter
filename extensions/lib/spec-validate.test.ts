@@ -9,7 +9,11 @@ import { type Violation, validatePlan } from "./spec-validate";
 const SCRIPT = resolve(import.meta.dir, "../../scripts/validate-plan.ts");
 const FENCE = "`".repeat(3);
 
-const FILES = ["db/migrations/001.sql", "src/refund/handler.ts", "src/shared/util.ts", "src/orders/api.ts", "package.json", "README.md"];
+const BACKEND_FILES = ["db/migrations/001.sql", "src/refund/handler.ts", "src/shared/util.ts", "src/orders/api.ts", "package.json", "README.md"];
+
+/** Files keyed by the repo the `task()` helper puts tasks in. */
+const byRepo = (files: readonly string[]) => new Map([["org/backend", files]]);
+const FILES = byRepo(BACKEND_FILES);
 
 /** Risk answers: every field `no` except those named, which are `yes` with the given reason. */
 function risk(yes: Partial<Record<RiskField, string>> = {}): Record<RiskField, RiskEntry> {
@@ -212,6 +216,47 @@ describe("validatePlan rules", () => {
 		expect(ordered).toEqual([]);
 	});
 
+	describe("repos", () => {
+		const other = "org/frontend";
+		const both = new Map([["org/backend", BACKEND_FILES], [other, BACKEND_FILES]]);
+
+		test("owns-overlap: the same path owned in two repos by independent tasks is fine, in one repo it is not", () => {
+			const a = task("T01", { owns: ["src/orders/api.ts"] });
+			const b = task("T02", { owns: ["src/orders/api.ts"], repo: other });
+			expect(validatePlan(plan([a, b]), both)).toEqual([]);
+			expect(only(validatePlan(plan([a, { ...b, repo: "org/backend" }]), both))).toEqual(["owns-overlap:T01"]);
+		});
+
+		test("owns-overlap: new_paths prefixes only clash within a repo", () => {
+			const a = task("T01", { new_paths: ["src/new/**"] });
+			const b = task("T02", { new_paths: ["src/new/x.ts"], repo: other });
+			expect(validatePlan(plan([a, b]), both)).toEqual([]);
+			expect(only(validatePlan(plan([a, { ...b, repo: "org/backend" }]), both))).toEqual(["owns-overlap:T01"]);
+		});
+
+		test("a task's owns are matched against its own repo's files", () => {
+			const files = new Map([["org/backend", BACKEND_FILES], [other, ["web/index.ts"]]]);
+			expect(validatePlan(plan([task("T01", { owns: ["web/**"], repo: other })]), files)).toEqual([]);
+			const found = validatePlan(plan([task("T01", { owns: ["web/**"] })]), files);
+			expect(only(found)).toEqual(["field:T01"]);
+		});
+
+		test("shared-path: a shared glob is matched against the task's own repo's files only", () => {
+			const shared = { shared_paths: ["src/shared/**"] };
+			const files = new Map([["org/backend", BACKEND_FILES], [other, ["src/ui/button.ts"]]]);
+			// `src/**` in the frontend matches only src/ui/button.ts, which is not shared; in the backend it reaches src/shared/util.ts.
+			expect(validatePlan(plan([task("T01", { owns: ["src/**"], repo: other })], shared), files)).toEqual([]);
+			expect(only(validatePlan(plan([task("T01", { owns: ["src/**"] })], shared), files))).toEqual(["shared-path:T01"]);
+		});
+
+		test("field: a task whose repo has no files names the missing repo", () => {
+			const found = validatePlan(plan([task("T01", { repo: "org/missing", owns: ["src/**"] })]), FILES);
+			expect(only(found)).toEqual(["field:T01"]);
+			expect(found[0].detail).toContain("org/missing");
+			expect(only(validatePlan(plan([task("T01"), task("T02", { repo: "org/missing" })]), FILES))).toEqual(["field:T02"]);
+		});
+	});
+
 	test("shared-path: a non-foundation task owning or creating shared paths", () => {
 		const shared = { shared_paths: ["db/migrations/**"] };
 		expect(only(validatePlan(plan([task("T01", { owns: ["db/migrations/**"] })], shared), FILES))).toEqual(["shared-path:T01"]);
@@ -317,16 +362,16 @@ describe("risk router", () => {
 
 	test("owning a dependency manifest requires a security review", () => {
 		for (const manifest of ["package.json", "bun.lock", "go.mod", "go.sum", "requirements-dev.txt", "pyproject.toml", "Cargo.toml"]) {
-			const files = [...FILES, manifest];
+			const files = [...BACKEND_FILES, manifest];
 			const without = task("T01", { owns: [manifest] });
-			expect(only(validatePlan(plan([without]), files))).toEqual(["router-mismatch:T01"]);
-			expect(validatePlan(plan([{ ...without, security_review: true }]), files)).toEqual([]);
+			expect(only(validatePlan(plan([without]), byRepo(files)))).toEqual(["router-mismatch:T01"]);
+			expect(validatePlan(plan([{ ...without, security_review: true }]), byRepo(files))).toEqual([]);
 		}
 	});
 
 	test("a manifest below a directory, or one that is only created, counts", () => {
 		const nested = task("T01", { owns: ["services/api/go.mod"] });
-		expect(only(validatePlan(plan([nested]), [...FILES, "services/api/go.mod"]))).toEqual(["router-mismatch:T01"]);
+		expect(only(validatePlan(plan([nested]), byRepo([...BACKEND_FILES, "services/api/go.mod"])))).toEqual(["router-mismatch:T01"]);
 		const created = task("T01", { new_paths: ["tools/Cargo.toml"] });
 		expect(only(validatePlan(plan([created]), FILES))).toEqual(["router-mismatch:T01"]);
 	});
@@ -429,5 +474,78 @@ describe("validate-plan CLI", () => {
 		expect(run("--repo", repo).code).toBe(2);
 		expect(run(file, "--repo", repo, "--bogus").code).toBe(2);
 		expect(run().stdout).toBe("");
+	});
+
+	describe("several repos", () => {
+		const task = (id: string, repo: string) =>
+			[
+				`${FENCE}yaml task`,
+				`id: ${id}`,
+				`repo: ${repo}`,
+				"depends_on: []",
+				"foundation: false",
+				"owns: [src/a.ts]",
+				"new_paths: []",
+				"reads: []",
+				"risk:",
+				...RISK_FIELDS.map(f => `  ${f}: {value: no}`),
+				"lld_required: false",
+				"security_review: false",
+				"required_tests: []",
+				'acceptance: ["works"]',
+				FENCE,
+				"",
+			];
+		const twoTasks = (repoA: string, repoB: string) =>
+			[`${FENCE}yaml plan`, "id: S-1", "kind: story", "shared_paths: []", FENCE, "", ...task("T01", repoA), ...task("T02", repoB)].join("\n");
+
+		/** A git clone of `origin` under `root` with `src/a.ts` tracked. */
+		function clone(root: string, name: string, origin: string): string {
+			const repo = join(root, name);
+			mkdirSync(join(repo, "src"), { recursive: true });
+			writeFileSync(join(repo, "src", "a.ts"), "export {};\n");
+			for (const args of [["init", "--quiet"], ["add", "-A"], ["remote", "add", "origin", origin]]) {
+				expect(Bun.spawnSync({ cmd: ["git", ...args], cwd: repo }).exitCode).toBe(0);
+			}
+			return repo;
+		}
+
+		test("each clone serves the tasks of its origin; the same path in two repos does not overlap", () => {
+			const { root, write } = world();
+			const backend = clone(root, "backend", "git@github.com:org/backend.git");
+			const frontend = clone(root, "frontend", "https://github.com/org/frontend.git");
+			const file = write("two.md", twoTasks("org/backend", "org/frontend"));
+			const result = run(file, "--repo", backend, "--repo", frontend);
+			expect(result.stdout.trim()).toBe("valid");
+			expect(result.code).toBe(0);
+		});
+
+		test("the same path owned by independent tasks of one repo is an owns-overlap", () => {
+			const { root, write } = world();
+			const backend = clone(root, "backend", "git@github.com:org/backend.git");
+			const result = run(write("one.md", twoTasks("org/backend", "org/backend")), "--repo", backend);
+			expect(result.code).toBe(1);
+			expect(result.stdout).toContain("owns-overlap [T01]");
+		});
+
+		test("a task repo without a --repo clone is reported as a field violation", () => {
+			const { root, write } = world();
+			const backend = clone(root, "backend", "git@github.com:org/backend.git");
+			const result = run(write("two.md", twoTasks("org/backend", "org/frontend")), "--repo", backend);
+			expect(result.code).toBe(1);
+			expect(result.stdout).toContain('field [T02]: no files supplied for repo "org/frontend"');
+		});
+
+		test("a lone clone without an origin cannot serve a multi-repo plan, two clones of one repo are refused", () => {
+			const { root, repo, write } = world();
+			const noOrigin = run(write("two.md", twoTasks("org/backend", "org/frontend")), "--repo", repo);
+			expect(noOrigin.code).toBe(2);
+			expect(noOrigin.stderr).toContain("cannot serve a plan with 2 repos");
+			const first = clone(root, "first", "git@github.com:org/backend.git");
+			const second = clone(root, "second", "https://github.com/org/backend.git");
+			const twins = run(write("two.md", twoTasks("org/backend", "org/backend")), "--repo", first, "--repo", second);
+			expect(twins.code).toBe(2);
+			expect(twins.stderr).toContain("both clones of org/backend");
+		});
 	});
 });

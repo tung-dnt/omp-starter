@@ -1,7 +1,18 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { type CheckNote, defaultBase, listFiles, readCheckNote, readTaskCommits, refExists, repoIdentity, writeCheckNote } from "./spec-git";
+import {
+	type CheckNote,
+	cloneIdentities,
+	defaultBase,
+	listFiles,
+	listFilesByRepo,
+	readCheckNote,
+	readTaskCommits,
+	refExists,
+	repoIdentity,
+	writeCheckNote,
+} from "./spec-git";
 import { RISK_FIELDS } from "./spec-risk";
 
 const SCRIPT = resolve(import.meta.dir, "../../scripts/spec-status.ts");
@@ -173,6 +184,20 @@ describe("repo facts", () => {
 		expect(listFiles(repo).sort()).toEqual(["src/a.ts", "src/b.ts"]);
 		expect(() => listFiles(scratch())).toThrow(/not a git work tree/);
 	});
+
+	test("cloneIdentities and listFilesByRepo key clones by origin org/name", () => {
+		const backend = initRepo("git@github.com:org/backend.git");
+		const frontend = initRepo("https://github.com/org/frontend.git");
+		writeFileSync(join(frontend, "web.ts"), "export {};\n");
+		git(frontend, "add", "-A");
+		const clones = cloneIdentities([backend, frontend]);
+		expect([...clones]).toEqual([["org/backend", backend], ["org/frontend", frontend]]);
+		const files = listFilesByRepo(clones);
+		expect(files.get("org/backend")?.sort()).toEqual(["src/a.ts", "src/b.ts"]);
+		expect(files.get("org/frontend")?.sort()).toEqual(["src/a.ts", "src/b.ts", "web.ts"]);
+		expect(() => cloneIdentities([initRepo()])).toThrow(/not a git clone with an org\/name origin URL/);
+		expect(() => cloneIdentities([backend, initRepo("https://github.com/org/backend")])).toThrow(/both clones of org\/backend/);
+	});
 });
 
 describe("spec-status CLI", () => {
@@ -338,7 +363,7 @@ describe("spec-status CLI", () => {
 		const other = initRepo("https://github.com/org/other.git");
 		const unmatched = run(plan, "--repo", other, "--branch", "PAC-1");
 		expect(unmatched.code).toBe(2);
-		expect(unmatched.stderr).toContain("no --repo clone has origin org/backend");
+		expect(unmatched.stderr).toContain('no files supplied for repo "org/backend"');
 
 		const base = run(plan, "--repo", repo, "--branch", "PAC-1", "--base", "absent");
 		expect(base.code).toBe(2);

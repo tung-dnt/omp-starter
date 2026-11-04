@@ -10,12 +10,12 @@
 import * as fs from "node:fs";
 import {
 	type TaskCommit,
+	cloneIdentities,
 	defaultBase,
-	listFiles,
+	listFilesByRepo,
 	readCheckNote,
 	readTaskCommits,
 	refExists,
-	repoIdentity,
 } from "../extensions/lib/spec-git";
 import { parsePlan } from "../extensions/lib/spec-plan";
 import { type StoryStatus, computeStatus, formatStatusLine } from "../extensions/lib/spec-status";
@@ -64,19 +64,6 @@ function parseArgs(argv: string[]): CliArgs {
 	return { plan, repos, branch, json, pr, ...(base === undefined ? {} : { base }) };
 }
 
-/** Clone path by `org/name`, read from each clone's origin URL. */
-function mapRepos(paths: readonly string[]): Map<string, string> {
-	const byIdentity = new Map<string, string>();
-	for (const path of paths) {
-		const identity = repoIdentity(path);
-		if (identity === undefined) throw new Error(`--repo ${path}: not a git clone with an org/name origin URL`);
-		const earlier = byIdentity.get(identity);
-		if (earlier !== undefined) throw new Error(`--repo ${path} and ${earlier} are both clones of ${identity}`);
-		byIdentity.set(identity, path);
-	}
-	return byIdentity;
-}
-
 /** True when `gh` lists at least one merged PR for the branch; any failure is a warning and reads as not merged. */
 function prMerged(repo: string, path: string, branch: string): boolean {
 	try {
@@ -113,10 +100,9 @@ function render(status: StoryStatus): string {
 
 function run(args: CliArgs): StoryStatus {
 	const markdown = fs.readFileSync(args.plan, "utf8");
-	const clones = mapRepos(args.repos);
+	const clones = cloneIdentities(args.repos);
 	const parsed = parsePlan(markdown);
-	const files = [...clones.values()].flatMap(listFiles);
-	const violations = parsed.ok ? validatePlan(parsed.plan, files) : parsed.errors;
+	const violations = parsed.ok ? validatePlan(parsed.plan, listFilesByRepo(clones)) : parsed.errors;
 	if (!parsed.ok || violations.length > 0) {
 		const lines = violations.map(v => `${v.rule}${v.task === undefined ? "" : ` [${v.task}]`}: ${v.detail}`);
 		throw new Error(`the plan is invalid:\n${lines.join("\n")}`);

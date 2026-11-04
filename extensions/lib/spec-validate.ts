@@ -115,9 +115,11 @@ function reachable(from: number, edges: readonly number[][]): Set<number> {
  * Checks a parsed plan against the Phase 5 rules. Every rule runs; nothing stops at the first finding.
  * Order: by task (plan order), then by rule (the order of the rules table), then by discovery order.
  * Findings about a pair of tasks are listed under the earlier task, a cycle under its first task, and
- * `task-plan-size` last. Pure: the repo's files come in as `repoFiles` (`git ls-files`).
+ * `task-plan-size` last. Pure: the files come in as `filesByRepo`, the tracked files (`git ls-files`) of each repo keyed by the
+ * tasks' `repo` (`org/name`). Overlap and shared-path checks compare only tasks of the same repo, and a task's `owns`
+ * and `new_paths` are matched against its own repo's files; a task whose repo has no entry is a `field` violation.
  */
-export function validatePlan(plan: Plan, repoFiles: readonly string[]): Violation[] {
+export function validatePlan(plan: Plan, filesByRepo: ReadonlyMap<string, readonly string[]>): Violation[] {
 	const { tasks } = plan;
 	const found: Finding[] = [];
 	const report = (rule: RuleId, at: number | undefined, detail: string): void => {
@@ -128,12 +130,16 @@ export function validatePlan(plan: Plan, repoFiles: readonly string[]): Violatio
 	const byId = indexById(tasks);
 	const edges = tasks.map(task => task.depends_on.flatMap(id => byId.get(id) ?? []));
 	const reach = edges.map((_, i) => reachable(i, edges));
-	const owned = tasks.map(task => expand(task.owns, repoFiles));
+	const owned = tasks.map(task => expand(task.owns, filesByRepo.get(task.repo) ?? []));
 	const ownedFiles = owned.map(entries => new Set([...entries.values()].flat()));
 	const sharedGlobs = plan.shared_paths.map(pattern => ({ pattern, glob: new Bun.Glob(pattern), prefix: prefixSegments(pattern) }));
 
 	// field: an `owns` pattern that matches no repo file and no new path of the task.
 	tasks.forEach((task, i) => {
+		if (!filesByRepo.has(task.repo)) {
+			report("field", i, `no files supplied for repo "${task.repo}"`);
+			return;
+		}
 		const newPrefixes = task.new_paths.map(prefixSegments);
 		for (const [pattern, files] of owned[i]) {
 			if (files.length > 0) continue;
@@ -158,6 +164,7 @@ export function validatePlan(plan: Plan, repoFiles: readonly string[]): Violatio
 
 	for (let i = 0; i < tasks.length; i++) {
 		for (let j = i + 1; j < tasks.length; j++) {
+			if (tasks[i].repo !== tasks[j].repo) continue;
 			if (reach[i].has(j) || reach[j].has(i)) continue;
 			const sharedFiles = [...ownedFiles[i]].filter(file => ownedFiles[j].has(file));
 			if (sharedFiles.length > 0) {
