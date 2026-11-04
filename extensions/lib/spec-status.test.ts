@@ -15,7 +15,7 @@ function task(id: string, depends_on: string[] = [], repo = REPO): TaskBlock {
 	};
 }
 
-const plan = (tasks: TaskBlock[]): Plan => ({ id: "S-1", kind: "story", shared_paths: [], tasks });
+const plan = (tasks: TaskBlock[]): Plan => ({ id: "S-1", kind: "story", shared_paths: [], checks: {}, tasks });
 
 const commit = (sha: string, tasks: string[], locks: string[] = []): TaskCommit => ({ sha, tasks, locks });
 

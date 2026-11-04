@@ -1,4 +1,4 @@
-// The only spec module that runs `git`: commit trailers, check notes and repo facts.
+// The spec modules' only git runner (`git`, `gitOrThrow`, `gitInDir`) and the readers for commit trailers, check notes and repo facts.
 // Every call is an argv array through `Bun.spawnSync`; nothing here goes through a shell.
 import { errorMessage, isRecord } from "./tooling/runtime";
 
@@ -32,20 +32,63 @@ const LOG_FORMAT = [
 	"%(trailers:key=Plan-Rev,valueonly)",
 ].join("%x1f") + "%x1e";
 
-interface GitResult {
+export interface GitResult {
 	ok: boolean;
 	stdout: string;
 	stderr: string;
 }
 
-function git(repoPath: string, args: readonly string[]): GitResult {
-	const result = Bun.spawnSync({ cmd: ["git", "-C", repoPath, ...args], stdout: "pipe", stderr: "pipe" });
+/** Variables git reads to find a repository (`git rev-parse --local-env-vars`). */
+const REPO_ENV: readonly string[] = [
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_CONFIG",
+	"GIT_CONFIG_PARAMETERS",
+	"GIT_CONFIG_COUNT",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_IMPLICIT_WORK_TREE",
+	"GIT_GRAFT_FILE",
+	"GIT_INDEX_FILE",
+	"GIT_NO_REPLACE_OBJECTS",
+	"GIT_REPLACE_REF_BASE",
+	"GIT_PREFIX",
+	"GIT_SHALLOW_FILE",
+	"GIT_COMMON_DIR",
+];
+
+/**
+ * The caller's environment without the variables that name a repository, for every git run and every check command.
+ * Git exports `GIT_DIR` to the hooks of a linked worktree; left in place it would send `git -C <repo>` to another repository.
+ */
+export function cleanEnv(): Record<string, string | undefined> {
+	const env: Record<string, string | undefined> = { ...process.env };
+	for (const name of REPO_ENV) delete env[name];
+	return env;
+}
+
+function run(argv: readonly string[]): GitResult {
+	const result = Bun.spawnSync({ cmd: ["git", ...argv], stdout: "pipe", stderr: "pipe", env: cleanEnv() });
 	return { ok: result.exitCode === 0, stdout: result.stdout.toString(), stderr: result.stderr.toString().trim() };
 }
 
-function gitOrThrow(repoPath: string, args: readonly string[]): string {
+/** `git -C <repoPath> <args>`. */
+export function git(repoPath: string, args: readonly string[]): GitResult {
+	return run(["-C", repoPath, ...args]);
+}
+
+/** `git --git-dir=<gitDir> <args>`: reads a git dir that has no work tree to stand in, such as the vault store. */
+export function gitInDir(gitDir: string, args: readonly string[]): GitResult {
+	return run([`--git-dir=${gitDir}`, ...args]);
+}
+
+/** Stdout of `git -C <repoPath> <args>`. Throws with git's message on a non-zero exit. */
+export function gitOrThrow(repoPath: string, args: readonly string[]): string {
 	const result = git(repoPath, args);
-	if (!result.ok) throw new Error(`git ${args[0]} failed in ${repoPath}: ${result.stderr || "non-zero exit"}`);
+	if (!result.ok) {
+		const verb = args.find(arg => !arg.startsWith("-") && !arg.includes("=")) ?? args[0];
+		throw new Error(`git ${verb} failed in ${repoPath}: ${result.stderr || "non-zero exit"}`);
+	}
 	return result.stdout;
 }
 
@@ -140,10 +183,15 @@ export function defaultBase(repoPath: string): string {
 	return result.ok && result.stdout.trim() ? result.stdout.trim() : "main";
 }
 
-/** Tracked files of the work tree at `repoPath`, relative to its root. Throws when it is not a git work tree. */
-export function listFiles(repoPath: string): string[] {
-	const result = git(repoPath, ["ls-files", "-z"]);
-	if (!result.ok) throw new Error(`${repoPath} is not a git work tree: ${result.stderr || "git failed"}`);
+/**
+ * Tracked files of the work tree at `repoPath`, relative to its root; with `rev`, the files of that commit's tree instead.
+ * Throws when it is not a git work tree (or `rev` is unknown).
+ */
+export function listFiles(repoPath: string, rev?: string): string[] {
+	const result = rev === undefined ? git(repoPath, ["ls-files", "-z"]) : git(repoPath, ["ls-tree", "-r", "-z", "--name-only", rev]);
+	if (!result.ok) {
+		throw new Error(rev === undefined ? `${repoPath} is not a git work tree: ${result.stderr || "git failed"}` : `cannot list the files of ${rev} in ${repoPath}: ${result.stderr || "git failed"}`);
+	}
 	return result.stdout.split("\0").filter(Boolean);
 }
 

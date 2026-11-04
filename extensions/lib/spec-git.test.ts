@@ -220,7 +220,8 @@ describe("spec-status CLI", () => {
 			FENCE,
 			"",
 		];
-		return [`${FENCE}yaml plan`, "id: S-1", "kind: story", "shared_paths: []", FENCE, "", ...task("T1", "src/a.ts", "[]", acceptance), ...task("T2", "src/b.ts", "[T1]", '["works"]')].join("\n");
+		const header = [`${FENCE}yaml plan`, "id: S-1", "kind: story", "shared_paths: []", "checks:", '  org/backend: {test: "true"}', FENCE, ""];
+		return [...header, ...task("T1", "src/a.ts", "[]", acceptance), ...task("T2", "src/b.ts", "[T1]", '["works"]')].join("\n");
 	};
 
 	/** A clone of org/backend on branch PAC-1 (checked out), a plan file for it, and a PATH with git (and optionally a fake gh). */

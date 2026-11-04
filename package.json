@@ -10,7 +10,10 @@
     "smoke": "bun scripts/tooling-smoke.ts",
     "usage": "bun scripts/usage-report.ts",
     "validate-plan": "bun scripts/validate-plan.ts",
-    "spec-status": "bun scripts/spec-status.ts"
+    "spec-status": "bun scripts/spec-status.ts",
+    "spec-guard": "bun scripts/spec-guard.ts",
+    "spec-check": "bun scripts/spec-check.ts",
+    "spec-hook": "bun scripts/spec-hook.ts"
   },
   "omp": {
     "extensions": [

@@ -40,8 +40,10 @@ function routed(id: string, yes: Partial<Record<RiskField, string>>, over: Parti
 	return task(id, { risk: risks, lld_required: route.lld_required, security_review: route.security_review, required_tests: route.implied_tests, lld: "lld/x.md", ...over });
 }
 
+/** A story plan whose `checks` declare a `test` for every repo the tasks use, unless `over` says otherwise. */
 function plan(tasks: TaskBlock[], over: Partial<Plan> = {}): Plan {
-	return { id: "S-1", kind: "story", shared_paths: [], tasks, ...over };
+	const checks = Object.fromEntries(tasks.map(t => [t.repo, { test: "go test ./..." }]));
+	return { id: "S-1", kind: "story", shared_paths: [], checks, tasks, ...over };
 }
 
 const only = (violations: Violation[]) => violations.map(v => `${v.rule}${v.task ? `:${v.task}` : ""}`);
@@ -157,6 +159,52 @@ describe("parsePlan", () => {
 		if (result.ok) return;
 		expect(only(result.errors)).toEqual(["field:T01"]);
 		expect(result.errors[0].detail).toContain('field "size" must be one of small, normal');
+	});
+
+	describe("checks", () => {
+		const withChecks = (checks: string) => parsePlan(doc(block("yaml plan", `${PLAN_YAML}\nchecks:\n${checks}`), block("yaml task", taskYaml())));
+
+		test("reads the documented block; an absent block reads as empty", () => {
+			const result = withChecks(
+				['  org/backend:', '    test: "go test ./..."', '    test_files: "go test {packages}"', '    typecheck: "go vet ./..."', '    lint: ""', '  org/frontend:', '    test: "bun test"'].join("\n"),
+			);
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(result.plan.checks).toEqual({
+				"org/backend": { test: "go test ./...", test_files: "go test {packages}", typecheck: "go vet ./...", lint: "" },
+				"org/frontend": { test: "bun test" },
+			});
+			const absent = parsePlan(doc(block("yaml plan", PLAN_YAML), block("yaml task", taskYaml())));
+			expect(absent.ok && absent.plan.checks).toEqual({});
+			const empty = withChecks("");
+			expect(empty.ok && empty.plan.checks).toEqual({});
+		});
+
+		test("a null command reads as a skipped check", () => {
+			const result = withChecks(["  org/backend:", '    test: "go test ./..."', "    lint:"].join("\n"));
+			expect(result.ok && result.plan.checks["org/backend"]).toEqual({ test: "go test ./...", lint: "" });
+		});
+
+		const bad: Array<[string, string, string]> = [
+			["an unknown check name", '  org/backend:\n    test: "go test ./..."\n    format: "gofmt"', 'unknown check "format" for "org/backend"'],
+			["a command that is not a string", "  org/backend:\n    test: 12", 'check "test" for "org/backend" must be a string'],
+			["a repo entry that is not a mapping", "  org/backend: go test ./...", 'checks "org/backend" must be a mapping of commands'],
+		];
+		for (const [name, checks, detail] of bad) {
+			test(`field: ${name}`, () => {
+				const result = withChecks(checks);
+				expect(result.ok).toBe(false);
+				if (result.ok) return;
+				expect(only(result.errors)).toEqual(["field"]);
+				expect(result.errors[0].detail).toContain(detail);
+			});
+		}
+
+		test("field: checks itself must be a mapping", () => {
+			const result = parsePlan(doc(block("yaml plan", `${PLAN_YAML}\nchecks: [go test]`), block("yaml task", taskYaml())));
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.errors[0].detail).toContain('field "checks" must be a mapping');
+		});
 	});
 });
 
@@ -304,6 +352,22 @@ describe("validatePlan rules", () => {
 		expect(only(validatePlan(plan([task("T01", { acceptance: [] })]), FILES))).toEqual(["acceptance-empty:T01"]);
 	});
 
+	test("checks-missing: every task repo needs a test command, reported once per repo under its first task", () => {
+		expect(only(validatePlan(plan([task("T01")], { checks: {} }), FILES))).toEqual(["checks-missing:T01"]);
+		expect(only(validatePlan(plan([task("T01")], { checks: { "org/backend": { test: "  " } } }), FILES))).toEqual(["checks-missing:T01"]);
+		expect(only(validatePlan(plan([task("T01")], { checks: { "org/backend": { lint: "eslint ." } } }), FILES))).toEqual(["checks-missing:T01"]);
+		expect(only(validatePlan(plan([task("T01")], { checks: { "org/other": { test: "go test ./..." } } }), FILES))).toEqual(["checks-missing:T01"]);
+		expect(validatePlan(plan([task("T01")], { checks: { "org/backend": { test: "go test ./...", lint: "", typecheck: "go vet ./..." } } }), FILES)).toEqual([]);
+		const twoOfOneRepo = validatePlan(plan([task("T01"), task("T02", { depends_on: ["T01"] })], { checks: {} }), FILES);
+		expect(only(twoOfOneRepo)).toEqual(["checks-missing:T01"]);
+		expect(twoOfOneRepo[0].detail).toContain('"test"');
+		expect(twoOfOneRepo[0].detail).toContain("org/backend");
+		const frontend = "org/frontend";
+		const files = new Map([["org/backend", BACKEND_FILES], [frontend, BACKEND_FILES]]);
+		const twoRepos = plan([task("T01"), task("T02", { repo: frontend })], { checks: { "org/backend": { test: "go test ./..." } } });
+		expect(only(validatePlan(twoRepos, files))).toEqual(["checks-missing:T02"]);
+	});
+
 	test("task-plan-size: a story needs at least one task block", () => {
 		expect(only(validatePlan(plan([]), FILES))).toEqual(["task-plan-size"]);
 		expect(validatePlan(plan([task("T01")]), FILES)).toEqual([]);
@@ -387,12 +451,13 @@ describe("validate-plan CLI", () => {
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
-	const PLAN = (acceptance: string) =>
+	const PLAN = (acceptance: string, checks = ["checks:", '  org/backend: {test: "go test ./..."}']) =>
 		[
 			`${FENCE}yaml plan`,
 			"id: S-1",
 			"kind: story",
 			"shared_paths: []",
+			...checks,
 			FENCE,
 			"",
 			`${FENCE}yaml task`,
@@ -454,6 +519,13 @@ describe("validate-plan CLI", () => {
 		expect(json.violations).toEqual([{ rule: "acceptance-empty", task: "T01", detail: "acceptance is empty" }]);
 	});
 
+	test("exit 1 for a plan whose repo declares no test check", () => {
+		const { repo, write } = world();
+		const result = run(write("plan.md", PLAN('["works"]', [])), "--repo", repo);
+		expect(result.code).toBe(1);
+		expect(result.stdout).toContain('checks-missing [T01]: checks has no "test" command for repo "org/backend"');
+	});
+
 	test("exit 1 for a plan that does not parse", () => {
 		const { repo, write } = world();
 		const result = run(write("plan.md", "no blocks here"), "--repo", repo, "--json");
@@ -497,7 +569,18 @@ describe("validate-plan CLI", () => {
 				"",
 			];
 		const twoTasks = (repoA: string, repoB: string) =>
-			[`${FENCE}yaml plan`, "id: S-1", "kind: story", "shared_paths: []", FENCE, "", ...task("T01", repoA), ...task("T02", repoB)].join("\n");
+			[
+				`${FENCE}yaml plan`,
+				"id: S-1",
+				"kind: story",
+				"shared_paths: []",
+				"checks:",
+				...[...new Set([repoA, repoB])].map(repo => `  ${repo}: {test: "true"}`),
+				FENCE,
+				"",
+				...task("T01", repoA),
+				...task("T02", repoB),
+			].join("\n");
 
 		/** A git clone of `origin` under `root` with `src/a.ts` tracked. */
 		function clone(root: string, name: string, origin: string): string {

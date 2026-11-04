@@ -228,7 +228,7 @@ Limits: M3 and M1's scope check use today's vault, so notes moved later are judg
 
 ## Spec plans
 
-`plan.md` is the machine-readable plan of a spec-workflow story or task. Only fenced blocks count: exactly one `yaml plan` block (`id`, `kind: story | task`, `shared_paths`) and one `yaml task` block per task (`id`, `repo`, `depends_on`, `foundation`, `owns`, `new_paths`, `reads`, `risk`, `lld_required`, `security_review`, `lld`, `lld_skip_reason`, `size`, `required_tests`, `acceptance`). `size` is optional: `small` or `normal` (the default). All other text is ignored. `risk` answers `yes` or `no` for `shared_state`, `external_io`, `retries`, `concurrent_writers`, `non_idempotent_effects`, `async_messaging`, `multi_step_saga` and `sensitive_data`; a `yes` needs a `reason`.
+`plan.md` is the machine-readable plan of a spec-workflow story or task. Only fenced blocks count: exactly one `yaml plan` block (`id`, `kind: story | task`, `shared_paths`, `checks`) and one `yaml task` block per task (`id`, `repo`, `depends_on`, `foundation`, `owns`, `new_paths`, `reads`, `risk`, `lld_required`, `security_review`, `lld`, `lld_skip_reason`, `size`, `required_tests`, `acceptance`). `size` is optional: `small` or `normal` (the default). All other text is ignored. `risk` answers `yes` or `no` for `shared_state`, `external_io`, `retries`, `concurrent_writers`, `non_idempotent_effects`, `async_messaging`, `multi_step_saga` and `sensitive_data`; a `yes` needs a `reason`. `checks` maps each task repo (`org/name`) to the commands `spec-check` runs: `test` (required), `test_files`, `typecheck` and `lint`; an absent or empty `checks` reads as no commands (see [Guard and checks](#guard-and-checks)).
 
 ```bash
 bun run validate-plan path/to/plan.md --repo path/to/checkout                          # one violation per line
@@ -255,6 +255,7 @@ bun run validate-plan path/to/plan.md --repo path/to/checkout --json            
 | `router-mismatch`, `required-tests` | `lld_required` or `security_review` differs from what the risks require, or an implied test is not in `required_tests`. |
 | `task-plan-size` | `kind: task` with anything other than one task block, or `kind: story` with no task block. |
 | `size-risk` | A task has `size: small` and any risk is `yes`. |
+| `checks-missing` | A task's repo has no `checks.test` command in the plan block (reported once per repo, under the first task that uses it). |
 
 Risk routing: any `yes` except `sensitive_data` requires an LLD; `external_io` and `sensitive_data` require a security review; so does owning a dependency manifest (`package.json`, `bun.lock`, `go.mod`, `go.sum`, `requirements*.txt`, `pyproject.toml`, `Cargo.toml`). Each `yes` implies test ids: `shared_state` → `concurrent-writes`; `external_io` → `io-failure-injection`, `timeout`; `retries` and `non_idempotent_effects` → `duplicate-request`; `concurrent_writers` → `concurrent-writes`, `race-detector`; `async_messaging` → `duplicate-delivery`, `out-of-order`, `poison-to-dlq`, `crash-before-ack`; `multi_step_saga` → `compensation`.
 
@@ -263,7 +264,7 @@ Risk routing: any `yes` except `sensitive_data` requires an LLD; `external_io` a
 Task and story status come from git alone: the plan, commit trailers and check notes. Nothing is stored except the notes.
 
 - `Task: <task-id>` on every task commit (repeat the trailer for a commit that serves several tasks); `Task-Lock: <task-id>` on the task's lock commit; `Plan-Rev: <vault-sha>` on scheduler commits.
-- A check note lives in `refs/notes/spec-checks` on a commit SHA and holds JSON: `{"v": 1, "task", "plan_rev", "checks": {"tests": "pass", "guard": "pass", …}, "attempts", "blocked", "reason", "at"}`. Each check is `pass`, `fail` or `skip`; `blocked: true` carries the stop verdict in `reason`. Notes are local: the status command never pushes them. A note that is not valid JSON, has another `v` or misses a field is ignored with a warning.
+- A check note lives in `refs/notes/spec-checks` on a commit SHA and holds JSON: `{"v": 1, "task", "plan_rev", "checks": {"test": "pass", "guard": "pass", …}, "attempts", "blocked", "reason", "at"}`. Each check is `pass`, `fail` or `skip`; `blocked: true` carries the stop verdict in `reason`. Notes are local: the status command never pushes them. A note that is not valid JSON, has another `v` or misses a field is ignored with a warning.
 
 ```bash
 bun run spec-status path/to/plan.md --repo path/to/backend --repo path/to/frontend --branch PAC2-1234
@@ -284,6 +285,107 @@ bun run spec-status path/to/plan.md --repo path/to/checkout --branch PAC2-1234 -
 | `waiting` | No commits, and some dependency is not `done`. |
 
 The story is `in-progress` until every task is `done`, then `tasks-done`. With `--pr` it becomes `done` once `gh pr list --head <branch> --state merged` lists a PR in every task repo; without `--pr` there is no network call, and a missing or unauthenticated `gh` leaves `tasks-done` with a warning. Exit codes: 0 when the status is computed (whatever the states), 2 on a usage or IO error or an invalid plan.
+
+### Guard and checks
+
+The local enforcement layer the scheduler relies on. Everything is deterministic and local: no model, no network, and nothing is pushed. The guard judges commits against the plan they pin, `spec-check` runs the repo's checks and records the check note that [Status](#status) reads, lock commits freeze a task's tests, a clone-local `pre-push` hook runs the guard on every push, and a worker guard keeps a worker session inside its slot.
+
+**Check commands** live in the plan, per repo:
+
+```yaml
+checks:
+  org/backend:
+    test: "go test ./..."
+    test_files: "go test {packages}"   # optional: run once per locked test file by the "fails before" check
+    typecheck: "go vet ./..."
+    lint: ""                            # empty = skipped
+```
+
+**Trailers.** Repeat a trailer for several values; a comma list is one value. Lock and unlock commits are empty (`--allow-empty`), so they never mix with a content change.
+
+| Trailer | Written by | Meaning |
+|---|---|---|
+| `Task: <id>` | scheduler | The commit belongs to the task. |
+| `Plan-Rev: <vault-sha>` | scheduler | The plan version the commit was made against: a hex sha of a commit in the vault git dir (a branch or tag name does not pin a plan). |
+| `Task-Lock: <id>` and one `Locked: <path>` per test file | scheduler, after the test review | These files are locked for the task. |
+| `Task-Unlock: <id>` and `Unlock-Gate: <gate-id>` | scheduler, after a human gate approved `test_wrong` | The task's locked files may change until the next `Task-Lock`. |
+
+`lockCommit`, `unlockCommit` and `lockedFilesAt` (`extensions/lib/spec-lock.ts`) are the scheduler's helpers for these commits. They refuse staged changes (they would ride along in the empty commit), values that span lines (a crafted value could forge a trailer) and unsafe paths, and they skip the repo's commit hooks.
+
+#### `spec-guard`
+
+```bash
+bun run spec-guard --repo path/to/backend --plan Specs/PAC2/stories/PAC2-1234/plan.md --strict
+bun run spec-guard --repo path/to/backend --plan Specs/PAC2/stories/PAC2-1234/plan.md --range origin/main..PAC2-1234 --json
+```
+
+`--plan` is the plan's path inside the vault repo (the path of `git show <rev>:<path>`), not a file path. The plan is read from the vault git dir (`~/.vault-git`; `--vault-git-dir` overrides it) at each commit's `Plan-Rev`, never from the vault work tree, so a later edit of `plan.md` does not change how an older commit is judged. `--range <from>..<to>` defaults to `<base>..HEAD`; an empty `<from>` means the base and an empty `<to>` means `HEAD`. `--base` defaults to the clone's `origin/HEAD`, else `main`. `--plan`, `--base` and `--vault-git-dir` default to the clone's `.git/spec-workflow.json`, which `spec-hook install` writes. `--strict` also rejects commits without `Task:`; the scheduler and the hook always pass it. The command only reads: it writes nothing.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | No violations. |
+| 1 | Violations; one line each (`rule sha task path: detail`), or `--json` `{"ok", "commits", "violations"}`. |
+| 2 | Usage or IO error: missing `--repo` or plan, an absolute `--plan`, an unknown base or range, a missing vault git dir (set up the vault spec store first), a clone that cannot be matched to a plan repo. |
+
+| Rule | Fails when |
+|---|---|
+| `plan-rev-missing` | A commit with `Task:` has no `Plan-Rev`. |
+| `plan-rev-unreadable` | `Plan-Rev` is not a sha of a vault commit, or the plan path does not exist at that commit. |
+| `plan-invalid` | The plan at that `Plan-Rev` does not parse or fails `validate plan`, checked against the repo's files at the start of the range. Only plan-wide findings and findings about tasks of this clone's repo count; other repos' tasks are judged by their own clones. |
+| `unknown-task` | A `Task:` id is not in the plan at that `Plan-Rev`. |
+| `out-of-scope` | A changed path is outside the `owns` and `new_paths` of the commit's tasks (a rename is checked on both sides; a commit serving several tasks may touch the union of their scopes). `owns` entries are globs; a `new_paths` entry is a file, a directory or a glob. |
+| `locked-test-changed` | A commit, with or without `Task:`, changes a path locked by a `Task-Lock` that no later `Task-Unlock` of that task reopened. A new `Task-Lock` locks exactly the paths it lists. |
+| `skip-added` | An added line matches `.skip(`, `.only(`, `.todo(`, `xit(`, `xdescribe(`, `xtest(`, `t.Skip(`, `@pytest.mark.skip`, `@pytest.mark.xfail` or `@Disabled`. |
+| `ignore-added` | An added line matches `@ts-ignore`, `@ts-expect-error`, `eslint-disable`, `biome-ignore`, `//nolint`, `# type: ignore`, `# noqa`, `istanbul ignore` or `c8 ignore`. |
+| `config-changed` | A changed path is a protected config, at any depth (`tsconfig*.json`, `eslint.config.*`, `.eslintrc*`, `biome.json*`, `.golangci*`, `bunfig.toml`, `jest.config.*`, `vitest.config.*`, `pytest.ini`, `pyproject.toml`, `setup.cfg`) or under `.github/workflows/`, and the commit's tasks do not list that exact path in `owns` (or `new_paths`, for a new file). A broad glob is not enough. |
+| `untracked-commit` | With `--strict`, a non-merge commit has no `Task:`. |
+
+The lock, skip, ignore and config rules apply to every commit in the range; the plan rules apply to commits with `Task:`. A merge commit is read against its first parent. A binary file is subject to the path rules only. "Loosened" is not judged semantically: any change to a protected config has to be planned by its exact path.
+
+#### `spec-check`
+
+```bash
+bun run spec-check <sha> --repo path/to/backend --plan Specs/PAC2/stories/PAC2-1234/plan.md --base origin/main
+bun run spec-check <sha> --repo path/to/backend --timeout 120 --json
+```
+
+Reads the commit's `Task:` and `Plan-Rev:`, takes the `checks` of the task's repo from the plan at that `Plan-Rev`, and runs `test`, `typecheck` and `lint` with `sh -c` in a temporary `git worktree` at the commit (repo hooks off; the worktree is removed afterwards, also after a failure or timeout). Each command gets `--timeout` seconds (default 900) in its own process group; a command that runs out of time is killed with everything it started and recorded as `fail` with reason `timeout`. An empty or missing command is a skip. Then it runs the guard over the task's commits in `<base>..<sha>` and writes the check note on the commit: the three checks plus `guard`, `blocked: false`, and `attempts` = the nearest earlier note of the task + 1 (a rerun on the same commit does not count twice).
+
+The worktree is a fresh checkout: installed dependencies and build output from your clone are not there, so a check command that needs them has to install or build them itself (for example `bun install --frozen-lockfile && bun test`). Check commands run with your environment minus the variables that name a repository (`GIT_DIR` and friends).
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Every check passed or was skipped and the guard found nothing. The task reads as `done` once this note is on its last commit. |
+| 1 | A check or the guard failed. The note is written all the same (`failing`, with `attempts` counting up). |
+| 2 | The checks could not run, and no note is written: usage error, unknown commit or base, no or several `Task:` trailers, no `Plan-Rev:`, an unreadable or unparseable plan, a task the plan lacks, no `checks.test` for its repo, a missing vault git dir, or no worktree. |
+
+**Fails before** (`failsBefore` in `extensions/lib/spec-check.ts`, for the scheduler): new tests must fail where the work has not been done. It creates a worktree at the task's base (the parent of the task's first commit), copies only the locked test files from the test commit, and runs `test_files` once per file with `{files}` (that file) and `{packages}` (its directory, `./dir`) filled in, already shell-quoted. A file whose run exits zero is `already-passes` and the lock must be refused. The granularity is the file, not the test case; files that render to the same command run once, a command without a placeholder runs once for all files, and a timeout counts as failing.
+
+#### `spec-hook`
+
+```bash
+bun run spec-hook install --repo path/to/backend --plan Specs/PAC2/stories/PAC2-1234/plan.md
+bun run spec-hook install --repo path/to/backend --plan <plan> --chain      # keep an existing pre-push hook
+bun run spec-hook uninstall --repo path/to/backend
+```
+
+`install` writes `.git/hooks/pre-push`, a short `sh` script that carries a marker comment and runs `spec-guard --strict` over `<remote sha>..<local sha>` for every ref the push updates (`<base>..<local sha>` for a new ref; a deleted ref is skipped), and saves `.git/spec-workflow.json` (`{"plan", "base", "vaultGitDir"}`; `--base` defaults to `origin/HEAD`, else `main`). Nothing is committed and the repo config is untouched. It refuses (exit 2) to replace a `pre-push` without the marker, unless `--chain`, which renames it to `pre-push.local` and runs it first with git's own arguments and input; and to install while `core.hooksPath` is set, because git would never call `.git/hooks`. `uninstall` removes only the marked hook and its config and puts a chained hook back. The hook guards every ref pushed from the clone, including unrelated branches and tags, and `git push --no-verify` skips it; that is the documented human limit.
+
+#### Worker guard
+
+`workerGuard({ cwd, writeScope, lockedFiles })` in `extensions/lib/worker-guard.ts` returns an extension factory for the scheduler to load into worker sessions (it is not in `omp.extensions`). Its `tool_call` handler blocks `write` and `edit` calls that name a path outside `writeScope` (or outside the worktree), or a locked file, in `path`, `paths` or the edit payload itself (hashline headers, `MV`, patch headers), and blocks `bash` commands that run `git commit`, `push`, `reset`, `checkout`, `switch`, `rebase`, `merge`, `cherry-pick`, `tag`, `update-ref`, `stash`, `worktree`, `notes` or `config`, also inside `sh -c`, `bash -c`, `env`, `xargs` and `$(...)`. This is best effort: variables, aliases, scripts and encoded commands are not seen, and `git branch`, `revert`, `am` and `pull` are not on the list. So the scheduler also checks after every slot, and rejects it when either list is non-empty:
+
+- `snapshotGit(repo)` and `compareSnapshot(before, after)`: `HEAD`, the branch `HEAD` names, every ref under `refs/` and `git config --local --list`, compared line by line (credentials in URLs are hidden). A commit made behind the guard's back, for example with `GIT_DIR` set from another folder, moves a ref and shows up here.
+- `scopeCheck(worktree, writeScope, lockedFiles)`: every changed path from `git status` (tracked changes and every untracked file; ignored files are not listed by git) that lies outside the scope or touches a locked file, such as a file written by a bash redirect.
+
+| Do | Don't |
+|---|---|
+| Pass `--plan` as the path inside the vault repo, and `--strict` for anything that decides a push. | Pass the plan's file path, or read the plan from the vault work tree: the guard only trusts the commit named by `Plan-Rev`. |
+| Commit as the scheduler does: `Task:` and `Plan-Rev:` on every task commit, an empty lock commit after the test review. | Edit a locked test to make a check pass; ask for a `Task-Unlock` through a gate. |
+| Name a protected config by its exact path in `owns` when the task has to change it. | Rely on a broad `owns` glob for `tsconfig.json`, workflow files or lint configs. |
+| Run `spec-hook install` per ticket clone; `uninstall` when the ticket is done. | Use the hook as the only protection: `--no-verify` skips it, and the scheduler runs the guard itself. |
+
+Verify: `bun test extensions/lib/spec-guard.test.ts extensions/lib/spec-diff.test.ts extensions/lib/spec-lock.test.ts extensions/lib/spec-check.test.ts extensions/lib/worker-guard.test.ts extensions/lib/spec-cli.test.ts extensions/lib/spec-hook.test.ts`, then `bun run typecheck`. The tests use temp git repos, a temp vault git repo and a local bare remote under a private HOME; they never touch a real repo or the real vault.
 
 ## Release notes
 

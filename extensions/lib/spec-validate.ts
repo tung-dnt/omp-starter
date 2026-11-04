@@ -15,6 +15,7 @@ export type RuleId =
 	| "router-mismatch"
 	| "required-tests"
 	| "acceptance-empty"
+	| "checks-missing"
 	| "task-plan-size";
 
 export interface Violation {
@@ -233,6 +234,14 @@ export function validatePlan(plan: Plan, filesByRepo: ReadonlyMap<string, readon
 
 	tasks.forEach((task, i) => {
 		if (task.acceptance.length === 0) report("acceptance-empty", i, "acceptance is empty");
+	});
+
+	// checks-missing: once per repo, under the repo's first task.
+	const checkedRepos = new Set<string>();
+	tasks.forEach((task, i) => {
+		if (checkedRepos.has(task.repo)) return;
+		checkedRepos.add(task.repo);
+		if (!plan.checks[task.repo]?.test?.trim()) report("checks-missing", i, `checks has no "test" command for repo "${task.repo}"`);
 	});
 
 	if (plan.kind === "task" && tasks.length !== 1) {

@@ -37,10 +37,21 @@ export interface TaskBlock {
 	size: TaskSize;
 }
 
+/** The commands `spec-check` runs for one repo. An empty command is a skipped check; `test` is required (rule `checks-missing`). */
+export interface RepoChecks {
+	test?: string;
+	/** Run once per locked test file by the "fails before" check; `{files}` and `{packages}` are replaced by that file and its package directory. */
+	test_files?: string;
+	typecheck?: string;
+	lint?: string;
+}
+
 export interface Plan {
 	id: string;
 	kind: "story" | "task";
 	shared_paths: string[];
+	/** Check commands keyed by the tasks' `repo` (`org/name`); an absent `checks` block reads as empty. */
+	checks: Record<string, RepoChecks>;
 	tasks: TaskBlock[];
 }
 
@@ -131,6 +142,15 @@ class Reader {
 		return undefined;
 	}
 
+	/** An optional mapping; an absent or empty (null) key reads as an empty mapping. */
+	mapping(key: string): Record<string, unknown> | undefined {
+		const value = this.data[key];
+		if (value === undefined || value === null) return {};
+		if (isRecord(value)) return value;
+		this.fail(`field "${key}" must be a mapping`);
+		return undefined;
+	}
+
 	record(key: string): Record<string, unknown> | undefined {
 		const value = this.data[key];
 		if (isRecord(value)) return value;
@@ -169,6 +189,38 @@ function parseRisk(reader: Reader): Record<RiskField, RiskEntry> | undefined {
 		}
 	}
 	return valid && isCompleteRisk(risk) ? risk : undefined;
+}
+
+const CHECK_NAMES: readonly (keyof RepoChecks)[] = ["test", "test_files", "typecheck", "lint"];
+const isCheckName = (name: string): name is keyof RepoChecks => CHECK_NAMES.some(known => known === name);
+
+/** The `checks` mapping: per repo, command strings by check name. An empty (or null) command is a skipped check. */
+function parseChecks(reader: Reader): Record<string, RepoChecks> | undefined {
+	const raw = reader.mapping("checks");
+	if (!raw) return undefined;
+	const checks: Record<string, RepoChecks> = {};
+	let valid = true;
+	for (const [repo, entry] of Object.entries(raw)) {
+		if (!isRecord(entry)) {
+			reader.fail(`checks "${repo}" must be a mapping of commands`);
+			valid = false;
+			continue;
+		}
+		const commands: RepoChecks = {};
+		for (const [name, command] of Object.entries(entry)) {
+			if (!isCheckName(name)) {
+				reader.fail(`unknown check "${name}" for "${repo}"; use ${CHECK_NAMES.join(", ")}`);
+				valid = false;
+			} else if (command !== null && typeof command !== "string") {
+				reader.fail(`check "${name}" for "${repo}" must be a string`);
+				valid = false;
+			} else {
+				commands[name] = command ?? "";
+			}
+		}
+		checks[repo] = commands;
+	}
+	return valid ? checks : undefined;
 }
 
 function parseTask(data: Record<string, unknown>, label: string, errors: Violation[]): TaskBlock | undefined {
@@ -217,7 +269,7 @@ export function parsePlan(markdown: string): ParseResult {
 		errors.push({ rule: "parse", detail: `expected exactly one "yaml plan" block, found ${planCount}` });
 	}
 
-	let header: { id: string; kind: "story" | "task"; shared_paths: string[] } | undefined;
+	let header: { id: string; kind: "story" | "task"; shared_paths: string[]; checks: Record<string, RepoChecks> } | undefined;
 	const tasks: TaskBlock[] = [];
 	for (const block of blocks) {
 		const label = `block ${block.index} (yaml ${block.kind})`;
@@ -245,7 +297,8 @@ export function parsePlan(markdown: string): ParseResult {
 		const validKind = kind === "story" || kind === "task" ? kind : undefined;
 		if (kind !== undefined && !validKind) reader.fail(`field "kind" must be story or task`);
 		const shared_paths = reader.strings("shared_paths");
-		if (errors.length === before && id !== undefined && validKind && shared_paths) header = { id, kind: validKind, shared_paths };
+		const checks = parseChecks(reader);
+		if (errors.length === before && id !== undefined && validKind && shared_paths && checks) header = { id, kind: validKind, shared_paths, checks };
 	}
 	if (errors.length > 0 || !header) return { ok: false, errors };
 	return { ok: true, plan: { ...header, tasks } };
