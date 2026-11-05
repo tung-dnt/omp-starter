@@ -274,6 +274,8 @@ bun run spec-status path/to/plan.md --repo path/to/checkout --branch PAC2-1234 -
 
 `--repo` is repeatable; each clone serves the plan tasks whose `repo` equals the `org/name` of the clone's `origin` URL (SSH or HTTPS). `--base` defaults to the clone's `origin/HEAD`, else `main`. The command reads `<base>..<branch>` in each repo and refuses a plan that fails the validator. `--json` prints `{"id", "state", "tasks": [{"id", "state", "lastSha", "reason", "attempts"}]}`. Warnings (a repo without the branch, a `Task:` id outside the plan, an invalid note, `gh` trouble) go to stderr.
 
+A task that stopped before its first commit has no commit to carry a note; its blocked note hangs on a task key (see [Running a plan](#running-a-plan)) and the command reads it too, so the CLI, the `spec_status` tool and the scheduler agree. That note counts only under the plan's current vault revision, so the plan file must lie inside the vault work tree of `--vault-git-dir <dir>` (default `~/.vault-git`). Otherwise the notes are shown without that check and the command prints `note: blocked notes are shown without a plan-revision check` (to stderr with `--json`).
+
 | Task state | When (first matching row wins) |
 |---|---|
 | `blocked` | The latest note on any of the task's commits has `blocked: true`. |
@@ -297,6 +299,7 @@ checks:
   org/backend:
     test: "go test ./..."
     test_files: "go test {packages}"   # optional: run once per locked test file by the "fails before" check
+    test_paths: ["tests/**"]            # optional: what counts as a test file; replaces the built-in patterns
     typecheck: "go vet ./..."
     lint: ""                            # empty = skipped
 ```
@@ -375,8 +378,8 @@ bun run spec-hook uninstall --repo path/to/backend
 
 `workerGuard({ cwd, writeScope, lockedFiles })` in `extensions/lib/worker-guard.ts` returns an extension factory for the scheduler to load into worker sessions (it is not in `omp.extensions`). Its `tool_call` handler blocks `write` and `edit` calls that name a path outside `writeScope` (or outside the worktree), or a locked file, in `path`, `paths` or the edit payload itself (hashline headers, `MV`, patch headers), and blocks `bash` commands that run `git commit`, `push`, `reset`, `checkout`, `switch`, `rebase`, `merge`, `cherry-pick`, `tag`, `update-ref`, `stash`, `worktree`, `notes` or `config`, also inside `sh -c`, `bash -c`, `env`, `xargs` and `$(...)`. This is best effort: variables, aliases, scripts and encoded commands are not seen, and `git branch`, `revert`, `am` and `pull` are not on the list. So the scheduler also checks after every slot, and rejects it when either list is non-empty:
 
-- `snapshotGit(repo)` and `compareSnapshot(before, after)`: `HEAD`, the branch `HEAD` names, every ref under `refs/` and `git config --local --list`, compared line by line (credentials in URLs are hidden). A commit made behind the guard's back, for example with `GIT_DIR` set from another folder, moves a ref and shows up here.
-- `scopeCheck(worktree, writeScope, lockedFiles)`: every changed path from `git status` (tracked changes and every untracked file; ignored files are not listed by git) that lies outside the scope or touches a locked file, such as a file written by a bash redirect.
+- `snapshotGit(repo)` and `compareSnapshot(before, after)`: `HEAD`, the branch `HEAD` names, every ref under `refs/`, `git config --local --list` and a digest of every file under the git dir's `hooks/` and `info/`, compared line by line (credentials in URLs are hidden). A commit made behind the guard's back, for example with `GIT_DIR` set from another folder, moves a ref and shows up here; a hook written into the git dir shows up by its path.
+- `scopeCheck(worktree, writeScope, lockedFiles, only?)`: every changed path from `git status` (tracked changes and every untracked file; ignored files are not listed by git) that lies outside the scope, touches a locked file, or, with an `only` predicate (the tests phase passes "is a test file"), is rejected by it, such as a file written by a bash redirect.
 
 | Do | Don't |
 |---|---|
@@ -386,6 +389,100 @@ bun run spec-hook uninstall --repo path/to/backend
 | Run `spec-hook install` per ticket clone; `uninstall` when the ticket is done. | Use the hook as the only protection: `--no-verify` skips it, and the scheduler runs the guard itself. |
 
 Verify: `bun test extensions/lib/spec-guard.test.ts extensions/lib/spec-diff.test.ts extensions/lib/spec-lock.test.ts extensions/lib/spec-check.test.ts extensions/lib/worker-guard.test.ts extensions/lib/spec-cli.test.ts extensions/lib/spec-hook.test.ts`, then `bun run typecheck`. The tests use temp git repos, a temp vault git repo and a local bare remote under a private HOME; they never touch a real repo or the real vault.
+
+### Running a plan
+
+`/run-story <plan>` and `/run-task <plan>` (`extensions/spec-workflow.ts`) run a validated plan from the vault to the end. Code makes every orchestration decision: order, retries, locks, commits, cherry-picks, budget and gates. An agent is only called as a **slot**: one bounded SDK session (`pi.pi.createAgentSession`) that returns a schema-checked verdict. `/run-story` needs a plan with `kind: story`, `/run-task` one with `kind: task`.
+
+```text
+/run-story Specs/PAC2/stories/PAC2-1234/plan.md --repo ~/work/backend --repo ~/work/frontend
+/run-story /home/me/vault/Specs/PAC2/stories/PAC2-1234/plan.md --concurrency 1 --budget 40
+/run-stop        # abort the in-flight slots, remove the worktrees, write no blocked note
+/spec-status     # the same status as the `spec_status` tool and `bun run spec-status`, without a run
+```
+
+`<plan>` is the plan's path in the vault repo, or its file path under the vault work tree. Options: `--repo <path>` (repeatable, default: the current folder; each clone serves the tasks whose `repo` equals its `origin` `org/name`), `--branch <ticket>` (default: the plan `id`), `--base <ref>` (default: `origin/HEAD`, else `main`), `--concurrency <n>` (default 2; `1` is the fallback if parallel sessions misbehave), `--budget <usd>` (default 100), `--vault-git-dir <dir>` (default `~/.vault-git`).
+
+**Preconditions.** Each failure opens a gate or ends the run; nothing runs. The run lock of every repo is taken first (see **One run per ticket and clone**). The plan is committed in the vault (the work-tree file equals `HEAD:<path>`; `Plan-Rev` is the last vault commit that touched the plan, so other `Specs/` commits never look like a plan change). `validate-plan` passes against each clone's files, and the plan declares `checks.test_files` for each repo (the fails-before check needs it). Each clone has no uncommitted change to a tracked file and no cherry-pick, merge or rebase in progress. The ticket branch exists (a gate offers to create it from the base, without checking it out) and the clone-local `pre-push` hook is installed for this plan (a gate offers to install it; a foreign hook refuses, see `--chain` above). The agent definitions of every slot (from agent-skills) must be found in the omp-starter folder, or the command does not start.
+
+**Per task** (state is derived from git before each start, so a rerun resumes; a task starts when its state is `ready`, with at most `--concurrency` at once; a `blocked` task stops its dependants):
+
+| Step | Who | Does | Failure |
+|---|---|---|---|
+| 1 | code | `git worktree add <tmp>/<task> -b spec-wt/<ticket>/<task> <ticket tip>` | gate `blocked` |
+| 2 | `test_author` (normal) or `implementer` writing tests first (`size: small`) | The scheduler commits the slot's files with `Task` and `Plan-Rev` after the scope and snapshot checks; only test files may be written (see **Test files**) | out-of-scope or non-test file, or a git change: slot rejected and discarded, attempt +1 |
+| 3 | code | `failsBefore` on the test files | `already-passes`: the test author reruns with the evidence, attempt +1 |
+| 4 | `test_review` (normal only), then code | On `pass` the lock commit (`Task-Lock` and `Locked:`); small tasks are locked right after step 3 | `fix`: the test author reruns once; a second `fix` opens a gate |
+| 5 | `implementer` | Scope, snapshot and locked-file checks, then the commit | as step 2 |
+| 6 | code | `checkCommit` (writes the check note) | `failing`: the implementer reruns with the output, up to 3 attempts, then a `blocked` note and a gate |
+| 7 | `code_review` (any technical risk `yes`), `security_review` (`security_review: true`) | read-only slots over the task's diff | `fix`: the implementer reruns with the findings (counts toward the cap); `spec_wrong`: gate |
+| 8 | code | One task at a time: replay the task's commits on the current ticket tip in the task's worktree (cherry-pick); when the tip had moved, run the checks again on the replayed commit; run the guard on the new range, write the note of that check on the new tip, move the ticket branch by fast-forward, remove the worktree and branch | conflict (aborted): the commits are kept under `refs/spec-conflict/<ticket>/<task>` and a gate opens, the ticket branch is untouched. Checks fail on the replayed tip: the implementer reruns on the replayed commits and the failure counts toward the cap. Guard failure: gate `blocked` |
+
+At the end of a story that is fully `done`, one `code_review` per repo reads the whole ticket diff (`<base>..<ticket>`); its findings open a gate. Nothing is ever pushed; pushing stays a human act that the hook checks.
+
+**Verdicts** (`extensions/lib/spec-slots.ts` holds the table, the JSON schemas and `parseVerdict`, which also accepts a string-encoded payload). A payload that fails its schema, a slot aborted at the context ceiling or the wall timeout, and a rejected slot each count as a failed attempt. A worker cannot declare success: `pass` from the implementer only leads to code running the checks.
+
+| Slot | Verdicts |
+|---|---|
+| `test_author` | `pass`, `spec_wrong`, `need_clarification`, `blocked` |
+| `test_review`, `code_review`, `security_review` | `pass`, `fix` (with findings), `spec_wrong` |
+| `implementer` | `pass`, `test_wrong`, `need_shared_change`, `need_clarification`, `blocked` |
+
+**Gates.** Code builds the choices; the human picks one (`ctx.ui.select`; a dismissed dialog takes the stopping choice). Gates are asked one at a time and every answer goes to the run log. A stop verdict writes the task's blocked note first, so a restart during the gate sees it.
+
+| Cause | Choices |
+|---|---|
+| `spec_wrong`, `need_clarification` | stop (edit the plan, then rerun); retry now with a note typed through `ctx.ui.input` |
+| `test_wrong` | approve the unlock (`Task-Unlock` with `Unlock-Gate`, then back to step 2); reject (the implementer reruns with "tests stand"); stop |
+| `need_shared_change`, guard failure | stop |
+| conflict | stop; resolve by hand from the kept ref (the gate prints `git cherry-pick <start>..refs/spec-conflict/<ticket>/<task>`) |
+| retry cap, `blocked`, a failed operation | stop; retry once more |
+| budget reached | stop the run; raise the limit by $50 |
+| plan changed in the vault | stop the run; keep running with the revision the run started with |
+| story review findings | accept; stop |
+
+**Blocked before any commit.** A task that stops at `test_author` has no commit to carry a note. Its blocked note hangs on the blob of `spec-task:<story>:<task>` in `refs/notes/spec-checks`, and `computeStatus` reads it with the commit notes. A blocked note written under another plan revision is ignored, so committing a plan fix unblocks the task with no extra state; "retry now" deletes the note.
+
+**Test files.** In the tests phase (`test_author`, or the `implementer` of a `size: small` task) a slot may write test files only. A test file is `*.test.*`, `*.spec.*`, `*_test.*`, `test_*.*`, or anything under `__tests__/` or `tests/`, anywhere in the repo; a repo's optional `checks.test_paths` in the plan (a non-empty list of globs, files or directories, as for `owns`) replaces those patterns. A write to any other file is blocked by the worker guard, and a changed one rejects the slot ("is not a test file", with the rule), so a source stub is never committed as a test. `Locked:` names test files only, and only they reach the fails-before check. The implementer phase is not restricted this way.
+
+**One run per ticket and clone.** Before any gate and before the cleanup of leftovers (right after the plan has been read) the run takes `<git dir>/spec-run-<ticket>.lock`, one per repo of the plan in sorted order, holding `{pid, host, startedAt}`; it releases them when the run ends, a refusal included, and then removes its own worktree folder if it is empty. A lock whose pid is dead on this host is taken over and logged as `lock-takeover`, and the leftover `refs/notes/spec-tmp-<pid>-*` copies of dead processes are deleted. A live pid or another host refuses the run with a reason that names the file, the pid and the start time; delete the file by hand when you know that run is gone (a reused pid can look alive). The lock keeps two runs of one ticket and clone apart, nothing more: the `spec-check` CLI never takes it (its note writes are protected by a compare-and-swap on the notes ref), and it is no protection against a hostile worker.
+
+**What a slot cannot reach.** A slot is an untrusted LLM session. The scheduler is built for a slot that acts **accidentally or opportunistically**: it edits locked tests, writes outside its scope, runs git, moves its own refs, or leaves files behind. It does not stop a **deliberately hostile** slot (see the threat model below).
+
+What is checked and undone:
+- Agent definitions are read once at the start from the omp-starter folder, never from a worktree, so a file a slot writes cannot change what the next reviewer is told.
+- Before every slot the worktree is cleaned of ignored files (`git clean -ffdx`, keeping `node_modules`, `.venv` and `target`), and the `.omp` and `.claude` folders in every directory above it up to the worktree root are deleted; one that appears during a slot rejects it.
+- After every slot a snapshot compares `HEAD`, every ref and its symref target, the local config, and the files under `hooks/` and `info/` with the state before it. Hooks, `info/` and the config are compared with the state at the start of the run.
+- Every ref value and note the scheduler writes is recorded with a sequence number. At the end of a slot, a ref of the scheduler's namespace (the ticket branch, the task branches, the kept conflict refs) may hold only the **latest** value the scheduler recorded since the slot started, or, when it recorded none, the value it had at the start. Anything else, an older recorded value included (a rollback after a sibling task landed), is a violation. A branch turned into a symref is one too.
+- Notes are judged per entry: a note on one of this run's task commits or task keys that is not what the scheduler last wrote (or had at the start) is a violation. Notes of other processes are not judged: a slot that removes only those is not reported, and they are lost unless a discard puts the notes ref back.
+- A rejected slot is discarded: first the hooks, `info/` and the config are put back byte for byte, whatever was put in their place; then the work tree; then each changed ref by compare-and-swap to the value it must have (a lost CAS is an error for the gate, never forced); then the notes entry by entry. A notes ref that no longer descends from its value at the slot's start (deleted, rolled back, rewritten, or pointed at something that is not a notes history) is put back whole by CAS and the notes the scheduler wrote since are written again; a note another process wrote after the slot started is lost in that case, one it wrote before the start is not. A branch you work on that moved forward during the slot (your own commit on the ticket branch) is reported and left in place; moves back are undone.
+- Every scheduler and check git call runs with `core.hooksPath=/dev/null` and `core.fsmonitor=false`, so no hook (`reference-transaction` included) and no fsmonitor command runs on its authority; a `pre-push` without the spec-hook marker reads as not installed. A restore that fails opens a gate and never lets the run go on silently.
+- Two runs on different tickets in one clone are allowed. Each ignores the other's task branches and notes. A ref outside both namespaces that one run changes during the other's slot is reported there.
+
+**Threat model.** Step 5 catches and undoes the accidental and the opportunistic. A deliberately hostile slot runs bash as you and can write anywhere you can write; the scheduler does not claim to stop it. These routes are known and accepted **until slots run in an OS sandbox, which is required before the step-9 pilot on a real repo**:
+- A well-formed, forged fast-forward of the ticket branch (for example commits made with `git commit-tree` and moved in with `update-ref`) is reported and the slot is rejected, but the commits stay on the branch. The pre-push guard catches commits without `Task:` trailers, not a well-formed forged chain; the pull request review is the last line.
+- User-global git config (`~/.gitconfig`: smudge or clean filters with an attributes file, `gpg.program` with `commit.gpgSign`) can change what a check worktree or a scheduler commit runs. Only the clone's local config is guarded.
+- `.git/spec-workflow.json` is not guarded: a slot can change its `base` and narrow the first push check.
+- The worktree's `.git` pointer file and `.git/worktrees/<id>/` are not in the snapshot.
+- Any write under your home folder (for example `~/.omp`) can affect the next run.
+
+**Limits.** Story budget (default $100): the sum of each slot's `message_end` cost; at the limit the run finishes its in-flight slots, then opens the budget gate. A slot's context ceiling is 300K tokens (the runner aborts the session) and its wall timeout 20 minutes. Every slot sets `thinkingLevel` explicitly and has no `find` tool, so it makes no Jev calls.
+
+**While a run is active** the status line shows `formatStatusLine` plus the running slots, and an `input` handler answers typed prompts with "spec run active: /run-stop to stop" instead of letting them start a parallel main-agent turn (only `/run-stop` and `/spec-status` pass; input from RPC is untouched). The run log is JSONL at `~/.omp/agent/spec-runs/<story>/<iso-ts>.jsonl`, outside the vault: one line per slot run (slot, task, attempt, outcome, verdict, cost, tokens, duration, session file), per gate answer and per notable event. It is for audit and metrics and is never read as state.
+
+**Resume.** `runPlan` keeps no state between runs. A rerun removes the leftovers of the earlier run (`spec-wt/<ticket>/*` worktrees and branches), recomputes every task's state from git and starts the `ready` ones. The ticket branch only moves in step 8, by fast-forward after the replay, the check, the guard and the note, so a kill at any point leaves it as it was. A task whose commits are on the ticket branch but not `done` (a human's work) is reported, not started. The cleanup runs only once the run holds the run lock, and it leaves `refs/spec-conflict/<ticket>/*` alone.
+
+| Do | Don't |
+|---|---|
+| Commit `plan.md` in the vault before the run; commit a plan fix to unblock a task. | Run on a plan with uncommitted edits, or expect a blocked task to resume without a gate answer or a new plan revision. |
+| Give each repo a `test_files` command, a `test` command and a clean clone. | Rely on the full `test` command for the fails-before check, or run with unrelated edits in the clone. |
+| Answer a gate with a choice and a note; use `/run-stop` to end a run. | Type prompts during a run, kill the process to stop it, or delete `spec-wt/*` branches by hand. |
+| Leave `.git/hooks` and `.git/info` of a clone alone while a run is going. | Edit a hook mid-run: the next slot reports it as a change and restores the file from the run's baseline. |
+| Widen `checks.test_paths` when a task needs a test helper outside the test patterns. | Expect the tests phase to write source stubs: they are rejected, never committed or locked. |
+| Delete `refs/spec-conflict/<ticket>/<task>` yourself once you have resolved that conflict by hand. | Expect a rerun to remove it: the cleanup only removes `spec-wt/<ticket>/*`. |
+| Use `--concurrency 1` if parallel SDK sessions misbehave. | Raise `--concurrency` past what the machine and the model quota carry. |
+
+Verify: `bun test extensions/lib/spec-slots.test.ts extensions/lib/spec-runlog.test.ts extensions/lib/spec-status.test.ts extensions/lib/spec-scheduler.test.ts extensions/lib/spec-scheduler.git.test.ts extensions/lib/spec-slot-runner.test.ts extensions/lib/spec-git.test.ts extensions/lib/spec-lock.test.ts extensions/lib/spec-testfiles.test.ts extensions/lib/spec-ops.test.ts extensions/lib/spec-cli.test.ts extensions/lib/spec-check.test.ts extensions/lib/worker-guard.test.ts extensions/spec-workflow.test.ts scripts/spec-status.test.ts`, then `bun run typecheck`. The scheduler tests drive `runPlan` with a fake slot runner, fake git and fake checks (including a crash at every operation), the git tests use temp repos, a temp vault and a worker that writes real files (also outside its worktree, into the git dir, and through `git update-ref`), and the slot runner is tested only against a fake SDK; none touches a real repo, the real vault or a model. A run on real Haiku slots is a separate, approved verification.
 
 ## Release notes
 

@@ -11,6 +11,11 @@ import { validatePlan } from "./spec-validate";
 /** The vault spec store: a git dir kept outside the synced vault folder (`vgit` runs git against it). */
 export const DEFAULT_VAULT_GIT_DIR = join(homedir(), ".vault-git");
 
+/** The vault commit that last changed the plan at `vaultPlanPath`: the `Plan-Rev` of everything a run commits. Empty when the vault has no commit for it. */
+export function planRevision(vaultGitDir: string, vaultPlanPath: string): string {
+	return gitInDir(vaultGitDir, ["log", "-1", "--format=%H", "--", vaultPlanPath]).stdout.trim();
+}
+
 const FIELD_SEP = "\x1f";
 const RECORD_SEP = "\x1e";
 const FACTS_FORMAT = "%H%x1f%P%x1f%(trailers:only,unfold)%x1e";

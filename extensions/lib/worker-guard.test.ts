@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fakePi } from "../test-harness";
 import { cleanScratch, git, initRepo, scratch } from "./spec-fixtures";
-import { type WorkerScope, compareSnapshot, gitMutation, scopeCheck, snapshotGit, workerGuard } from "./worker-guard";
+import { isTestPath } from "./spec-testfiles";
+import { type WorkerScope, compareSnapshot, gitMutation, readGuarded, restoreGuarded, scopeCheck, snapshotGit, workerGuard } from "./worker-guard";
 
 afterEach(cleanScratch);
 
@@ -149,6 +150,21 @@ describe("workerGuard: write and edit scope", () => {
 		expect(blocks(guard({ writeScope: [] })("write", { path: "src/a.ts", content: "x" }))).toContain("(empty)");
 	});
 
+	test("a tests-only scope blocks a write to a file that is not a test, however it is named", () => {
+		const call = guard({ writeScope: ["src/**", "t/"], only: file => isTestPath(file) });
+		expect(blocks(call("write", { path: "src/foo.ts", content: "x" }))).toContain("src/foo.ts is not a test file");
+		expect(blocks(call("edit", { path: "src/foo.ts", input: "[src/foo.ts#ABCD]\nPUT 1.=1:\n+x" }))).toContain("not a test file");
+		expect(blocks(call("edit", { input: "[src/foo.test.ts#ABCD]\nMV src/foo.ts" }))).toContain("src/foo.ts is not a test file");
+		expect(call("write", { path: "src/foo.test.ts", content: "x" })).toBeUndefined();
+		expect(call("edit", { input: "[src/__tests__/helper.ts#ABCD]\nPUT 1.=1:\n+x" })).toBeUndefined();
+		// A file outside the write scope is still reported as that, first.
+		expect(blocks(call("write", { path: "docs/x.test.ts", content: "x" }))).toContain("outside this task's write scope");
+	});
+
+	test("without a tests-only rule a non-test file inside the scope is allowed", () => {
+		expect(guard()("write", { path: "src/foo.ts", content: "x" })).toBeUndefined();
+	});
+
 	test("an edit is judged by every path it names: path, paths, hashline headers, MV targets and patch headers", () => {
 		const call = guard();
 		expect(call("edit", { path: "src/a.ts", input: "[src/a.ts#ABCD]\nPUT 1.=1:\n+x" })).toBeUndefined();
@@ -261,6 +277,23 @@ describe("scopeCheck", () => {
 	});
 });
 
+describe("scopeCheck with a tests-only rule", () => {
+	test("a changed file in the scope that is not a test is reported as not-test; tests and locked files keep their own reasons", () => {
+		const repo = initRepo();
+		mkdirSync(join(repo, "t"), { recursive: true });
+		writeFileSync(join(repo, "src/a.ts"), "export const a = 2;\n");
+		writeFileSync(join(repo, "src/a.test.ts"), "test\n");
+		writeFileSync(join(repo, "t/x.sh"), "exit 0\n");
+		writeFileSync(join(repo, "notes.txt"), "x\n");
+		// `git status` lists tracked changes first, then untracked files.
+		expect(scopeCheck(repo, ["src/**", "t/"], [], file => isTestPath(file))).toEqual([
+			{ path: "src/a.ts", reason: "not-test" },
+			{ path: "notes.txt", reason: "outside-scope" },
+			{ path: "t/x.sh", reason: "not-test" },
+		]);
+	});
+});
+
 describe("snapshotGit and compareSnapshot", () => {
 	const sh = (cwd: string, script: string, env: Record<string, string> = {}) => {
 		const result = Bun.spawnSync({ cmd: ["sh", "-c", script], cwd, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe" });
@@ -351,6 +384,30 @@ describe("snapshotGit and compareSnapshot", () => {
 		expect(changes.join("\n")).not.toContain("swordfish");
 	});
 
+	test("hooks and info/ are guarded: a created, changed, deleted or re-moded file is listed with its path, and a linked worktree reads the shared git dir", () => {
+		const repo = initRepo();
+		const linked = join(scratch(), "linked");
+		git(repo, "worktree", "add", "-q", "-b", "side", linked);
+		const hooks = join(repo, ".git/hooks");
+		const before = snapshotGit(linked);
+		expect(before.guarded["hooks/pre-push"]).toBeUndefined();
+		expect(compareSnapshot(before, snapshotGit(linked))).toEqual([]);
+
+		writeFileSync(join(hooks, "post-commit"), "#!/bin/sh\ntrue\n");
+		writeFileSync(join(repo, ".git/info/exclude"), "x.cache\n");
+		expect(compareSnapshot(before, snapshotGit(linked))).toEqual(["hooks/post-commit was created in the git dir", "info/exclude was changed in the git dir"]);
+
+		const created = snapshotGit(linked);
+		writeFileSync(join(hooks, "post-commit"), "#!/bin/sh\nfalse\n");
+		expect(compareSnapshot(created, snapshotGit(linked))).toEqual(["hooks/post-commit was changed in the git dir"]);
+		const edited = snapshotGit(linked);
+		chmodSync(join(hooks, "post-commit"), 0o755);
+		expect(compareSnapshot(edited, snapshotGit(linked))).toEqual(["hooks/post-commit was changed in the git dir"]);
+		const moded = snapshotGit(linked);
+		rmSync(join(hooks, "post-commit"));
+		expect(compareSnapshot(moded, snapshotGit(linked))).toEqual(["hooks/post-commit was deleted from the git dir"]);
+	});
+
 	test("an unborn branch can be snapshotted, and its first commit is a change", () => {
 		const repo = join(scratch(), "empty");
 		mkdirSync(repo);
@@ -365,5 +422,93 @@ describe("snapshotGit and compareSnapshot", () => {
 
 	test("it throws outside a git repo", () => {
 		expect(() => snapshotGit(scratch())).toThrow(/git for-each-ref failed/);
+	});
+});
+
+describe("symbolic refs (N7)", () => {
+	test("a ref that becomes a symref, changes its target or stops being one is listed with its target", () => {
+		const repo = initRepo();
+		git(repo, "branch", "side");
+		git(repo, "branch", "other");
+		const before = snapshotGit(repo);
+		expect(before.symrefs).toEqual({});
+		git(repo, "symbolic-ref", "refs/heads/ticket", "refs/heads/side");
+		const made = snapshotGit(repo);
+		expect(made.symrefs).toEqual({ "refs/heads/ticket": "refs/heads/side" });
+		expect(made.refs["refs/heads/ticket"]).toBe(git(repo, "rev-parse", "side"));
+		expect(compareSnapshot(before, made)).toContain("ref refs/heads/ticket became a symref to refs/heads/side");
+		git(repo, "symbolic-ref", "refs/heads/ticket", "refs/heads/other");
+		expect(compareSnapshot(made, snapshotGit(repo))).toContain("ref refs/heads/ticket now points at refs/heads/other (was refs/heads/side)");
+		git(repo, "update-ref", "--no-deref", "-d", "refs/heads/ticket");
+		git(repo, "branch", "ticket");
+		expect(compareSnapshot(made, snapshotGit(repo))).toContain("ref refs/heads/ticket is no longer a symref (was refs/heads/side)");
+		expect(compareSnapshot(snapshotGit(repo), snapshotGit(repo))).toEqual([]);
+	});
+});
+
+describe("the git dir baseline: config, hooks and info (N4, N6)", () => {
+	test("readGuarded covers the local config, and restoreGuarded puts its bytes back", () => {
+		const repo = initRepo();
+		const baseline = readGuarded(repo);
+		expect([...baseline.keys()]).toContain("config");
+		const config = join(repo, ".git/config");
+		const original = readFileSync(config, "utf8");
+		const before = snapshotGit(repo);
+		appendFileSync(config, '[core]\n\tfsmonitor = touch /tmp/never\n\thooksPath = /tmp/evil\n');
+		const changes = compareSnapshot(before, snapshotGit(repo));
+		expect(changes).toContain("config was changed in the git dir");
+		expect(changes).toContain("config added: core.fsmonitor=touch /tmp/never");
+		expect([...readGuarded(repo)].find(([file, entry]) => file === "config" && entry.digest !== baseline.get("config")?.digest)).toBeDefined();
+		restoreGuarded(repo, baseline);
+		expect(readFileSync(config, "utf8")).toBe(original);
+	});
+
+	test("a hook replaced by a directory (with a file in it), and a hooks folder replaced by a file, are restored as the original files", () => {
+		const repo = initRepo();
+		const hooks = join(repo, ".git/hooks");
+		writeFileSync(join(hooks, "pre-push"), "#!/bin/sh\n# managed\nexit 0\n", { mode: 0o755 });
+		writeFileSync(join(repo, ".git/info/exclude"), "x\n");
+		const baseline = readGuarded(repo);
+		rmSync(join(hooks, "pre-push"));
+		mkdirSync(join(hooks, "pre-push/nested"), { recursive: true });
+		writeFileSync(join(hooks, "pre-push/nested/x"), "x");
+		restoreGuarded(repo, baseline);
+		expect(readFileSync(join(hooks, "pre-push"), "utf8")).toBe("#!/bin/sh\n# managed\nexit 0\n");
+		expect(readGuarded(repo).get("hooks/pre-push")?.digest).toBe(baseline.get("hooks/pre-push")?.digest);
+
+		rmSync(hooks, { recursive: true, force: true });
+		writeFileSync(hooks, "not a folder");
+		rmSync(join(repo, ".git/info"), { recursive: true, force: true });
+		writeFileSync(join(repo, ".git/info"), "nor this");
+		restoreGuarded(repo, baseline);
+		expect(readFileSync(join(hooks, "pre-push"), "utf8")).toBe("#!/bin/sh\n# managed\nexit 0\n");
+		expect(readFileSync(join(repo, ".git/info/exclude"), "utf8")).toBe("x\n");
+		expect([...readGuarded(repo)].map(([file, entry]) => [file, entry.digest])).toEqual([...baseline].map(([file, entry]) => [file, entry.digest]));
+	});
+
+	test("a restore that cannot succeed throws instead of leaving the hook missing silently", () => {
+		const repo = initRepo();
+		writeFileSync(join(repo, ".git/hooks/pre-push"), "#!/bin/sh\nexit 0\n");
+		const baseline = readGuarded(repo);
+		const stuck = join(repo, ".git/hooks/post-commit");
+		mkdirSync(stuck);
+		writeFileSync(join(stuck, "x"), "x");
+		chmodSync(stuck, 0o500);
+		try {
+			// Running as root (CI) ignores the mode; only assert the contract when the folder really is protected.
+			if (process.getuid?.() === 0) return;
+			expect(() => restoreGuarded(repo, baseline)).toThrow();
+		} finally {
+			chmodSync(stuck, 0o700);
+		}
+	});
+
+	test("scopeCheck never lets git run a core.fsmonitor command from the clone's config", () => {
+		const repo = initRepo();
+		const marker = join(scratch(), "fsmonitor-ran");
+		git(repo, "config", "core.fsmonitor", `touch '${marker}'; echo`);
+		writeFileSync(join(repo, "src/a.ts"), "changed\n");
+		scopeCheck(repo, ["src/**"], []);
+		expect(existsSync(marker)).toBe(false);
 	});
 });

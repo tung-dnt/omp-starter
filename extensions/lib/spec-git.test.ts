@@ -7,10 +7,15 @@ import {
 	defaultBase,
 	listFiles,
 	listFilesByRepo,
+	listNotes,
+	pruneDeadTempRefs,
 	readCheckNote,
 	readTaskCommits,
 	refExists,
+	removeCheckNote,
 	repoIdentity,
+	setNoteBlobs,
+	updateNotes,
 	writeCheckNote,
 } from "./spec-git";
 import { RISK_FIELDS } from "./spec-risk";
@@ -146,6 +151,155 @@ describe("check notes", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+});
+
+describe("check notes under concurrent writers", () => {
+	const GIT_MODULE = resolve(import.meta.dir, "spec-git.ts");
+	const CHILD = `import { writeCheckNote } from ${JSON.stringify(GIT_MODULE)};
+const [repo, sha, task] = process.argv.slice(1);
+writeCheckNote(repo, sha, { v: 1, task, plan_rev: "r", checks: { test: "pass" }, attempts: 1, blocked: false, reason: "", at: "2026-11-05T00:00:00Z" });`;
+
+	test("30 processes writing notes on their own commits in one repo lose none", async () => {
+		const repo = initRepo();
+		const shas = Array.from({ length: 30 }, (_, i) => commit(repo, `c${i}`));
+		const children = shas.map((sha, i) => Bun.spawn({ cmd: [process.execPath, "-e", CHILD, repo, sha, `T${i}`], stdout: "pipe", stderr: "pipe" }));
+		const exits = await Promise.all(children.map(async child => ({ code: await child.exited, err: await new Response(child.stderr).text() })));
+		expect(exits.filter(exit => exit.code !== 0)).toEqual([]);
+		const survivors = shas.filter(sha => readCheckNote(repo, sha) !== undefined);
+		expect(survivors).toHaveLength(30);
+		expect(git(repo, "for-each-ref", "--format=%(refname)", "refs/notes")).toBe("refs/notes/spec-checks");
+	}, 60_000);
+});
+
+describe("removeCheckNote", () => {
+	test("removes the note of a commit and leaves the others", () => {
+		const repo = initRepo();
+		const first = git(repo, "rev-parse", "HEAD");
+		const second = commit(repo, "next");
+		writeCheckNote(repo, first, note({ task: "A" }));
+		writeCheckNote(repo, second, note({ task: "B" }));
+		removeCheckNote(repo, first);
+		expect(readCheckNote(repo, first)).toBeUndefined();
+		expect(readCheckNote(repo, second)).toEqual(note({ task: "B" }));
+	});
+
+	test("removing an absent note is a no-op, with or without a notes ref", () => {
+		const repo = initRepo();
+		const sha = git(repo, "rev-parse", "HEAD");
+		expect(() => removeCheckNote(repo, sha)).not.toThrow();
+		expect(git(repo, "for-each-ref", "--format=%(refname)", "refs/notes")).toBe("");
+		writeCheckNote(repo, commit(repo, "other"), note());
+		expect(() => removeCheckNote(repo, sha)).not.toThrow();
+	});
+
+	test("a failure surfaces as a throw, and leaves no temp notes ref behind", () => {
+		const repo = initRepo();
+		const sha = git(repo, "rev-parse", "HEAD");
+		writeCheckNote(repo, sha, note());
+		expect(() => removeCheckNote(repo, "not-a-commit")).toThrow(/git notes failed/);
+		expect(() => removeCheckNote(join(repo, "absent"), sha)).toThrow();
+		expect(() => writeCheckNote(join(repo, "absent"), sha, note())).toThrow();
+		expect(git(repo, "for-each-ref", "--format=%(refname)", "refs/notes")).toBe("refs/notes/spec-checks");
+		expect(readCheckNote(repo, sha)).toEqual(note());
+	});
+});
+
+describe("updateNotes: the new notes commit must sit on the tip it was made from", () => {
+	test("a copy deleted while the edit runs (a fresh notes tree) is not swapped in over the existing notes; the edit is redone on the real tip", () => {
+		const repo = initRepo();
+		const a = git(repo, "rev-parse", "HEAD");
+		const b = commit(repo, "b");
+		writeCheckNote(repo, a, note({ task: "A" }));
+		let sabotaged = false;
+		updateNotes(repo, copy => {
+			if (!sabotaged) {
+				sabotaged = true;
+				git(repo, "update-ref", "--no-deref", "-d", `refs/notes/${copy}`);
+			}
+			git(repo, "notes", `--ref=${copy}`, "add", "-f", "-m", JSON.stringify(note({ task: "B" })), b);
+		});
+		expect(readCheckNote(repo, a)?.task).toBe("A");
+		expect(readCheckNote(repo, b)?.task).toBe("B");
+	});
+
+	test("a copy that is always deleted gives up with an error and leaves the notes as they were", () => {
+		const repo = initRepo();
+		const a = git(repo, "rev-parse", "HEAD");
+		writeCheckNote(repo, a, note({ task: "A" }));
+		const tip = git(repo, "rev-parse", "refs/notes/spec-checks");
+		expect(() =>
+			updateNotes(repo, copy => {
+				git(repo, "update-ref", "--no-deref", "-d", `refs/notes/${copy}`);
+				git(repo, "notes", `--ref=${copy}`, "add", "-f", "-m", "x", a);
+			}),
+		).toThrow(/not made on the notes tip/);
+		expect(git(repo, "rev-parse", "refs/notes/spec-checks")).toBe(tip);
+	}, 30_000);
+});
+
+describe("notes temp refs (N3, N10) and the CAS error", () => {
+	const notes = (repo: string): string => git(repo, "for-each-ref", "--format=%(refname) %(symref)", "refs/notes");
+
+	test("a temp ref planted as a symref to spec-checks under the old predictable name does not wipe the notes", () => {
+		const repo = initRepo();
+		const shas = [git(repo, "rev-parse", "HEAD"), commit(repo, "b"), commit(repo, "c")];
+		writeCheckNote(repo, shas[0], note({ task: "A" }));
+		writeCheckNote(repo, shas[1], note({ task: "B" }));
+		git(repo, "symbolic-ref", `refs/notes/spec-tmp-${process.pid}`, "refs/notes/spec-checks");
+		writeCheckNote(repo, shas[2], note({ task: "C" }));
+		expect(shas.map(sha => readCheckNote(repo, sha)?.task)).toEqual(["A", "B", "C"]);
+		// The planted symref is left alone: it is not the scheduler's.
+		expect(notes(repo)).toContain(`refs/notes/spec-tmp-${process.pid} refs/notes/spec-checks`);
+	});
+
+	test("the temp ref has an unpredictable name and is gone after the write, a failed write included", () => {
+		const repo = initRepo();
+		const sha = git(repo, "rev-parse", "HEAD");
+		writeCheckNote(repo, sha, note());
+		expect(notes(repo).split("\n")).toEqual(["refs/notes/spec-checks"]);
+		expect(() => removeCheckNote(repo, "not-a-commit")).toThrow();
+		expect(notes(repo).split("\n")).toEqual(["refs/notes/spec-checks"]);
+	});
+
+	test("when the CAS keeps failing for another reason, the error carries git's last message", () => {
+		const repo = initRepo();
+		const sha = git(repo, "rev-parse", "HEAD");
+		writeCheckNote(repo, sha, note());
+		writeFileSync(join(repo, ".git/refs/notes/spec-checks.lock"), "");
+		expect(() => writeCheckNote(repo, sha, note({ attempts: 9 }))).toThrow(/spec-checks\.lock/);
+	}, 60_000);
+
+	test("pruneDeadTempRefs removes the temp refs of dead processes (a symref too, without touching its target) and keeps a live one's", () => {
+		const repo = initRepo();
+		const sha = git(repo, "rev-parse", "HEAD");
+		writeCheckNote(repo, sha, note());
+		const dead = Bun.spawnSync({ cmd: ["true"] }).pid;
+		const tip = git(repo, "rev-parse", "refs/notes/spec-checks");
+		git(repo, "update-ref", `refs/notes/spec-tmp-${dead}-aaaa`, tip);
+		git(repo, "symbolic-ref", `refs/notes/spec-tmp-${dead}-bbbb`, "refs/notes/spec-checks");
+		git(repo, "update-ref", `refs/notes/spec-tmp-${process.pid}-cccc`, tip);
+		git(repo, "update-ref", "refs/notes/spec-tmp-notapid", tip);
+		expect(pruneDeadTempRefs(repo).sort()).toEqual([`refs/notes/spec-tmp-${dead}-aaaa`, `refs/notes/spec-tmp-${dead}-bbbb`]);
+		expect(notes(repo).split("\n").map(line => line.split(" ")[0]).sort()).toEqual(["refs/notes/spec-checks", `refs/notes/spec-tmp-${process.pid}-cccc`, "refs/notes/spec-tmp-notapid"]);
+		expect(readCheckNote(repo, sha)).toEqual(note());
+	});
+});
+
+describe("listNotes and setNoteBlobs", () => {
+	test("lists target to blob, and puts entries back by blob or removes them, in one CAS update", () => {
+		const repo = initRepo();
+		const a = git(repo, "rev-parse", "HEAD");
+		const b = commit(repo, "b");
+		expect(listNotes(repo).size).toBe(0);
+		writeCheckNote(repo, a, note({ task: "A" }));
+		const before = listNotes(repo);
+		writeCheckNote(repo, a, note({ task: "A2" }));
+		writeCheckNote(repo, b, note({ task: "B" }));
+		setNoteBlobs(repo, new Map([[a, before.get(a) ?? ""], [b, ""]]));
+		expect(readCheckNote(repo, a)?.task).toBe("A");
+		expect(readCheckNote(repo, b)).toBeUndefined();
+		expect([...listNotes(repo).keys()]).toEqual([a]);
 	});
 });
 

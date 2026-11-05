@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { loadGuardInput } from "./spec-diff";
-import { type CheckNote, cleanEnv, git, gitOrThrow, readCheckNote, readTaskCommits, writeCheckNote } from "./spec-git";
+import { type CheckNote, NO_HOOKS, cleanEnv, git, gitOrThrow, readCheckNote, readTaskCommits, writeCheckNote } from "./spec-git";
 import { type GuardViolation, guardCommits } from "./spec-guard";
 import { assertRepoPath } from "./spec-lock";
 import type { RepoChecks } from "./spec-plan";
@@ -38,7 +38,7 @@ export async function withWorktree<T>(repo: string, rev: string, fn: (dir: strin
 	const root = mkdtempSync(join(tmpdir(), "spec-worktree-"));
 	const dir = join(root, "tree");
 	try {
-		gitOrThrow(repo, ["-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", "--quiet", dir, rev]);
+		gitOrThrow(repo, [...NO_HOOKS, "worktree", "add", "--detach", "--quiet", dir, rev]);
 		return await fn(dir);
 	} finally {
 		git(repo, ["worktree", "remove", "--force", dir]);
@@ -121,6 +121,8 @@ export interface CheckOptions {
 	/** The range start: the ticket branch's base. The guard reads `<base>..<sha>`. */
 	base: string;
 	timeoutMs?: number;
+	/** Called at the moment the note is written, before `checkCommit` returns: the checked sha and the notes ref's tip after the write. */
+	onNoteWritten?(sha: string, notesTip: string): void;
 }
 
 export interface CheckReport {
@@ -181,7 +183,9 @@ export async function checkCommit(repo: string, rev: string, options: CheckOptio
 	for (const result of results) checks[result.name] = result.status;
 	checks.guard = violations.length === 0 ? "pass" : "fail";
 	const note: CheckNote = { v: 1, task, plan_rev: own.planRev, checks, attempts: previous + 1, blocked: false, reason: "", at: new Date().toISOString() };
-	writeCheckNote(repo, sha, note);
+	// Reported in the same synchronous block as the write, so a caller that tracks the notes ref never sees a value it was not told about.
+	const notesTip = writeCheckNote(repo, sha, note);
+	options.onNoteWritten?.(sha, notesTip);
 	return { sha, task, attempts: note.attempts, results, violations, note, ok: Object.values(checks).every(status => status !== "fail") };
 }
 
@@ -245,7 +249,7 @@ export async function failsBefore(
 	const base = gitOrThrow(repo, ["rev-parse", "--verify", `${first.sha}^`]).trim();
 
 	return withWorktree(repo, base, async dir => {
-		gitOrThrow(dir, ["--literal-pathspecs", "checkout", sha, "--", ...files]);
+		gitOrThrow(dir, [...NO_HOOKS, "--literal-pathspecs", "checkout", sha, "--", ...files]);
 		const outcomes = new Map<string, Outcome>();
 		const results: FailsBeforeFile[] = [];
 		for (const file of files) {

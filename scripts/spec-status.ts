@@ -3,11 +3,15 @@
 // (`Task:`, `Task-Lock:`) and check notes (`refs/notes/spec-checks`) on the ticket branch.
 // Read-only: it writes nothing and pushes nothing. The only network call is `gh pr list`, and only with --pr.
 //
-//   bun scripts/spec-status.ts <plan.md> --repo <path>... --branch <ticket> [--base <ref>] [--json] [--pr]
+//   bun scripts/spec-status.ts <plan.md> --repo <path>... --branch <ticket> [--base <ref>] [--vault-git-dir <dir>] [--json] [--pr]
 //
-// --repo is repeatable; each clone serves the plan tasks whose `repo` equals the clone's origin `org/name`.
+// --repo is repeatable; each clone serves the plan tasks whose `repo` equals the clone's origin `org/name`. A task that has no commit
+// yet can still be blocked (a note on its task key); that note counts only under the plan's current revision in the vault, so the plan
+// must lie inside the vault work tree of --vault-git-dir (default ~/.vault-git), else the notes are shown without that check.
 // Exit codes: 0 status computed (whatever the states), 2 usage, IO or invalid-plan error.
 import * as fs from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
+import { DEFAULT_VAULT_GIT_DIR, planRevision } from "../extensions/lib/spec-diff";
 import {
 	type TaskCommit,
 	cloneIdentities,
@@ -15,14 +19,16 @@ import {
 	listFilesByRepo,
 	readCheckNote,
 	readTaskCommits,
+	readTaskNote,
 	refExists,
 } from "../extensions/lib/spec-git";
+import { vaultRootOf } from "../extensions/lib/spec-ops";
 import { parsePlan } from "../extensions/lib/spec-plan";
-import { type StoryStatus, computeStatus, formatStatusLine } from "../extensions/lib/spec-status";
+import { type StoryStatus, computeStatus, renderStatus } from "../extensions/lib/spec-status";
 import { validatePlan } from "../extensions/lib/spec-validate";
 import { errorMessage, isRecord } from "../extensions/lib/tooling/runtime";
 
-const USAGE = "Usage: bun scripts/spec-status.ts <plan.md> --repo <path>... --branch <ticket> [--base <ref>] [--json] [--pr]";
+const USAGE = "Usage: bun scripts/spec-status.ts <plan.md> --repo <path>... --branch <ticket> [--base <ref>] [--vault-git-dir <dir>] [--json] [--pr]";
 
 class UsageError extends Error {}
 
@@ -31,6 +37,7 @@ interface CliArgs {
 	repos: string[];
 	branch: string;
 	base?: string;
+	vaultGitDir: string;
 	json: boolean;
 	pr: boolean;
 }
@@ -39,6 +46,7 @@ function parseArgs(argv: string[]): CliArgs {
 	let plan: string | undefined;
 	let branch: string | undefined;
 	let base: string | undefined;
+	let vaultGitDir = DEFAULT_VAULT_GIT_DIR;
 	let json = false;
 	let pr = false;
 	const repos: string[] = [];
@@ -54,6 +62,7 @@ function parseArgs(argv: string[]): CliArgs {
 		else if (arg === "--repo") repos.push(value(arg, ++i));
 		else if (arg === "--branch") branch = value(arg, ++i);
 		else if (arg === "--base") base = value(arg, ++i);
+		else if (arg === "--vault-git-dir") vaultGitDir = resolve(value(arg, ++i));
 		else if (arg.startsWith("--")) throw new UsageError(`unknown option ${arg}`);
 		else if (plan === undefined) plan = arg;
 		else throw new UsageError(`unexpected argument ${arg}`);
@@ -61,7 +70,7 @@ function parseArgs(argv: string[]): CliArgs {
 	if (plan === undefined) throw new UsageError("missing <plan.md>");
 	if (repos.length === 0) throw new UsageError("missing --repo <path>");
 	if (branch === undefined) throw new UsageError("missing --branch <ticket>");
-	return { plan, repos, branch, json, pr, ...(base === undefined ? {} : { base }) };
+	return { plan, repos, branch, vaultGitDir, json, pr, ...(base === undefined ? {} : { base }) };
 }
 
 /** True when `gh` lists at least one merged PR for the branch; any failure is a warning and reads as not merged. */
@@ -86,19 +95,16 @@ function prMerged(repo: string, path: string, branch: string): boolean {
 	}
 }
 
-function render(status: StoryStatus): string {
-	const width = Math.max(...status.tasks.map(task => task.id.length), 0);
-	const stateWidth = Math.max(...status.tasks.map(task => task.state.length), 0);
-	const rows = status.tasks.map(task => {
-		const detail = [task.lastSha?.slice(0, 7), task.attempts === undefined ? undefined : `attempts ${task.attempts}`, task.reason]
-			.filter(part => part !== undefined)
-			.join("  ");
-		return `  ${task.id.padEnd(width)}  ${task.state.padEnd(stateWidth)}${detail ? `  ${detail}` : ""}`.trimEnd();
-	});
-	return [formatStatusLine(status), ...rows, `story: ${status.state}`].join("\n");
+const NO_REVISION_CHECK = "note: blocked notes are shown without a plan-revision check";
+
+/** The plan's revision in the vault, or undefined (with the reason to tell the user) when the plan is not a committed file of the vault. */
+function revisionOf(planFile: string, vaultGitDir: string): string | undefined {
+	const planPath = relative(vaultRootOf(vaultGitDir), resolve(planFile));
+	if (planPath === "" || planPath.startsWith("..") || isAbsolute(planPath)) return undefined;
+	return planRevision(vaultGitDir, planPath) || undefined;
 }
 
-function run(args: CliArgs): StoryStatus {
+function run(args: CliArgs): { status: StoryStatus; notes: string[] } {
 	const markdown = fs.readFileSync(args.plan, "utf8");
 	const clones = cloneIdentities(args.repos);
 	const parsed = parsePlan(markdown);
@@ -135,7 +141,12 @@ function run(args: CliArgs): StoryStatus {
 
 	const prs = args.pr ? new Map([...commitsByRepo.keys()].map(repo => [repo, prMerged(repo, pathOf(repo), args.branch)])) : undefined;
 	const notes = (repo: string, sha: string) => readCheckNote(pathOf(repo), sha);
-	return computeStatus(plan, commitsByRepo, notes, prs);
+	const planRev = revisionOf(args.plan, args.vaultGitDir);
+	const status = computeStatus(plan, commitsByRepo, notes, prs, {
+		taskNote: (repo, id) => readTaskNote(pathOf(repo), plan.id, id),
+		...(planRev === undefined ? {} : { planRev }),
+	});
+	return { status, notes: planRev === undefined ? [NO_REVISION_CHECK] : [] };
 }
 
 export function main(argv: string[]): number {
@@ -147,14 +158,20 @@ export function main(argv: string[]): number {
 		console.error(`${error.message}\n${USAGE}`);
 		return 2;
 	}
-	let status: StoryStatus;
+	let result: { status: StoryStatus; notes: string[] };
 	try {
-		status = run(args);
+		result = run(args);
 	} catch (error) {
 		console.error(errorMessage(error));
 		return 2;
 	}
-	console.log(args.json ? JSON.stringify(status, null, 2) : render(status));
+	// JSON output stays one document on stdout; a note then goes to stderr.
+	if (args.json) {
+		console.log(JSON.stringify(result.status, null, 2));
+		for (const note of result.notes) console.error(note);
+	} else {
+		console.log([renderStatus(result.status), ...result.notes].join("\n"));
+	}
 	return 0;
 }
 

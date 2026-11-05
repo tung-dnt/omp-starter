@@ -22,7 +22,7 @@ export interface CheckNote {
 	at: string;
 }
 
-const NOTES_REF = "spec-checks";
+export const NOTES_REF = "spec-checks";
 const FIELD_SEP = "\x1f";
 const RECORD_SEP = "\x1e";
 const LOG_FORMAT = [
@@ -67,6 +67,13 @@ export function cleanEnv(): Record<string, string | undefined> {
 	return env;
 }
 
+/**
+ * The argv prefix of every scheduler and check git call that touches a work tree or a ref: no repo hook runs (`core.hooksPath=/dev/null`,
+ * which also stops `reference-transaction`) and no `core.fsmonitor` command runs (git runs it on status, add, checkout and more, even with
+ * hooks off). A slot can write both settings, so the scheduler never lets git read them.
+ */
+export const NO_HOOKS: readonly string[] = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+
 function run(argv: readonly string[]): GitResult {
 	const result = Bun.spawnSync({ cmd: ["git", ...argv], stdout: "pipe", stderr: "pipe", env: cleanEnv() });
 	return { ok: result.exitCode === 0, stdout: result.stdout.toString(), stderr: result.stderr.toString().trim() };
@@ -92,7 +99,8 @@ export function gitOrThrow(repoPath: string, args: readonly string[]): string {
 	return result.stdout;
 }
 
-const splitValues = (field: string): string[] =>
+/** The values of a trailer field: one value per comma-separated item, trimmed, empty items dropped. `readTaskCommits` and the guard read `Task:` this way. */
+export const splitValues = (field: string): string[] =>
 	field
 		.split(",")
 		.map(value => value.trim())
@@ -144,9 +152,148 @@ export function readCheckNote(repoPath: string, sha: string): CheckNote | undefi
 	return undefined;
 }
 
-/** Writes (or replaces) the check note on `sha` in `refs/notes/spec-checks`. Local only: nothing is pushed. */
-export function writeCheckNote(repoPath: string, sha: string, note: CheckNote): void {
-	gitOrThrow(repoPath, ["notes", `--ref=${NOTES_REF}`, "add", "-f", "-m", JSON.stringify(note), sha]);
+const NOTES_FULL_REF = `refs/notes/${NOTES_REF}`;
+const NOTES_CAS_TRIES = 30;
+
+/** The temp refs this process has in use: the only temp refs the scheduler's snapshot may ignore. */
+const ownTempRefs = new Set<string>();
+
+/** True for a temp notes ref that this process is using right now. */
+export const isOwnTempRef = (ref: string): boolean => ownTempRefs.has(ref);
+
+/** The notes tip, or "" when the notes ref does not exist. */
+const notesTip = (repoPath: string, ref: string): string => git(repoPath, ["rev-parse", "--verify", "--quiet", ref]).stdout.trim();
+
+/**
+ * Edits `refs/notes/spec-checks` so that no concurrent writer, in this process or another, loses its update. `git notes add` and
+ * `remove` move their ref with no compare-and-swap, so the edit runs on a private copy and the result replaces the real ref only if it
+ * still holds the value the copy was made from (`update-ref --no-deref <ref> <new> <old>`). The copy is `refs/notes/spec-tmp-<pid>-<random>`:
+ * the name cannot be guessed, and every create, update and delete of it uses `--no-deref`, so a slot that plants a symref there cannot make
+ * the cleanup delete the real notes. No hook and no fsmonitor command runs. On a lost race the edit is redone on the new tip, up to 30
+ * times, then this throws with git's last message. The copy is deleted last. Returns the notes tip after the update.
+ */
+export function updateNotes(repoPath: string, edit: (ref: string) => void): string {
+	const copy = `spec-tmp-${process.pid}-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+	const copyRef = `refs/notes/${copy}`;
+	const update = (args: readonly string[]) => git(repoPath, [...NO_HOOKS, "update-ref", "--no-deref", ...args]);
+	ownTempRefs.add(copyRef);
+	let lastError = "";
+	try {
+		for (let attempt = 1; attempt <= NOTES_CAS_TRIES; attempt++) {
+			const old = notesTip(repoPath, NOTES_FULL_REF);
+			// `--no-deref` overwrites whatever stands at the copy's name; only an absent notes ref needs the copy deleted.
+			if (old === "") update(["-d", copyRef]);
+			else {
+				const made = update([copyRef, old]);
+				if (!made.ok) throw new Error(`git update-ref failed in ${repoPath}: ${made.stderr || "non-zero exit"}`);
+			}
+			edit(copy);
+			const next = notesTip(repoPath, copyRef);
+			if (next === old) return old;
+			// A copy deleted while the edit ran (a slot polling the refs, a prune) leaves `git notes` to start a fresh tree: swapping that in
+			// would wipe every note. The new tip must descend from the tip the copy was cut from (an edit of several notes makes several
+			// commits, so not only its direct parent), else the edit is redone.
+			if (old !== "" && !git(repoPath, ["merge-base", "--is-ancestor", old, next]).ok) {
+				lastError = `the new notes commit was not made on the notes tip (${next.slice(0, 7)} does not descend from ${old.slice(0, 7)})`;
+			} else {
+				const swapped = update([NOTES_FULL_REF, next, old]);
+				if (swapped.ok) return next;
+				lastError = swapped.stderr;
+			}
+			if (attempt < NOTES_CAS_TRIES) Bun.sleepSync(Math.random() * Math.min(5 * attempt, 20));
+		}
+		throw new Error(`could not update ${NOTES_FULL_REF} in ${repoPath} (${NOTES_CAS_TRIES} tries; it kept changing under concurrent writers, or git refused): ${lastError || "no message from git"}`);
+	} finally {
+		update(["-d", copyRef]);
+		ownTempRefs.delete(copyRef);
+	}
+}
+
+/** Writes (or replaces) the check note on `sha` in `refs/notes/spec-checks`, safe against concurrent writers. Local only: nothing is pushed. Throws when it fails. Returns the notes tip after the write. */
+export function writeCheckNote(repoPath: string, sha: string, note: CheckNote): string {
+	return updateNotes(repoPath, ref => gitOrThrow(repoPath, [...NO_HOOKS, "notes", `--ref=${ref}`, "add", "-f", "-m", JSON.stringify(note), sha]));
+}
+
+/** Removes the check note on `sha`; a commit without a note is not an error. Safe against concurrent writers. Throws when it fails. */
+export function removeCheckNote(repoPath: string, sha: string): void {
+	updateNotes(repoPath, ref => gitOrThrow(repoPath, [...NO_HOOKS, "notes", `--ref=${ref}`, "remove", "--ignore-missing", sha]));
+}
+
+/** The blob of the note on `target`, or "" when it has none. */
+export function noteBlob(repoPath: string, target: string): string {
+	return git(repoPath, [...NO_HOOKS, "notes", `--ref=${NOTES_FULL_REF}`, "list", target]).stdout.trim();
+}
+
+/** The notes of `refs/notes/spec-checks` as target object → note blob. An absent notes ref lists nothing. */
+export function listNotes(repoPath: string): Map<string, string> {
+	const out = new Map<string, string>();
+	const listed = git(repoPath, [...NO_HOOKS, "notes", `--ref=${NOTES_FULL_REF}`, "list"]);
+	if (!listed.ok) return out;
+	for (const line of listed.stdout.split("\n")) {
+		const [blob, target] = line.split(" ");
+		if (blob && target) out.set(target, blob);
+	}
+	return out;
+}
+
+/** Puts the notes back to the given blobs ("" removes the note), all in one CAS update of the notes ref. */
+export function setNoteBlobs(repoPath: string, changes: ReadonlyMap<string, string>): void {
+	updateNotes(repoPath, ref => {
+		for (const [target, blob] of changes) {
+			if (blob === "") gitOrThrow(repoPath, [...NO_HOOKS, "notes", `--ref=${ref}`, "remove", "--ignore-missing", target]);
+			else gitOrThrow(repoPath, [...NO_HOOKS, "notes", `--ref=${ref}`, "add", "-f", "-C", blob, target]);
+		}
+	});
+}
+
+const TEMP_REF = /^refs\/notes\/spec-tmp-(\d+)-/;
+
+/** The pid whose `updateNotes` made this temp ref, or undefined for any other ref. */
+export function tempRefPid(ref: string): number | undefined {
+	const match = TEMP_REF.exec(ref);
+	return match === null ? undefined : Number(match[1]);
+}
+
+/**
+ * Deletes the temp notes refs of dead processes: a kill inside `updateNotes` leaves its copy behind. A pid that is alive, or a name that
+ * is not `spec-tmp-<pid>-<id>`, stays. Deletes with `--no-deref`, so a symref is removed and never its target. Returns what it removed.
+ */
+export function pruneDeadTempRefs(repoPath: string): string[] {
+	const removed: string[] = [];
+	for (const ref of gitOrThrow(repoPath, ["for-each-ref", "--format=%(refname)", "refs/notes/"]).split("\n")) {
+		const pid = tempRefPid(ref);
+		if (pid === undefined || pidAlive(pid)) continue;
+		if (git(repoPath, [...NO_HOOKS, "update-ref", "--no-deref", "-d", ref]).ok) removed.push(ref);
+	}
+	return removed;
+}
+
+/** True when a process with this pid exists on this host (one owned by another user counts as alive). */
+export function pidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return !(isRecord(error) && error.code === "ESRCH");
+	}
+}
+
+/** The object id of a task's key blob, computed by git itself so it follows the repo's hash algorithm. `write` stores the blob, which a note needs as its target. */
+export function taskKey(repoPath: string, story: string, task: string, write: boolean): string {
+	const result = Bun.spawnSync({
+		cmd: ["git", "-C", repoPath, "hash-object", ...(write ? ["-w"] : []), "--stdin"],
+		stdin: Buffer.from(`spec-task:${story}:${task}`),
+		stdout: "pipe",
+		stderr: "pipe",
+		env: cleanEnv(),
+	});
+	if (result.exitCode !== 0) throw new Error(`git hash-object failed in ${repoPath}: ${result.stderr.toString().trim()}`);
+	return result.stdout.toString().trim();
+}
+
+/** The blocked note of a task that has no commit yet: the check note on the task's key object. Read-only. */
+export function readTaskNote(repoPath: string, story: string, task: string): CheckNote | undefined {
+	return readCheckNote(repoPath, taskKey(repoPath, story, task, false));
 }
 
 /** `org/name` from the `origin` URL (SSH, scp-style or HTTPS), or undefined without an origin or when the URL has no two-segment path. */

@@ -1,5 +1,5 @@
 // Task and story status derived from git alone: the plan, commit trailers and check notes.
-// Pure: no I/O, and the output follows plan task order.
+// Pure: no I/O (the note readers are injected), and the output follows plan task order.
 import type { Plan } from "./spec-plan";
 import type { CheckNote, TaskCommit } from "./spec-git";
 
@@ -19,6 +19,20 @@ export interface StoryStatus {
 	tasks: TaskStatus[];
 }
 
+/** What changes how a status reads its notes. */
+export interface StatusOptions {
+	/**
+	 * The plan revision the status is for (the scheduler's `Plan-Rev`). A blocked note written under another revision is ignored, so
+	 * committing a plan fix unblocks the task with no extra state. Without it every blocked note counts.
+	 */
+	planRev?: string;
+	/**
+	 * The blocked note a task earned before it had a commit on the ticket branch, by repo and task id. It sits on a stable task-key
+	 * object (the blob of `spec-task:<story>:<task>`), because there is no commit to attach it to. Asked once per task.
+	 */
+	taskNote?: (repo: string, task: string) => CheckNote | undefined;
+}
+
 /** Display order of the non-done states in the status line; `blocked` is listed last, with its reasons. */
 const LINE_ORDER: readonly TaskState[] = ["checking", "failing", "awaiting-lock", "ready", "waiting"];
 
@@ -28,13 +42,15 @@ const LINE_ORDER: readonly TaskState[] = ["checking", "failing", "awaiting-lock"
  *
  * `commitsByRepo` and `prsMerged` are keyed by the plan's `org/name`; `commitsByRepo` holds the
  * commits of `<base>..<ticket branch>` oldest first. `notes` is asked at most once per commit.
- * Without `prsMerged` the story stops at `tasks-done`.
+ * Without `prsMerged` the story stops at `tasks-done`. `blocked` also comes from a task-key note and,
+ * with `options.planRev`, only from a note written under that plan revision.
  */
 export function computeStatus(
 	plan: Plan,
 	commitsByRepo: Map<string, TaskCommit[]>,
 	notes: (repo: string, sha: string) => CheckNote | undefined,
 	prsMerged?: Map<string, boolean>,
+	options: StatusOptions = {},
 ): StoryStatus {
 	const noteCache = new Map<string, CheckNote | undefined>();
 	const noteOf = (repo: string, sha: string): CheckNote | undefined => {
@@ -43,9 +59,24 @@ export function computeStatus(
 		return noteCache.get(key);
 	};
 
+	const isBlocking = (note: CheckNote | undefined): note is CheckNote =>
+		note?.blocked === true && (options.planRev === undefined || note.plan_rev === options.planRev);
+
 	const settled = new Map<string, TaskStatus>();
 	for (const task of plan.tasks) {
 		const commits = (commitsByRepo.get(task.repo) ?? []).filter(commit => commit.tasks.includes(task.id));
+		const keyNote = options.taskNote?.(task.repo, task.id);
+		if (isBlocking(keyNote)) {
+			const lastSha = commits.at(-1)?.sha;
+			settled.set(task.id, {
+				id: task.id,
+				state: "blocked",
+				...(lastSha === undefined ? {} : { lastSha }),
+				...(keyNote.reason ? { reason: keyNote.reason } : {}),
+				attempts: keyNote.attempts,
+			});
+			continue;
+		}
 		if (commits.length === 0) continue;
 		const last = commits[commits.length - 1];
 		const lastNote = noteOf(task.repo, last.sha);
@@ -59,7 +90,7 @@ export function computeStatus(
 		const attempts = lastNote?.attempts ?? latest?.attempts;
 		const base = { id: task.id, lastSha: last.sha, ...(attempts === undefined ? {} : { attempts }) };
 
-		if (latest?.blocked) {
+		if (isBlocking(latest)) {
 			settled.set(task.id, { ...base, state: "blocked", ...(latest.reason ? { reason: latest.reason } : {}) });
 		} else if (lastNote && failed.length === 0 && lastNote.checks.guard === "pass") {
 			settled.set(task.id, { ...base, state: "done" });
@@ -99,4 +130,17 @@ export function formatStatusLine(status: StoryStatus): string {
 	}
 	if (status.state === "done") parts.push("merged");
 	return `${status.id} ▸ ${parts.join(" · ")}`;
+}
+
+/** The status as the status CLI and the `spec_status` tool print it: the status line, one row per task (state, short sha, attempts, reason) and the story state. */
+export function renderStatus(status: StoryStatus): string {
+	const width = Math.max(...status.tasks.map(task => task.id.length), 0);
+	const stateWidth = Math.max(...status.tasks.map(task => task.state.length), 0);
+	const rows = status.tasks.map(task => {
+		const detail = [task.lastSha?.slice(0, 7), task.attempts === undefined ? undefined : `attempts ${task.attempts}`, task.reason]
+			.filter(part => part !== undefined)
+			.join("  ");
+		return `  ${task.id.padEnd(width)}  ${task.state.padEnd(stateWidth)}${detail ? `  ${detail}` : ""}`.trimEnd();
+	});
+	return [formatStatusLine(status), ...rows, `story: ${status.state}`].join("\n");
 }

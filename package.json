@@ -23,7 +23,8 @@
       "./extensions/kb-memory-tools.ts",
       "./extensions/kb-command.ts",
       "./extensions/fable-router.ts",
-      "./extensions/lsp-guard.ts"
+      "./extensions/lsp-guard.ts",
+      "./extensions/spec-workflow.ts"
     ]
   },
   "devDependencies": {

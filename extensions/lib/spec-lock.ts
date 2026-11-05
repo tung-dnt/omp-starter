@@ -2,7 +2,7 @@
 // Both commits are empty, so they never mix with a content change. Only the scheduler calls them, after the test review
 // (lock) or after a human gate approved `test_wrong` (unlock).
 import { readCommitFacts } from "./spec-diff";
-import { git, gitOrThrow } from "./spec-git";
+import { NO_HOOKS, git, gitOrThrow } from "./spec-git";
 import { LockState } from "./spec-guard";
 
 const CONTROL = /[\u0000-\u001f\u007f]/;
@@ -26,11 +26,13 @@ export function assertRepoPath(label: string, path: string): string {
 
 /**
  * Commits an empty commit with `subject` and a trailer paragraph. Staged changes would ride along in it, so they refuse the commit.
- * Repo hooks are skipped (`--no-verify`): the commit is empty and its message is machine-written.
+ * No repo hook runs (`--no-verify` skips only pre-commit, commit-msg and pre-merge-commit; `core.hooksPath=/dev/null` also stops
+ * prepare-commit-msg and post-commit, which could rewrite the trailers or move refs after a worker slot has closed): the commit is
+ * empty and its message is machine-written.
  */
 function emptyCommit(repo: string, subject: string, trailers: readonly string[]): string {
-	if (!git(repo, ["diff", "--cached", "--quiet"]).ok) throw new Error(`${repo} has staged changes; a lock or unlock commit must be empty`);
-	gitOrThrow(repo, ["commit", "--allow-empty", "--no-verify", "--quiet", "-m", subject, "-m", trailers.join("\n")]);
+	if (!git(repo, [...NO_HOOKS, "diff", "--cached", "--quiet"]).ok) throw new Error(`${repo} has staged changes; a lock or unlock commit must be empty`);
+	gitOrThrow(repo, [...NO_HOOKS, "commit", "--allow-empty", "--no-verify", "--quiet", "-m", subject, "-m", trailers.join("\n")]);
 	return gitOrThrow(repo, ["rev-parse", "HEAD"]).trim();
 }
 

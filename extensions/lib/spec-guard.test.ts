@@ -83,6 +83,23 @@ describe("plan rules", () => {
 		expect(found.slice(0, 2).map(v => v.task)).toEqual(["T9", "T8"]);
 		expect(rules(guard([commit({ tasks: ["T1"] })], SCOPE))).toEqual([]);
 	});
+
+	test("a comma-separated Task value names several tasks, as readTaskCommits reads it", () => {
+		const plans = valid(task("T1", { owns: ["src/**"] }), task("T2", { owns: ["db/**"] }));
+		const both = commit({ tasks: ["T1, T2"], changes: [change("src/a.ts"), change("db/001.sql")] });
+		expect(guard([both], plans)).toEqual([]);
+		const out = commit({ tasks: ["T1,T2"], changes: [change("web/x.ts")] });
+		const found = guard([out], plans);
+		expect(rules(found)).toEqual(["out-of-scope"]);
+		expect(found[0].detail).toContain("T1, T2");
+		const unknown = guard([commit({ tasks: ["T1, T9", " T8 ,"] })], plans);
+		expect(unknown.map(v => [v.rule, v.task])).toEqual([["unknown-task", "T9"], ["unknown-task", "T8"]]);
+		const unpinned = guard([commit({ tasks: ["T1, T2"], planRev: undefined })], plans);
+		expect(unpinned[0]).toMatchObject({ rule: "plan-rev-missing", task: "T1" });
+		expect(unpinned[0].detail).toContain("Task: T1, T2");
+		// Only separators: no task at all, so strict mode calls it untracked.
+		expect(rules(guard([commit({ tasks: [", ,"], planRev: undefined })], plans, true))).toEqual(["untracked-commit"]);
+	});
 });
 
 describe("out-of-scope", () => {

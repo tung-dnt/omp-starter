@@ -185,6 +185,21 @@ describe("parsePlan", () => {
 			expect(result.ok && result.plan.checks["org/backend"]).toEqual({ test: "go test ./...", lint: "" });
 		});
 
+		test("test_paths is a list of path patterns that replaces the built-in test file patterns", () => {
+			const result = withChecks(["  org/backend:", '    test: "go test ./..."', '    test_paths: ["t/**", "spec/"]'].join("\n"));
+			expect(result.ok && result.plan.checks["org/backend"]).toEqual({ test: "go test ./...", test_paths: ["t/**", "spec/"] });
+		});
+
+		for (const [name, value] of [["a string", '"t/**"'], ["an empty list", "[]"], ["a list with a blank entry", '["t/**", " "]'], ["a list of numbers", "[1]"]] as const) {
+			test(`field: test_paths as ${name} is refused`, () => {
+				const result = withChecks(["  org/backend:", '    test: "go test ./..."', `    test_paths: ${value}`].join("\n"));
+				expect(result.ok).toBe(false);
+				if (result.ok) return;
+				expect(only(result.errors)).toEqual(["field"]);
+				expect(result.errors[0].detail).toContain('check "test_paths" for "org/backend" must be a non-empty list of path patterns');
+			});
+		}
+
 		const bad: Array<[string, string, string]> = [
 			["an unknown check name", '  org/backend:\n    test: "go test ./..."\n    format: "gofmt"', 'unknown check "format" for "org/backend"'],
 			["a command that is not a string", "  org/backend:\n    test: 12", 'check "test" for "org/backend" must be a string'],

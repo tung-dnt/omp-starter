@@ -1,5 +1,6 @@
 // The guard's rules, pure: commits (trailers, changed paths, added lines) and the plan each commit names go in, violations come out.
 // Nothing here runs git or reads a file; `spec-diff.ts` reads the inputs and `scripts/spec-guard.ts` prints the result.
+import { splitValues } from "./spec-git";
 import type { Plan, TaskBlock } from "./spec-plan";
 import type { Violation } from "./spec-validate";
 
@@ -42,7 +43,7 @@ export interface CommitFacts {
 	sha: string;
 	/** The commit has more than one parent. */
 	merge: boolean;
-	/** `Task:` ids. */
+	/** `Task:` values as written; `guardCommits` reads a comma-separated value as several ids, the way `readTaskCommits` does. */
 	tasks: string[];
 	/** The first `Plan-Rev:` value. */
 	planRev?: string;
@@ -186,12 +187,13 @@ export function guardCommits({ commits, plans, strict }: GuardInput): GuardViola
 		const report = (rule: GuardRule, detail: string, where: { task?: string; path?: string } = {}): void => {
 			found.push({ rule, sha: commit.sha, ...where, detail });
 		};
-		const lead = commit.tasks[0];
+		const tasks = commit.tasks.flatMap(splitValues);
+		const lead = tasks[0];
 		const known: TaskBlock[] = [];
 
 		if (lead !== undefined) {
 			if (commit.planRev === undefined) {
-				report("plan-rev-missing", `the commit has Task: ${commit.tasks.join(", ")} but no Plan-Rev trailer`, { task: lead });
+				report("plan-rev-missing", `the commit has Task: ${tasks.join(", ")} but no Plan-Rev trailer`, { task: lead });
 			} else {
 				const at = plans.get(commit.planRev);
 				if (at === undefined) {
@@ -204,7 +206,7 @@ export function guardCommits({ commits, plans, strict }: GuardInput): GuardViola
 					}
 					const plan = at.plan;
 					if (plan) {
-						for (const id of commit.tasks) {
+						for (const id of tasks) {
 							const task = plan.tasks.find(candidate => candidate.id === id);
 							if (task) known.push(task);
 							else report("unknown-task", `Task: ${id} is not in the plan at ${commit.planRev}`, { task: id });

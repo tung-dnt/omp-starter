@@ -11,7 +11,7 @@
 // the marked hook and its config, and puts a chained hook back. Exit codes: 0 done, 2 usage error, IO error or refusal.
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type Args, UsageError, assertVaultPath, gitCommonDir, parseArgs, removeWorkflowConfig, writeWorkflowConfig } from "../extensions/lib/spec-cli";
+import { type Args, MARKER, UsageError, assertVaultPath, gitCommonDir, parseArgs, removeWorkflowConfig, resolveBun, writeWorkflowConfig } from "../extensions/lib/spec-cli";
 import { defaultBase, git, refExists } from "../extensions/lib/spec-git";
 import { errorMessage } from "../extensions/lib/tooling/runtime";
 
@@ -20,7 +20,6 @@ const USAGE = [
 	"       bun scripts/spec-hook.ts uninstall --repo <path>",
 ].join("\n");
 
-const MARKER = "# managed-by: omp-starter spec-hook";
 const CHAIN_MARKER = "# chained-hook: pre-push.local";
 const GUARD = path.resolve(import.meta.dir, "spec-guard.ts");
 
@@ -85,7 +84,7 @@ function install(args: Args): string {
 	fs.mkdirSync(hooks, { recursive: true });
 	if (foreign) fs.renameSync(hook, chainedFile);
 	try {
-		fs.writeFileSync(hook, hookScript(process.execPath, chained), { mode: 0o755 });
+		fs.writeFileSync(hook, hookScript(resolveBun(), chained), { mode: 0o755 });
 		fs.chmodSync(hook, 0o755);
 	} catch (error) {
 		if (foreign) fs.renameSync(chainedFile, hook);

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadGuardInput, readCommitDiff, readCommitFacts } from "./spec-diff";
 import { cleanScratch, commit, commitFiles, git, initRepo, initVault, planText } from "./spec-fixtures";
@@ -76,6 +76,19 @@ describe("lockCommit", () => {
 		const sha = lockCommit(repo, { task: "T1", planRev: REV, files: ["test/a.test.ts"] });
 		expect(readCommitDiff(repo, sha).changes).toEqual([]);
 		expect(git(repo, "status", "--porcelain")).toBe("M src/a.ts");
+	});
+
+	test("prepare-commit-msg and post-commit hooks do not run: a lock commit leaves no marker", () => {
+		const repo = world();
+		const marker = join(repo, "hook-ran");
+		for (const name of ["prepare-commit-msg", "post-commit", "commit-msg", "pre-commit"]) {
+			const hook = join(repo, ".git/hooks", name);
+			writeFileSync(hook, `#!/bin/sh\ntouch '${marker}-${name}'\n`);
+			chmodSync(hook, 0o755);
+		}
+		lockCommit(repo, { task: "T1", planRev: REV, files: ["test/a.test.ts"] });
+		unlockCommit(repo, { task: "T1", planRev: REV, gate: "G-1" });
+		expect(["prepare-commit-msg", "post-commit", "commit-msg", "pre-commit"].filter(name => existsSync(`${marker}-${name}`))).toEqual([]);
 	});
 });
 

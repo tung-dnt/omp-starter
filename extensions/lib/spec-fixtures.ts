@@ -108,8 +108,8 @@ export interface PlanTask {
 export interface PlanOptions {
 	tasks: PlanTask[];
 	id?: string;
-	/** Check commands by repo; the default declares `test: "true"` for `org/backend`. */
-	checks?: Record<string, Record<string, string>>;
+	/** Check commands by repo; the default declares `test: "true"` for `org/backend`. `test_paths` takes a list. */
+	checks?: Record<string, Record<string, string | string[]>>;
 }
 
 const FENCE = "`".repeat(3);

@@ -42,6 +42,11 @@ export interface RepoChecks {
 	test?: string;
 	/** Run once per locked test file by the "fails before" check; `{files}` and `{packages}` are replaced by that file and its package directory. */
 	test_files?: string;
+	/**
+	 * Globs, files or directories that count as this repo's test files, replacing the built-in patterns (`*.test.*`, `*.spec.*`, `*_test.*`,
+	 * `test_*.*`, `__tests__/`, `tests/`). The tests phase of a task may write, and the lock covers, only these.
+	 */
+	test_paths?: string[];
 	typecheck?: string;
 	lint?: string;
 }
@@ -191,7 +196,7 @@ function parseRisk(reader: Reader): Record<RiskField, RiskEntry> | undefined {
 	return valid && isCompleteRisk(risk) ? risk : undefined;
 }
 
-const CHECK_NAMES: readonly (keyof RepoChecks)[] = ["test", "test_files", "typecheck", "lint"];
+const CHECK_NAMES: readonly (keyof RepoChecks)[] = ["test", "test_files", "test_paths", "typecheck", "lint"];
 const isCheckName = (name: string): name is keyof RepoChecks => CHECK_NAMES.some(known => known === name);
 
 /** The `checks` mapping: per repo, command strings by check name. An empty (or null) command is a skipped check. */
@@ -211,6 +216,13 @@ function parseChecks(reader: Reader): Record<string, RepoChecks> | undefined {
 			if (!isCheckName(name)) {
 				reader.fail(`unknown check "${name}" for "${repo}"; use ${CHECK_NAMES.join(", ")}`);
 				valid = false;
+			} else if (name === "test_paths") {
+				if (isStringList(command) && command.length > 0 && command.every(pattern => pattern.trim() !== "")) {
+					commands.test_paths = command;
+				} else {
+					reader.fail(`check "test_paths" for "${repo}" must be a non-empty list of path patterns`);
+					valid = false;
+				}
 			} else if (command !== null && typeof command !== "string") {
 				reader.fail(`check "${name}" for "${repo}" must be a string`);
 				valid = false;

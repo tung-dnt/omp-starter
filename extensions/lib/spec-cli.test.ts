@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { UsageError, parseArgs, readWorkflowConfig, writeWorkflowConfig } from "./spec-cli";
+import { UsageError, parseArgs, readWorkflowConfig, resolveBun, writeWorkflowConfig } from "./spec-cli";
 import { CHECKS, PLAN_PATH, cleanScratch, commit, git, scratch, storyWorld } from "./spec-fixtures";
 import { readCheckNote } from "./spec-git";
 
@@ -39,6 +39,16 @@ describe("parseArgs", () => {
 		expect(() => parseArgs(["--bogus"], spec)).toThrow(UsageError);
 		expect(() => parseArgs(["--repo"], spec)).toThrow("--repo needs a value");
 		expect(() => parseArgs(["--tag"], spec)).toThrow("--tag needs a value");
+	});
+});
+
+describe("resolveBun", () => {
+	test("bun itself is used as it is; inside omp (execPath is the omp binary) bun comes from PATH; no bun is a clear error", () => {
+		const which = (name: string): string | null => (name === "bun" ? "/opt/bun/bin/bun" : null);
+		expect(resolveBun("/usr/local/bin/bun", which)).toBe("/usr/local/bin/bun");
+		expect(resolveBun("/tools/Bun.exe", which)).toBe("/tools/Bun.exe");
+		expect(resolveBun("/usr/local/bin/omp", which)).toBe("/opt/bun/bin/bun");
+		expect(() => resolveBun("/usr/local/bin/omp", () => null)).toThrow(/bun was not found on PATH.*\/usr\/local\/bin\/omp/);
 	});
 });
 

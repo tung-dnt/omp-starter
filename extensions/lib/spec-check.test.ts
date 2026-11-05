@@ -147,6 +147,21 @@ describe("checkCommit", () => {
 		expect(worktrees(repo)).toBe(1);
 	});
 
+	test("onNoteWritten runs at the moment of the write, before checkCommit returns, with the sha and the notes tip (N8)", async () => {
+		const { repo, work, options } = world();
+		const sha = work({ "src/a.ts": "export const a = 2;\n", "t/a.sh": "exit 0\n" });
+		const calls: Array<{ sha: string; tip: string; noteThere: boolean; tipNow: string }> = [];
+		const report = await checkCommit(repo, sha, {
+			...options,
+			onNoteWritten: (written, tip) => void calls.push({ sha: written, tip, noteThere: readCheckNote(repo, written) !== undefined, tipNow: git(repo, "rev-parse", "refs/notes/spec-checks") }),
+		});
+		expect(report.ok).toBe(true);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]).toMatchObject({ sha, noteThere: true });
+		expect(calls[0].tip).toBe(calls[0].tipNow);
+		expect(calls[0].tip).toBe(git(repo, "rev-parse", "refs/notes/spec-checks"));
+	});
+
 	test("a failing test gives a note with test: fail, and attempts count up over the task's commits", async () => {
 		const { repo, work, options } = world();
 		const bad = work({ "t/a.sh": "exit 1\n" }, "first try");

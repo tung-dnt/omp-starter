@@ -2,10 +2,12 @@
 //  - `workerGuard`: a `tool_call` guard that blocks `write`/`edit` outside the write scope or on locked tests, and `bash` git mutations;
 //  - `snapshotGit` / `compareSnapshot` and `scopeCheck`: the post-slot checks. The guard is best effort (bash can write files and
 //    run git in ways no text match catches), so the scheduler rejects a slot when either check reports anything.
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { git, gitOrThrow } from "./spec-git";
+import { gitCommonDir } from "./spec-cli";
+import { NO_HOOKS, git, gitOrThrow } from "./spec-git";
 import { inScope } from "./spec-guard";
 import { expandHome } from "./state";
 import { redact } from "./tooling/runtime";
@@ -17,6 +19,8 @@ export interface WorkerScope {
 	writeScope: readonly string[];
 	/** Locked test files, relative to `cwd`. */
 	lockedFiles: readonly string[];
+	/** When set, a write is allowed only to a file this accepts (repo-relative path): the tests phase writes test files only. */
+	only?: (path: string) => boolean;
 }
 
 /** Git subcommands a worker never runs; only the scheduler commits and moves refs. */
@@ -157,6 +161,7 @@ function writeBlock(scope: WorkerScope, target: string): string | undefined {
 	if (!inScope(inside, scope.writeScope)) {
 		return `worker-guard: ${inside} is outside this task's write scope (${scope.writeScope.join(", ") || "empty"}). Report need_shared_change if it must change.`;
 	}
+	if (scope.only !== undefined && !scope.only(inside)) return `worker-guard: ${inside} ${NOT_A_TEST_FILE}`;
 	return undefined;
 }
 
@@ -182,6 +187,10 @@ export function workerGuard(scope: WorkerScope): (pi: ExtensionAPI) => void {
 	};
 }
 
+/** Why the tests phase refuses a file: only test files may be written, so no source stub ends up locked as a "test". */
+export const NOT_A_TEST_FILE =
+	"is not a test file. This phase writes only test files: the repo's checks.test_paths from the plan, else *.test.*, *.spec.*, *_test.*, test_*.*, __tests__/ and tests/. Report need_shared_change if a helper outside them is needed.";
+
 /** What the scheduler records around a slot to see whether the worker moved anything in git. */
 export interface GitSnapshot {
 	/** The commit HEAD points at; empty on an unborn branch. */
@@ -190,21 +199,116 @@ export interface GitSnapshot {
 	headRef: string;
 	/** Every ref under `refs/` and the object it names. */
 	refs: Record<string, string>;
+	/** The target of every ref that is a symbolic ref (`refs/heads/x` → `refs/heads/y`); its `refs` value is the object it resolves to. */
+	symrefs: Record<string, string>;
 	/** `git config --local --list`, one `key=value` per line. */
 	config: string[];
+	/** Digests (mode and bytes) of every file under `<common-dir>/hooks` and `<common-dir>/info`, and of `<common-dir>/config`, keyed `hooks/<name>`, `info/<name>` and `config`. */
+	guarded: Record<string, string>;
+}
+
+/** A file under `<common-dir>/hooks` or `<common-dir>/info`, as it was read. */
+export interface GuardedFile {
+	/** Digest of the mode and the content. */
+	digest: string;
+	mode: number;
+	/** The target of a symlink. */
+	link?: string;
+	/** The bytes of a regular file. */
+	data?: Buffer;
+}
+
+/** The files git runs or reads on its own authority: hooks and `info/` (exclude rules, sparse checkout). Keyed by their path under the common dir. */
+export function readGuarded(repo: string): Map<string, GuardedFile> {
+	const common = gitCommonDir(repo);
+	const out = new Map<string, GuardedFile>();
+	const visit = (relative: string): void => {
+		const full = path.join(common, relative);
+		let stat: fs.Stats;
+		try {
+			stat = fs.lstatSync(full);
+		} catch {
+			return;
+		}
+		if (stat.isDirectory()) {
+			for (const entry of fs.readdirSync(full).sort()) visit(`${relative}/${entry}`);
+			return;
+		}
+		const mode = stat.mode & 0o7777;
+		const link = stat.isSymbolicLink() ? fs.readlinkSync(full) : undefined;
+		const data = link === undefined ? fs.readFileSync(full) : undefined;
+		const hasher = new Bun.CryptoHasher("sha256");
+		hasher.update(`${mode.toString(8)}\0`);
+		hasher.update(link === undefined ? (data ?? "") : `link:${link}`);
+		out.set(relative, { digest: hasher.digest("hex"), mode, ...(link === undefined ? {} : { link }), ...(data === undefined ? {} : { data }) });
+	};
+	visit("hooks");
+	visit("info");
+	visit("config");
+	return out;
+}
+
+/**
+ * Puts `hooks/`, `info/` and `config` back as `baseline` read them, byte for byte: whatever stands at a path (a directory, a symlink, a
+ * file where a folder was) is removed without following it, then the baseline file is written. Every file is tried even when one fails,
+ * and the result is read back: a restore that did not take throws, so a missing `pre-push` is never left silently.
+ */
+export function restoreGuarded(repo: string, baseline: ReadonlyMap<string, GuardedFile>): void {
+	const common = gitCommonDir(repo);
+	const errors: unknown[] = [];
+	const attempt = (fn: () => void): void => {
+		try {
+			fn();
+		} catch (error) {
+			errors.push(error);
+		}
+	};
+	const remove = (full: string): void => fs.rmSync(full, { recursive: true, force: true });
+	for (const relative of readGuarded(repo).keys()) if (!baseline.has(relative)) attempt(() => remove(path.join(common, relative)));
+	for (const [relative, file] of baseline) {
+		attempt(() => {
+			const full = path.join(common, relative);
+			// A file where a folder must be (`hooks` replaced by a file) blocks the write: clear every ancestor that is not a folder.
+			const parts = relative.split("/").slice(0, -1);
+			for (let i = 1; i <= parts.length; i++) {
+				const ancestor = path.join(common, ...parts.slice(0, i));
+				const stat = fs.lstatSync(ancestor, { throwIfNoEntry: false });
+				if (stat !== undefined && !stat.isDirectory()) remove(ancestor);
+			}
+			fs.mkdirSync(path.dirname(full), { recursive: true });
+			if (readGuarded(repo).get(relative)?.digest === file.digest) return;
+			remove(full);
+			if (file.link !== undefined) fs.symlinkSync(file.link, full);
+			else {
+				fs.writeFileSync(full, file.data ?? "");
+				fs.chmodSync(full, file.mode);
+			}
+		});
+	}
+	if (errors.length === 0) {
+		const now = readGuarded(repo);
+		const wrong = [...new Set([...baseline.keys(), ...now.keys()])].filter(relative => baseline.get(relative)?.digest !== now.get(relative)?.digest);
+		if (wrong.length > 0) throw new Error(`the git dir could not be restored: ${wrong.join(", ")} still differ from the baseline`);
+	}
+	if (errors.length > 0) throw errors[0];
 }
 
 export function snapshotGit(repo: string): GitSnapshot {
 	const refs: Record<string, string> = {};
-	for (const line of gitOrThrow(repo, ["for-each-ref", "--format=%(objectname) %(refname)"]).split("\n")) {
-		const space = line.indexOf(" ");
-		if (space > 0) refs[line.slice(space + 1)] = line.slice(0, space);
+	const symrefs: Record<string, string> = {};
+	for (const line of gitOrThrow(repo, ["for-each-ref", "--format=%(objectname) %(symref) %(refname)"]).split("\n")) {
+		const [sha, symref, ref] = line.split(" ");
+		if (!sha || !ref) continue;
+		refs[ref] = sha;
+		if (symref) symrefs[ref] = symref;
 	}
 	return {
 		head: git(repo, ["rev-parse", "--verify", "--quiet", "HEAD"]).stdout.trim(),
 		headRef: git(repo, ["symbolic-ref", "--quiet", "HEAD"]).stdout.trim(),
 		refs,
+		symrefs,
 		config: gitOrThrow(repo, ["config", "--local", "--list"]).split("\n").filter(Boolean),
+		guarded: Object.fromEntries([...readGuarded(repo)].map(([file, { digest }]) => [file, digest])),
 	};
 }
 
@@ -217,6 +321,14 @@ export function compareSnapshot(before: GitSnapshot, after: GitSnapshot): string
 	for (const ref of [...new Set([...Object.keys(before.refs), ...Object.keys(after.refs)])].sort()) {
 		const was = before.refs[ref];
 		const now = after.refs[ref];
+		const wasLink = before.symrefs[ref];
+		const nowLink = after.symrefs[ref];
+		if (wasLink !== nowLink) {
+			if (wasLink === undefined) changes.push(`ref ${ref} became a symref to ${nowLink}`);
+			else if (nowLink === undefined) changes.push(`ref ${ref} is no longer a symref (was ${wasLink})`);
+			else changes.push(`ref ${ref} now points at ${nowLink} (was ${wasLink})`);
+			continue;
+		}
 		if (was === now) continue;
 		if (was === undefined) changes.push(`ref ${ref} created at ${short(now)}`);
 		else if (now === undefined) changes.push(`ref ${ref} deleted (was ${short(was)})`);
@@ -224,13 +336,19 @@ export function compareSnapshot(before: GitSnapshot, after: GitSnapshot): string
 	}
 	for (const line of before.config) if (!after.config.includes(line)) changes.push(`config removed: ${redact(line)}`);
 	for (const line of after.config) if (!before.config.includes(line)) changes.push(`config added: ${redact(line)}`);
+	for (const file of [...new Set([...Object.keys(before.guarded), ...Object.keys(after.guarded)])].sort()) {
+		const was = before.guarded[file];
+		const now = after.guarded[file];
+		if (was === now) continue;
+		changes.push(was === undefined ? `${file} was created in the git dir` : now === undefined ? `${file} was deleted from the git dir` : `${file} was changed in the git dir`);
+	}
 	return changes;
 }
 
 export interface ScopeFinding {
 	/** The path as `git status` lists it, relative to the worktree root. */
 	path: string;
-	reason: "outside-scope" | "locked";
+	reason: "outside-scope" | "locked" | "not-test";
 }
 
 /**
@@ -238,13 +356,14 @@ export interface ScopeFinding {
  * lie outside `writeScope` or touch a locked file. Catches what the tool guard cannot, such as a file written by a bash redirect.
  * Ignored files are not listed by git and not checked.
  */
-export function scopeCheck(worktree: string, writeScope: readonly string[], lockedFiles: readonly string[]): ScopeFinding[] {
+export function scopeCheck(worktree: string, writeScope: readonly string[], lockedFiles: readonly string[], only?: (path: string) => boolean): ScopeFinding[] {
 	const findings: ScopeFinding[] = [];
-	for (const entry of gitOrThrow(worktree, ["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]).split("\0")) {
+	for (const entry of gitOrThrow(worktree, [...NO_HOOKS, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]).split("\0")) {
 		if (entry.length < 4) continue;
 		const changed = entry.slice(3);
 		if (lockedFiles.includes(changed)) findings.push({ path: changed, reason: "locked" });
 		else if (!inScope(changed, writeScope)) findings.push({ path: changed, reason: "outside-scope" });
+		else if (only !== undefined && !only(changed)) findings.push({ path: changed, reason: "not-test" });
 	}
 	return findings;
 }

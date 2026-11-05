@@ -61,6 +61,21 @@ export interface WorkflowConfig {
 
 const CONFIG_FILE = "spec-workflow.json";
 
+/** The line that marks the `pre-push` hook as the one `spec-hook install` wrote; a hook without it is foreign (or forged). */
+export const MARKER = "# managed-by: omp-starter spec-hook";
+
+/**
+ * The bun executable that runs the spec scripts and the pre-push hook. Inside omp `process.execPath` is the `omp` binary, which
+ * does not take a script path and rejects the hook's flags, so it is used only when it is bun itself; otherwise bun comes from PATH.
+ * Throws when neither is available.
+ */
+export function resolveBun(execPath: string = process.execPath, which: (name: string) => string | null = name => Bun.which(name)): string {
+	if (path.basename(execPath).toLowerCase().replace(/\.exe$/, "") === "bun") return execPath;
+	const found = which("bun");
+	if (found === null) throw new Error(`bun was not found on PATH (the running executable is ${execPath}, not bun); the spec scripts and the pre-push hook need bun`);
+	return path.resolve(found);
+}
+
 /** The git dir shared by every worktree of the clone (`.git`), as an absolute path. Throws when `repo` is not a git repo. */
 export function gitCommonDir(repo: string): string {
 	return path.resolve(repo, gitOrThrow(repo, ["rev-parse", "--git-common-dir"]).trim());

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { CheckNote, TaskCommit } from "./spec-git";
 import type { Plan, RiskEntry, RiskField, TaskBlock } from "./spec-plan";
 import { RISK_FIELDS } from "./spec-risk";
-import { type StoryStatus, type TaskState, computeStatus, formatStatusLine } from "./spec-status";
+import { type StoryStatus, type TaskState, computeStatus, formatStatusLine, renderStatus } from "./spec-status";
 
 const REPO = "org/backend";
 
@@ -204,6 +204,71 @@ describe("computeStatus: story state", () => {
 
 	test("a merged PR does not finish a story with unfinished tasks", () => {
 		expect(statusOf([task("T1"), task("T2")], [doneAll[0]], notes, new Map([[REPO, true]])).state).toBe("in-progress");
+	});
+});
+
+describe("computeStatus: task-key notes and plan revisions", () => {
+	/** A blocked note as the scheduler writes it before a task has a commit. */
+	const keyed = (over: Partial<CheckNote> = {}): CheckNote => note({ checks: {}, attempts: 2, blocked: true, reason: "spec_wrong", plan_rev: "rev2", ...over });
+	const statusWith = (tasks: TaskBlock[], commits: TaskCommit[], options: Parameters<typeof computeStatus>[4], notes: Record<string, CheckNote> = {}): StoryStatus =>
+		computeStatus(plan(tasks), new Map([[REPO, commits]]), (_repo, sha) => notes[sha], undefined, options);
+
+	test("a task-key note blocks a task with no commit, and its dependants wait", () => {
+		const status = statusWith([task("T1"), task("T2", ["T1"])], [], { taskNote: (_repo, id) => (id === "T1" ? keyed() : undefined) });
+		expect(status.tasks).toEqual([{ id: "T1", state: "blocked", reason: "spec_wrong", attempts: 2 }, { id: "T2", state: "waiting" }]);
+		expect(status.state).toBe("in-progress");
+	});
+
+	test("a note from another plan revision is ignored once the status is pinned to a revision", () => {
+		const taskNote = () => keyed({ plan_rev: "rev1" });
+		expect(states(statusWith([task("T1")], [], { taskNote, planRev: "rev2" }))).toEqual(["ready"]);
+		expect(states(statusWith([task("T1")], [], { taskNote, planRev: "rev1" }))).toEqual(["blocked"]);
+		// Without a revision every blocked note counts, which is how the status command has always read commit notes.
+		expect(states(statusWith([task("T1")], [], { taskNote }))).toEqual(["blocked"]);
+	});
+
+	test("a stale note on a commit is ignored too, so the task reads from its checks again", () => {
+		const commits = [commit("a1", ["T1"], ["T1"])];
+		const blocked = note({ blocked: true, reason: "cap", plan_rev: "rev1", checks: { tests: "fail", guard: "pass" }, attempts: 3 });
+		expect(statusWith([task("T1")], commits, { planRev: "rev1" }, { a1: blocked }).tasks).toEqual([{ id: "T1", state: "blocked", lastSha: "a1", reason: "cap", attempts: 3 }]);
+		expect(statusWith([task("T1")], commits, { planRev: "rev2" }, { a1: blocked }).tasks).toEqual([
+			{ id: "T1", state: "failing", lastSha: "a1", reason: "tests", attempts: 3 },
+		]);
+	});
+
+	test("a fresh task-key note outranks commits and their notes, and keeps the last sha", () => {
+		const commits = [commit("a1", ["T1"], ["T1"])];
+		const status = statusWith([task("T1")], commits, { taskNote: () => keyed({ reason: "conflict", attempts: 1 }), planRev: "rev2" }, { a1: note() });
+		expect(status.tasks).toEqual([{ id: "T1", state: "blocked", lastSha: "a1", reason: "conflict", attempts: 1 }]);
+	});
+
+	test("a note that is not blocked does not block, and a missing reason is left out", () => {
+		expect(states(statusWith([task("T1")], [], { taskNote: () => keyed({ blocked: false }) }))).toEqual(["ready"]);
+		expect(statusWith([task("T1")], [], { taskNote: () => keyed({ reason: "" }) }).tasks).toEqual([{ id: "T1", state: "blocked", attempts: 2 }]);
+	});
+
+	test("the task-key reader is asked once per task, with the task's own repo", () => {
+		const asked: string[] = [];
+		const tasks = [task("T1"), task("T2", [], "org/frontend")];
+		computeStatus(plan(tasks), new Map(), () => undefined, undefined, { taskNote: (repo, id) => void asked.push(`${repo}:${id}`) });
+		expect(asked).toEqual(["org/backend:T1", "org/frontend:T2"]);
+	});
+});
+
+describe("renderStatus", () => {
+	test("the status line, one aligned row per task with its short sha, attempts and reason, then the story state", () => {
+		const status: StoryStatus = {
+			id: "S-1",
+			state: "in-progress",
+			tasks: [
+				{ id: "T1", state: "done", lastSha: "0123456789abcdef", attempts: 2 },
+				{ id: "T22", state: "blocked", reason: "spec_wrong", attempts: 1 },
+				{ id: "T3", state: "ready" },
+			],
+		};
+		expect(renderStatus(status)).toBe(
+			["S-1 ▸ 1/3 done · 1 ready · 1 blocked (T22: spec_wrong)", "  T1   done     0123456  attempts 2", "  T22  blocked  attempts 1  spec_wrong", "  T3   ready", "story: in-progress"].join("\n"),
+		);
 	});
 });
 
