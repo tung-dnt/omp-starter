@@ -1,0 +1,36 @@
+id: S-gate-queue
+runner: scripted
+proves:
+  - R-51
+  - R-97
+description: "Two tasks stop at the same time: the two gates reach the RPC client one at a time (the second request arrives only after the first answer) and each is answered."
+runs:
+  - name: run
+    plan: t3-sum.md
+    gates:
+      - title: "T3-SUM-T01: need_clarification"
+        choose: ^Stop
+        delayMs: 1200
+      - title: "T3-SUM-T02: spec_wrong"
+        choose: ^Stop
+        delayMs: 1200
+    expect:
+      - gatesSerial:
+          min: 2
+      - gate:
+          cause: need_clarification
+          task: T3-SUM-T01
+          choice: stop
+      - gate:
+          cause: spec_wrong
+          task: T3-SUM-T02
+          choice: stop
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: need_clarification
+      - status:
+          task: T3-SUM-T02
+          state: blocked
+          reason: spec_wrong
+      - outcome: incomplete

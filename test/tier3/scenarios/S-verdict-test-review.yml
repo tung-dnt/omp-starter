@@ -1,0 +1,92 @@
+id: S-verdict-test-review
+runner: scripted
+proves:
+  - R-09
+  - R-11
+description: test_review pass locks; fix reruns the author once with the findings; a second fix opens the cap gate; spec_wrong opens a gate.
+runs:
+  - name: fix-once
+    plan: t3-single-normal.md
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: test_review
+          attempt: 1
+          verdict: fix
+      - session:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          promptHas: "scripted: the assert is too weak"
+      - session:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          promptHas: "not covered by any test: criterion: sum adds"
+      - slot:
+          task: T3-SUM-T01
+          slot: test_review
+          attempt: 2
+          verdict: pass
+      - commitShape:
+          - work
+          - work
+          - lock
+          - work
+      - spec-status-done
+      - run-outcome-complete
+  - name: fix-twice
+    plan: t3-single-normal.md
+    fresh: true
+    gates:
+      - title: "T3-SUM-T01: the test review asked for fixes twice"
+        choose: ^Stop
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: test_review
+          attempt: 2
+          verdict: fix
+      - gate:
+          cause: cap
+          task: T3-SUM-T01
+          choice: stop
+      - gateOptions:
+          title: asked for fixes twice
+          options:
+            - ^Stop this task$
+            - ^Retry once more$
+          only: true
+      - commitTrailer: Task-Lock
+        absent: true
+      - noSlot:
+          task: T3-SUM-T01
+          slot: implementer
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: cap
+      - outcome: incomplete
+  - name: spec_wrong
+    plan: t3-single-normal.md
+    fresh: true
+    gates:
+      - title: "T3-SUM-T01: spec_wrong"
+        choose: ^Stop
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: test_review
+          verdict: spec_wrong
+      - gate:
+          cause: spec_wrong
+          task: T3-SUM-T01
+          choice: stop
+      - notify: "scripted: the acceptance criteria are impossible"
+      - commitTrailer: Task-Lock
+        absent: true
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: spec_wrong
+      - outcome: incomplete

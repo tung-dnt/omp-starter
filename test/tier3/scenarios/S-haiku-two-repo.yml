@@ -1,0 +1,23 @@
+id: S-haiku-two-repo
+runner: haiku
+proves:
+  - R-113
+description: "A two-repo fixture: a run completes and each repo's ticket branch receives its commits, with a per-repo hook and lock."
+repos:
+  - fixture
+  - other
+runs:
+  - name: run
+    plan: t3-two-repo.md
+    gates:
+      - title: the story review found problems
+        choose: ^Accept
+    expect:
+      - run-outcome-complete
+      - spec-status-done
+      - trailers
+      - pre-push-hook
+      - ticket: advanced
+      - lockFile: absent
+      - event: integrated
+        count: 2

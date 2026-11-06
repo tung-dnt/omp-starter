@@ -1,0 +1,48 @@
+id: S-haiku-failing-check
+runner: haiku
+proves:
+  - R-04
+  - R-94
+  - R-96
+  - R-97
+  - R-102
+  - R-109
+description: "Real slots with a test command that always fails: the output goes back to the implementer, 3 attempts reach the cap, a blocked note and the cap gate; the gate is answered retry once (exactly one more attempt), then stop; the failure notifies; every gate answer is logged."
+runs:
+  - name: run
+    plan: t3-failing.md
+    gates:
+      - title: "^T3-SUM-T01: blocked by tooling"
+        choose: ^Retry once more
+        times: 2
+      - title: "^T3-SUM-T01: the (implementation|tests) did not pass"
+        choose: ^Retry once more
+        times: 1
+      - title: "^T3-SUM-T01: the (implementation|tests) did not pass"
+        choose: ^Stop
+    expect:
+      - order:
+          - gate:
+              cause: cap
+              task: T3-SUM-T01
+              choice: retry
+          - gate:
+              cause: cap
+              task: T3-SUM-T01
+              choice: stop
+      - gateOptions:
+          title: did not pass
+          options:
+            - ^Stop this task$
+            - ^Retry once more$
+          only: true
+      - event: check
+        task: T3-SUM-T01
+        detail: ^fail
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: cap
+      - ticket: untouched
+      - notify: "outcome: incomplete"
+      - outcome: incomplete

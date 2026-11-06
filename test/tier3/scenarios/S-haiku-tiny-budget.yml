@@ -1,0 +1,45 @@
+id: S-haiku-tiny-budget
+runner: haiku
+proves:
+  - R-67
+  - R-68
+  - R-96
+  - R-97
+description: "A tiny --budget with real slots: in-flight slots finish, the budget gate opens; stop ends the run without blocked notes; in a second run a raise by $50 continues to the end."
+runs:
+  - name: stop
+    plan: t3-sum.md
+    args: "--budget 0.001"
+    gates:
+      - title: story budget is reached
+        choose: ^Stop
+    expect:
+      - gate:
+          cause: budget
+          choice: stop
+      - gateOptions:
+          title: story budget is reached
+          options:
+            - ^Stop the run$
+            - ^Raise the limit by \$50$
+          only: true
+      - event: budget
+      - event: task-blocked
+        absent: true
+      - outcome: stopped
+  - name: raise
+    plan: t3-sum.md
+    fresh: true
+    args: "--budget 0.001"
+    gates:
+      - title: story budget is reached
+        choose: ^Raise the limit
+        times: 1
+      - title: the story review found problems
+        choose: ^Accept
+    expect:
+      - gate:
+          cause: budget
+          choice: raise
+      - spec-status-done
+      - run-outcome-complete

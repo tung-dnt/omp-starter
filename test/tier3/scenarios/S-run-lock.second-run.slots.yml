@@ -1,0 +1,12 @@
+version: 1
+slots:
+  - match:
+      task: T3-SUM-T01
+      slot: implementer
+      attempt: 1
+    steps:
+      - sleep: 300
+      - yield:
+          verdict: need_clarification
+          checks_run: []
+          notes: parked here

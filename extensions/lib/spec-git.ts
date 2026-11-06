@@ -8,6 +8,8 @@ export interface TaskCommit {
 	tasks: string[];
 	/** Values of every `Task-Lock:` trailer, in order. */
 	locks: string[];
+	/** Values of every `Accept-Gate:` trailer, in order: the gates where a human accepted a patient-data finding for the task. */
+	accepts?: string[];
 	planRev?: string;
 }
 
@@ -30,6 +32,7 @@ const LOG_FORMAT = [
 	"%(trailers:key=Task,valueonly,separator=%x2c)",
 	"%(trailers:key=Task-Lock,valueonly,separator=%x2c)",
 	"%(trailers:key=Plan-Rev,valueonly)",
+	"%(trailers:key=Accept-Gate,valueonly,separator=%x2c)",
 ].join("%x1f") + "%x1e";
 
 export interface GitResult {
@@ -106,15 +109,15 @@ export const splitValues = (field: string): string[] =>
 		.map(value => value.trim())
 		.filter(Boolean);
 
-/** Commits of `<base>..<branch>`, oldest first, with their `Task`, `Task-Lock` and `Plan-Rev` trailers. Throws when git fails (for example an unknown ref). */
+/** Commits of `<base>..<branch>`, oldest first, with their `Task`, `Task-Lock`, `Plan-Rev` and `Accept-Gate` trailers. Throws when git fails (for example an unknown ref). */
 export function readTaskCommits(repoPath: string, base: string, branch: string): TaskCommit[] {
 	const out = gitOrThrow(repoPath, ["log", "--reverse", `--format=${LOG_FORMAT}`, `${base}..${branch}`]);
 	const commits: TaskCommit[] = [];
 	for (const record of out.split(RECORD_SEP)) {
-		const [sha, tasks = "", locks = "", planRev = ""] = record.replace(/^\n/, "").split(FIELD_SEP);
+		const [sha, tasks = "", locks = "", planRev = "", accepts = ""] = record.replace(/^\n/, "").split(FIELD_SEP);
 		if (!sha) continue;
 		const rev = planRev.split("\n").map(line => line.trim()).find(Boolean);
-		commits.push({ sha, tasks: splitValues(tasks), locks: splitValues(locks), ...(rev === undefined ? {} : { planRev: rev }) });
+		commits.push({ sha, tasks: splitValues(tasks), locks: splitValues(locks), ...(splitValues(accepts).length > 0 ? { accepts: splitValues(accepts) } : {}), ...(rev === undefined ? {} : { planRev: rev }) });
 	}
 	return commits;
 }

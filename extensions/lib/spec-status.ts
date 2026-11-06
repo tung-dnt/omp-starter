@@ -1,6 +1,6 @@
 // Task and story status derived from git alone: the plan, commit trailers and check notes.
 // Pure: no I/O (the note readers are injected), and the output follows plan task order.
-import type { Plan } from "./spec-plan";
+import type { Plan, TaskBlock } from "./spec-plan";
 import type { CheckNote, TaskCommit } from "./spec-git";
 
 export type TaskState = "blocked" | "done" | "failing" | "checking" | "awaiting-lock" | "ready" | "waiting";
@@ -93,7 +93,8 @@ export function computeStatus(
 		if (isBlocking(latest)) {
 			settled.set(task.id, { ...base, state: "blocked", ...(latest.reason ? { reason: latest.reason } : {}) });
 		} else if (lastNote && failed.length === 0 && lastNote.checks.guard === "pass") {
-			settled.set(task.id, { ...base, state: "done" });
+			const accepted = commits.flatMap(commit => commit.accepts ?? []);
+			settled.set(task.id, { ...base, state: "done", ...(accepted.length === 0 ? {} : { reason: `patient_data accepted (${accepted.join(", ")})` }) });
 		} else if (failed.length > 0) {
 			settled.set(task.id, { ...base, state: "failing", reason: failed.join(", ") });
 		} else {
@@ -102,10 +103,16 @@ export function computeStatus(
 	}
 
 	const isDone = (id: string): boolean => settled.get(id)?.state === "done";
-	const tasks = plan.tasks.map(
-		(task): TaskStatus =>
-			settled.get(task.id) ?? { id: task.id, state: task.depends_on.every(isDone) ? "ready" : "waiting" },
-	);
+	// A task with no commit and no blocked note: ready once its dependencies are done.
+	const byDependencies = (task: TaskBlock): TaskStatus => settled.get(task.id) ?? { id: task.id, state: task.depends_on.every(isDone) ? "ready" : "waiting" };
+	// The foundation barrier (brief Phase 6.1): while any foundation task of the plan is not done, no other task starts, whatever its
+	// `depends_on` and repo. A task that already has commits or a blocked note keeps its derived state.
+	const pendingFoundation = plan.tasks.filter(task => task.foundation).map(byDependencies).filter(status => status.state !== "done");
+	const barrier = `waits for foundation ${pendingFoundation.map(status => `${status.id} (${status.state})`).join(", ")}`;
+	const tasks = plan.tasks.map((task): TaskStatus => {
+		if (task.foundation || settled.has(task.id) || pendingFoundation.length === 0) return byDependencies(task);
+		return { id: task.id, state: "waiting", reason: barrier };
+	});
 
 	const allDone = tasks.every(task => task.state === "done");
 	const repos = new Set(plan.tasks.map(task => task.repo));

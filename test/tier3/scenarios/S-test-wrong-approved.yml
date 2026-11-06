@@ -1,0 +1,41 @@
+id: S-test-wrong-approved
+runner: scripted
+proves:
+  - R-09
+  - R-14
+  - R-96
+description: "implementer test_wrong with the gate approved over RPC: a Task-Unlock commit with Unlock-Gate equal to the gate id, rewritten tests, relock, then the implementation."
+runs:
+  - name: run
+    plan: t3-single-normal.md
+    gates:
+      - title: "T3-SUM-T01: the implementer says a locked test is wrong"
+        choose: ^Approve the unlock
+    expect:
+      - gate:
+          cause: test_wrong
+          task: T3-SUM-T01
+          choice: unlock
+      - gateOptions:
+          title: locked test is wrong
+          options:
+            - ^Approve the unlock
+            - ^Reject
+            - ^Stop this task$
+          only: true
+      - unlock-trailers
+      - commitShape:
+          - work
+          - lock
+          - unlock
+          - work
+          - lock
+          - work
+      - session:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          promptHas: "a human approved rewriting them: scripted: the locked test asserts the wrong thing"
+      - spec-guard-strict
+      - spec-status-done
+      - run-outcome-complete

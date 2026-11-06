@@ -1,0 +1,55 @@
+id: S-conflict-gate
+runner: scripted
+proves:
+  - R-44
+  - R-96
+description: "While the first task's checks run, a human commit lands on the ticket branch and changes the same lines: the replay conflicts, the conflict gate arrives over RPC naming the kept ref and the cherry-pick command; the ticket branch keeps the human's commit and nothing else; the task is blocked with reason conflict and its dependant never starts."
+runs:
+  - name: run
+    plan: t3-hold.md
+    actions:
+      - "on":
+          start: true
+        do: hold-on
+        name: "1"
+      - "on":
+          marker: checks
+          min: 1
+        do: ticket-commit
+        file: src/sum.ts
+        content: "export function sum(a: number, b: number): number {\n\treturn a * b;\n}\n"
+        tag: a
+      - "on":
+          start: true
+        do: hold-off
+        name: "1"
+    gates:
+      - title: "T3-SUM-T01: its commits conflict with the ticket branch"
+        choose: ^Stop
+    expect:
+      - gate:
+          cause: conflict
+          task: T3-SUM-T01
+          choice: stop
+      - gateOptions:
+          title: commits conflict
+          options:
+            - ^Stop this task \(resolve by hand from refs/spec-conflict/T3-SUM/T3-SUM-T01\)$
+          only: true
+      - notify: kept as refs/spec-conflict/T3-SUM/T3-SUM-T01
+      - notify: git cherry-pick \w+\.\.refs/spec-conflict/T3-SUM/T3-SUM-T01
+      - keptRef: T3-SUM-T01
+      - ticket: injected
+      - event: integrated
+        absent: true
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: conflict
+      - status:
+          task: T3-SUM-T02
+          state: waiting
+      - event: task-start
+        task: T3-SUM-T02
+        absent: true
+      - outcome: incomplete

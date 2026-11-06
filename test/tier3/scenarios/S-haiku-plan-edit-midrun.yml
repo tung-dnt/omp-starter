@@ -1,0 +1,30 @@
+id: S-haiku-plan-edit-midrun
+runner: haiku
+proves:
+  - R-65
+description: "The driver edits the vault plan without committing while a real slot is in flight: it counts as a change; answering continue keeps the run's own Plan-Rev for every commit."
+runs:
+  - name: run
+    plan: t3-sum.md
+    args: "--concurrency 1"
+    actions:
+      - "on":
+          event: task-start
+          task: T3-SUM-T01
+        do: plan-edit
+        plan: t3-sum.v2.md
+        delayMs: 2000
+    gates:
+      - title: The plan changed in the vault
+        choose: ^Keep running
+      - title: the story review found problems
+        choose: ^Accept
+    expect:
+      - event: plan-changed
+        detail: uncommitted edits
+      - gate:
+          cause: plan-changed
+          choice: continue
+      - trailers
+      - spec-status-done
+      - run-outcome-complete

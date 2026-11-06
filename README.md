@@ -250,6 +250,7 @@ bun run validate-plan path/to/plan.md --repo path/to/checkout --json            
 | `duplicate-id`, `missing-dep`, `cycle` | Two tasks share an id, `depends_on` names an unknown task, or the dependencies loop. |
 | `owns-overlap` | Two tasks of the same `repo` with no dependency path between them own the same file or create paths where one prefix contains the other. The same path in two different repos never overlaps. |
 | `shared-path` | A task that is not `foundation` owns or creates something inside `shared_paths`; the globs are matched against the files of the task's own repo. |
+| `foundation-order` | A `foundation` task depends, directly or through other tasks, on a task that is not `foundation`: no other task starts before every foundation task is `done`, so the two would wait for each other. |
 | `risk-reason`, `acceptance-empty` | A `yes` risk has no reason, or `acceptance` is empty. |
 | `lld-missing` | `lld_required` is true and there is neither `lld` nor a `lld_skip_reason`. |
 | `router-mismatch`, `required-tests` | `lld_required` or `security_review` differs from what the risks require, or an implied test is not in `required_tests`. |
@@ -283,8 +284,10 @@ A task that stopped before its first commit has no commit to carry a note; its b
 | `failing` | The task's last commit has a note with a `fail`. |
 | `checking` | The task has a `Task-Lock` commit and its last commit has no passing note yet. |
 | `awaiting-lock` | The task has commits but no `Task-Lock` commit. |
-| `ready` | No commits, and every `depends_on` task is `done`. |
-| `waiting` | No commits, and some dependency is not `done`. |
+| `ready` | No commits, and every `depends_on` task is `done` (and, for a task that is not `foundation`, every `foundation` task of the plan is `done`). |
+| `waiting` | No commits, and some dependency is not `done`, or, for a task that is not `foundation`, some `foundation` task of the plan is not: `reason` reads `waits for foundation T01 (blocked), T02 (ready)`. |
+
+**Foundation first.** A task with `foundation: true` runs before the rest: while any foundation task of the plan, in any repo, is not `done`, every task that is not `foundation` is `waiting`, whatever its `depends_on`. Foundation tasks obey their own `depends_on` and `--concurrency`; the rest start when the last one is `done`. A task that already has commits or a blocked note keeps its derived state. A done task that carries an accepted patient-data finding shows `patient_data accepted (<gate>)` as its reason.
 
 The story is `in-progress` until every task is `done`, then `tasks-done`. With `--pr` it becomes `done` once `gh pr list --head <branch> --state merged` lists a PR in every task repo; without `--pr` there is no network call, and a missing or unauthenticated `gh` leaves `tasks-done` with a warning. Exit codes: 0 when the status is computed (whatever the states), 2 on a usage or IO error or an invalid plan.
 
@@ -401,11 +404,11 @@ Verify: `bun test extensions/lib/spec-guard.test.ts extensions/lib/spec-diff.tes
 /spec-status     # the same status as the `spec_status` tool and `bun run spec-status`, without a run
 ```
 
-`<plan>` is the plan's path in the vault repo, or its file path under the vault work tree. Options: `--repo <path>` (repeatable, default: the current folder; each clone serves the tasks whose `repo` equals its `origin` `org/name`), `--branch <ticket>` (default: the plan `id`), `--base <ref>` (default: `origin/HEAD`, else `main`), `--concurrency <n>` (default 2; `1` is the fallback if parallel sessions misbehave), `--budget <usd>` (default 100), `--vault-git-dir <dir>` (default `~/.vault-git`).
+`<plan>` is the plan's path in the vault repo, or its file path under the vault work tree. Options: `--repo <path>` (repeatable, default: the current folder; each clone serves the tasks whose `repo` equals its `origin` `org/name`), `--branch <ticket>` (default: the plan `id`), `--base <ref>` (default: `origin/HEAD`, else `main`), `--concurrency <n>` (default 2; `1` is the fallback if parallel sessions misbehave), `--budget <usd>` (default 100), `--slot-timeout <seconds>` (the wall timeout of one slot, default 1200), `--max-context <tokens>` (the context ceiling of one slot, default 300000), `--vault-git-dir <dir>` (default `~/.vault-git`).
 
 **Preconditions.** Each failure opens a gate or ends the run; nothing runs. The run lock of every repo is taken first (see **One run per ticket and clone**). The plan is committed in the vault (the work-tree file equals `HEAD:<path>`; `Plan-Rev` is the last vault commit that touched the plan, so other `Specs/` commits never look like a plan change). `validate-plan` passes against each clone's files, and the plan declares `checks.test_files` for each repo (the fails-before check needs it). Each clone has no uncommitted change to a tracked file and no cherry-pick, merge or rebase in progress. The ticket branch exists (a gate offers to create it from the base, without checking it out) and the clone-local `pre-push` hook is installed for this plan (a gate offers to install it; a foreign hook refuses, see `--chain` above). The agent definitions of every slot (from agent-skills) must be found in the omp-starter folder, or the command does not start.
 
-**Per task** (state is derived from git before each start, so a rerun resumes; a task starts when its state is `ready`, with at most `--concurrency` at once; a `blocked` task stops its dependants):
+**Per task** (state is derived from git before each start, so a rerun resumes; a task starts when its state is `ready`, with at most `--concurrency` at once; a `blocked` task stops its dependants; no task that is not `foundation` starts, or gets a worktree, until every foundation task of the plan is `done`, so a blocked foundation task stops the whole run):
 
 | Step | Who | Does | Failure |
 |---|---|---|---|
@@ -415,7 +418,7 @@ Verify: `bun test extensions/lib/spec-guard.test.ts extensions/lib/spec-diff.tes
 | 4 | `test_review` (normal only), then code | On `pass` the lock commit (`Task-Lock` and `Locked:`); small tasks are locked right after step 3 | `fix`: the test author reruns once; a second `fix` opens a gate |
 | 5 | `implementer` | Scope, snapshot and locked-file checks, then the commit | as step 2 |
 | 6 | code | `checkCommit` (writes the check note) | `failing`: the implementer reruns with the output, up to 3 attempts, then a `blocked` note and a gate |
-| 7 | `code_review` (any technical risk `yes`), `security_review` (`security_review: true`) | read-only slots over the task's diff | `fix`: the implementer reruns with the findings (counts toward the cap); `spec_wrong`: gate |
+| 7 | `code_review` (any technical risk `yes`), `security_review` (`security_review: true`) | read-only slots over the task's diff | `fix`: the implementer reruns with the findings (counts toward the cap); `spec_wrong`: gate; a retried review never lands the task unreviewed: the implementer and the review run again. A `patient_data` finding of the security review opens its gate first (see **Gates**) |
 | 8 | code | One task at a time: replay the task's commits on the current ticket tip in the task's worktree (cherry-pick); when the tip had moved, run the checks again on the replayed commit; run the guard on the new range, write the note of that check on the new tip, move the ticket branch by fast-forward, remove the worktree and branch | conflict (aborted): the commits are kept under `refs/spec-conflict/<ticket>/<task>` and a gate opens, the ticket branch is untouched. Checks fail on the replayed tip: the implementer reruns on the replayed commits and the failure counts toward the cap. Guard failure: gate `blocked` |
 
 At the end of a story that is fully `done`, one `code_review` per repo reads the whole ticket diff (`<base>..<ticket>`); its findings open a gate. Nothing is ever pushed; pushing stays a human act that the hook checks.
@@ -425,7 +428,7 @@ At the end of a story that is fully `done`, one `code_review` per repo reads the
 | Slot | Verdicts |
 |---|---|
 | `test_author` | `pass`, `spec_wrong`, `need_clarification`, `blocked` |
-| `test_review`, `code_review`, `security_review` | `pass`, `fix` (with findings), `spec_wrong` |
+| `test_review`, `code_review`, `security_review` | `pass`, `fix` (with findings), `spec_wrong`. A `security_review` finding also carries `category: patient_data \| other` (required: silence never reads as `other`); `patient_data` means patient or personal data in logs, errors, fixtures, test data, prompts or third-party flows, cited by file and line, never quoted |
 | `implementer` | `pass`, `test_wrong`, `need_shared_change`, `need_clarification`, `blocked` |
 
 **Gates.** Code builds the choices; the human picks one (`ctx.ui.select`; a dismissed dialog takes the stopping choice). Gates are asked one at a time and every answer goes to the run log. A stop verdict writes the task's blocked note first, so a restart during the gate sees it.
@@ -434,6 +437,7 @@ At the end of a story that is fully `done`, one `code_review` per repo reads the
 |---|---|
 | `spec_wrong`, `need_clarification` | stop (edit the plan, then rerun); retry now with a note typed through `ctx.ui.input` |
 | `test_wrong` | approve the unlock (`Task-Unlock` with `Unlock-Gate`, then back to step 2); reject (the implementer reruns with "tests stand"); stop |
+| `patient_data` (a `security_review` finding with category `patient_data`, on a `pass` or a `fix`) | fix (the implementer gets every finding, with an optional note, and the review runs again; counts toward the cap); accept (offered only when every finding is `patient_data`: an empty `Security-Accept` commit with `Accept-Gate: <gate id>` on the task branch, checked like any commit and replayed with the task, so the pull request shows it); stop (the task is held, `blocked` with reason `patient_data`, and its commits are kept under `refs/spec-conflict/<ticket>/<task>`, which the gate prints). A dismissed dialog, no UI and an RPC cancel take stop; no flag, cap or budget ever picks accept |
 | `need_shared_change`, guard failure | stop |
 | conflict | stop; resolve by hand from the kept ref (the gate prints `git cherry-pick <start>..refs/spec-conflict/<ticket>/<task>`) |
 | retry cap, `blocked`, a failed operation | stop; retry once more |
@@ -466,7 +470,25 @@ What is checked and undone:
 - The worktree's `.git` pointer file and `.git/worktrees/<id>/` are not in the snapshot.
 - Any write under your home folder (for example `~/.omp`) can affect the next run.
 
-**Limits.** Story budget (default $100): the sum of each slot's `message_end` cost; at the limit the run finishes its in-flight slots, then opens the budget gate. A slot's context ceiling is 300K tokens (the runner aborts the session) and its wall timeout 20 minutes. Every slot sets `thinkingLevel` explicitly and has no `find` tool, so it makes no Jev calls.
+**Limits.** Story budget (default $100): the sum of each slot's `message_end` cost; at the limit the run finishes its in-flight slots, then opens the budget gate. A slot's context ceiling is 300K tokens (the runner aborts the session; `--max-context <tokens>`) and its wall timeout 20 minutes (`--slot-timeout <seconds>`). Every slot sets `thinkingLevel` explicitly and has no `find` tool, so it makes no Jev calls.
+
+**A held patient-data task.** A task stopped at the `patient_data` gate never reaches the ticket branch, so no push can carry it and the story cannot reach `tasks-done`. A hold is cleared inside the run (fix or accept) or, after stop, by committing a plan change: the new `Plan-Rev` unblocks the task, which starts from scratch and gates again if the finding returns. Cherry-picking the kept ref by hand is your decision (the `--no-verify` limit).
+
+**Scripted slots (a test seam).** When the launch environment of omp sets `SPEC_SLOT_SCRIPT=<absolute path to a YAML file>`, `/run-story` and `/run-task` answer the slot sessions from that script instead of a model; everything else (session options, the worker guard, cost and context ceiling, the scope and snapshot checks, commits, checks, gates, the run log) is the real one. Nothing else switches it on: not a flag, a plan field, a repo file or a dotenv file. The run does not start when the path is relative or unreadable, the file is not a valid script, it lies inside a mapped clone, a worktree folder or the vault work tree, or a dotenv file omp loads (`<cwd>/.env*`, `~/.omp/agent/.env`, `~/.omp/.env`, `~/.env`) defines the variable with the same value. It is never silent: the first run-log entry is `scripted-slots` (realpath and sha256), each session logs `scripted-session` (task, slot, attempt, rule, the options the runner passed and the prompt it handed the session), slot lines carry `sessionFile: scripted:<sha12>#<rule>`, every status line ends ` · SCRIPTED SLOTS`, a warning opens the run and the final report prints the path and hash. Rules left over at the end log `scripted-slots-unused`.
+
+```yaml
+version: 1
+slots:
+  - match: {task: T01, slot: implementer, attempt: 1}   # task: an id or "*"; attempt: n or "*"; the first unconsumed rule that fits wins
+    steps:                                               # in order, inside the slot's worktree
+      - tool: {name: write, input: {path: src/other.ts, content: "x"}}         # judged by the real worker guard; allowed: written
+      - tool: {name: bash, input: {command: "git commit --allow-empty -m x"}}  # the guard blocks it; other commands run with sh -c; `edit` is judged, not applied
+      - usage: {costUsd: 0.02, contextTokens: 400000}     # the real runner sums the cost and aborts past the ceiling
+      - sleep: 30000                                      # ends when the runner aborts the session (timeout, /run-stop)
+      - yield: {verdict: pass, notes: done, checks_run: []}   # an object or a string; also yield_error: "…" and throw: "…"; no yield: no payload
+```
+
+A session with no matching rule rejects its prompt ("no scripted slot for T01 implementer #2"), which opens the environment gate. The seam does not prove omp's own dispatch of `tool_call` to the guard.
 
 **While a run is active** the status line shows `formatStatusLine` plus the running slots, and an `input` handler answers typed prompts with "spec run active: /run-stop to stop" instead of letting them start a parallel main-agent turn (only `/run-stop` and `/spec-status` pass; input from RPC is untouched). The run log is JSONL at `~/.omp/agent/spec-runs/<story>/<iso-ts>.jsonl`, outside the vault: one line per slot run (slot, task, attempt, outcome, verdict, cost, tokens, duration, session file), per gate answer and per notable event. It is for audit and metrics and is never read as state.
 
@@ -482,7 +504,15 @@ What is checked and undone:
 | Delete `refs/spec-conflict/<ticket>/<task>` yourself once you have resolved that conflict by hand. | Expect a rerun to remove it: the cleanup only removes `spec-wt/<ticket>/*`. |
 | Use `--concurrency 1` if parallel SDK sessions misbehave. | Raise `--concurrency` past what the machine and the model quota carry. |
 
-Verify: `bun test extensions/lib/spec-slots.test.ts extensions/lib/spec-runlog.test.ts extensions/lib/spec-status.test.ts extensions/lib/spec-scheduler.test.ts extensions/lib/spec-scheduler.git.test.ts extensions/lib/spec-slot-runner.test.ts extensions/lib/spec-git.test.ts extensions/lib/spec-lock.test.ts extensions/lib/spec-testfiles.test.ts extensions/lib/spec-ops.test.ts extensions/lib/spec-cli.test.ts extensions/lib/spec-check.test.ts extensions/lib/worker-guard.test.ts extensions/spec-workflow.test.ts scripts/spec-status.test.ts`, then `bun run typecheck`. The scheduler tests drive `runPlan` with a fake slot runner, fake git and fake checks (including a crash at every operation), the git tests use temp repos, a temp vault and a worker that writes real files (also outside its worktree, into the git dir, and through `git update-ref`), and the slot runner is tested only against a fake SDK; none touches a real repo, the real vault or a model. A run on real Haiku slots is a separate, approved verification.
+Verify: `bun test extensions/lib/spec-slots.test.ts extensions/lib/spec-runlog.test.ts extensions/lib/spec-status.test.ts extensions/lib/spec-scheduler.test.ts extensions/lib/spec-scheduler.git.test.ts extensions/lib/spec-slot-runner.test.ts extensions/lib/spec-scripted-slots.test.ts extensions/lib/spec-git.test.ts extensions/lib/spec-lock.test.ts extensions/lib/spec-testfiles.test.ts extensions/lib/spec-ops.test.ts extensions/lib/spec-cli.test.ts extensions/lib/spec-check.test.ts extensions/lib/worker-guard.test.ts extensions/spec-workflow.test.ts scripts/spec-status.test.ts`, then `bun run typecheck`. The scheduler tests drive `runPlan` with a fake slot runner, fake git and fake checks (including a crash at every operation), the git tests use temp repos, a temp vault and a worker that writes real files (also outside its worktree, into the git dir, and through `git update-ref`), and the slot runner is tested only against a fake SDK; none touches a real repo, the real vault or a model. A run on real Haiku slots is a separate, approved verification.
+
+### Verifying step 5 (`bun run verify:step5`)
+
+`bun run verify:step5` is the definition of done for the scheduler. It reads `test/tier3/requirements.yml`, whose sha256 must equal the line in the vault's `step5-requirements.sha256` as committed in `~/.vault-git` (`HEAD`; an uncommitted pin does not count), and judges every row with `scope: in` from evidence this run produces: the named `bun test` cases (one `bun test` process, read through the JUnit reporter: a case passes only when its title or a describe above it contains the name, it is neither skipped nor failing, and it ran at least one assertion), and scenarios, each one a driven `omp --mode rpc` session in an isolated HOME with its own clone, vault and copy of the code (`test/tier3/scenarios/<id>.yml`; `runner: scripted` answers the slots through `SPEC_SLOT_SCRIPT`, `runner: haiku` uses real Haiku slots and passes only when all 3 repeats pass).
+
+A row is the AND of its evidence. Exit codes: `0` the pin matched, nothing was narrowed and every in-scope row is `PASS`; `1` a row is not `PASS`; `2` a harness error (selftest red, schema error, a scenario file that does not load, no JUnit report, a `bun test` that failed without a failing case, omp older than 18.16); `3` the pin was refused and nothing ran; `4` `--print-hash` (it verified nothing); `5` a narrowed run (`--only <row ids>`, `--no-haiku`, `--unpinned`, or a pin that did not match under `--unpinned`) that would otherwise have been `0`. A narrowed run never exits 0. Haiku runs stop when spent + $0.25 would pass the $2 cap (`--cap` can only lower it); the evidence not started is `MISSING`. `bun run tier3 selftest` runs the embedded cases of the checker's own rules, and `bun run tier3 run <id> [--runner scripted]` runs one scenario.
+
+Every scenario run is judged by automatic checks before its own `expect:` list: omp exited 0 and the run ended (unless a `sigkill` action fired), the run wrote a log, no gate went unanswered (unless the run opts in), every declared action fired, and, for a scripted run, `scripted-slots` is the first log entry with the script's sha256 and no rule is left over (for a haiku run no `scripted-` entry exists). Actions (`run-stop`, `sigkill`, plan edits, a human commit on the ticket branch, a held check, an index lock, a second omp run) fire on run-log events, UI requests or marker files, never on timers. `expect:` mappings use closed key sets: a misspelt key fails the scenario. `report.json` in `test/tier3/runs/<stamp>/` records the rows, the evidence, the run folders, the spend, a digest of the code under test (`HEAD`, the diff and the untracked files of `extensions/` and `scripts/`), a digest of `test/tier3` without `runs/`, and the bun-test names that are short or match more than 5 cases.
 
 ## Release notes
 

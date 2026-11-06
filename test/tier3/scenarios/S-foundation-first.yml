@@ -1,0 +1,62 @@
+id: S-foundation-first
+runner: scripted
+proves:
+  - R-104
+description: "A plan with a foundation task and dependants: the foundation task runs first and must be integrated (checks passed) before any other task starts; a blocked foundation keeps every other task unstarted."
+runs:
+  - name: ok
+    plan: t3-foundation.md
+    expect:
+      - order:
+          - event: integrated
+            task: T3-SUM-T01
+          - event: task-start
+            task: T3-SUM-T02
+      - order:
+          - event: integrated
+            task: T3-SUM-T01
+          - event: task-start
+            task: T3-SUM-T03
+      - event: task-start
+        count: 3
+      - spec-status-done
+      - run-outcome-complete
+  - name: foundation-blocked
+    plan: t3-foundation.md
+    fresh: true
+    gates:
+      - title: "T3-SUM-T01: blocked"
+        choose: ^Stop
+    expect:
+      - event: task-start
+        task: T3-SUM-T01
+      - gate:
+          cause: blocked
+          task: T3-SUM-T01
+          choice: stop
+      - event: task-start
+        task: T3-SUM-T02
+        absent: true
+      - event: task-start
+        task: T3-SUM-T03
+        absent: true
+      - noSlot:
+          task: T3-SUM-T02
+          slot: implementer
+      - noSlot:
+          task: T3-SUM-T03
+          slot: implementer
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: blocked
+      - status:
+          task: T3-SUM-T02
+          state: waiting
+          reason: ^waits for foundation T3-SUM-T01 \(blocked\)$
+      - status:
+          task: T3-SUM-T03
+          state: waiting
+          reason: ^waits for foundation T3-SUM-T01 \(blocked\)$
+      - notify: "T3-SUM-T02 was not started: waits for foundation T3-SUM-T01 \\(blocked\\)"
+      - outcome: incomplete

@@ -1,0 +1,62 @@
+id: S-payload-forms
+runner: scripted
+proves:
+  - R-05
+  - R-06
+  - R-08
+description: "Scripted yields through the real runner and verdict reader: a non-JSON string, a schema-invalid object, a string-encoded valid payload, another slot's verdict value and a yield error; each outcome and the reason in the next prompt are asserted."
+runs:
+  - name: run
+    plan: t3-single-normal.md
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 1
+          outcome: invalid
+          detail: not valid JSON
+      - session:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          promptHas: "not a valid verdict: the payload is a string that is not valid JSON"
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          outcome: invalid
+          detail: "\"tests\" must be an array of strings"
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 3
+          verdict: pass
+      - slot:
+          task: T3-SUM-T01
+          slot: test_review
+          attempt: 1
+          verdict: pass
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 1
+          outcome: invalid
+          detail: "\"verdict\" must be one of pass, test_wrong"
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 2
+          outcome: invalid
+          detail: "scripted: the yield tool refused the payload"
+      - session:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 3
+          promptHas: not a valid verdict
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 3
+          verdict: pass
+      - spec-status-done
+      - run-outcome-complete

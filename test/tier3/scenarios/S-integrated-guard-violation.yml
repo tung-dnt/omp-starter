@@ -1,0 +1,49 @@
+id: S-integrated-guard-violation
+runner: scripted
+proves:
+  - R-46
+  - R-105
+description: "A commit without Task: lands on the task's branch before the integration: the real strict guard on the integrated range rejects it, the guard gate arrives over RPC, and the ticket branch never moves."
+runs:
+  - name: run
+    plan: t3-hold.md
+    actions:
+      - "on":
+          start: true
+        do: hold-on
+        name: "1"
+      - "on":
+          marker: checks
+          min: 1
+        do: task-branch-commit
+        task: T3-SUM-T01
+      - "on":
+          start: true
+        do: hold-off
+        name: "1"
+    gates:
+      - title: "T3-SUM-T01: the guard rejects its commits"
+        choose: ^Stop
+    expect:
+      - gate:
+          cause: guard
+          task: T3-SUM-T01
+          choice: stop
+      - gateOptions:
+          title: the guard rejects
+          options:
+            - ^Stop this task$
+          only: true
+      - notify: untracked-commit
+      - injected: taskBranch
+      - ticket: untouched
+      - event: integrated
+        absent: true
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: guard
+      - status:
+          task: T3-SUM-T02
+          state: waiting
+      - outcome: incomplete

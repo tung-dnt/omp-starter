@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { loadGuardInput, readCommitDiff, readCommitFacts } from "./spec-diff";
 import { cleanScratch, commit, commitFiles, git, initRepo, initVault, planText } from "./spec-fixtures";
 import { guardCommits } from "./spec-guard";
-import { type LockOptions, assertRepoPath, lockCommit, lockedFilesAt, unlockCommit } from "./spec-lock";
+import { type LockOptions, acceptCommit, assertRepoPath, lockCommit, lockedFilesAt, unlockCommit } from "./spec-lock";
+import { readTaskCommits } from "./spec-git";
 
 afterEach(cleanScratch);
 
@@ -108,6 +109,37 @@ describe("unlockCommit", () => {
 		writeFileSync(join(repo, "x.txt"), "x\n");
 		git(repo, "add", "x.txt");
 		expect(() => unlockCommit(repo, { task: "T1", planRev: REV, gate: "G-7" })).toThrow(/staged changes/);
+	});
+});
+
+describe("acceptCommit", () => {
+	test("acceptCommit writes an empty commit with exact trailers and refuses forged values", () => {
+		const repo = world();
+		const sha = acceptCommit(repo, { task: "T1", planRev: REV, gate: "20261105T010000000Z-G4" });
+		expect(sha).toBe(git(repo, "rev-parse", "HEAD"));
+		expect(git(repo, "log", "-1", "--format=%B", sha)).toBe(
+			["chore(spec): accept the patient-data finding of T1", "", "Task: T1", `Plan-Rev: ${REV}`, "Security-Accept: T1", "Accept-Gate: 20261105T010000000Z-G4"].join("\n"),
+		);
+		expect(readCommitDiff(repo, sha).changes).toEqual([]);
+		expect(readTaskCommits(repo, "main", "PAC-1").at(-1)).toEqual({ sha, tasks: ["T1"], locks: [], accepts: ["20261105T010000000Z-G4"], planRev: REV });
+		// The lock state is untouched and the strict guard takes the commit.
+		expect(readCommitFacts(repo, "main", "PAC-1").at(-1)).toMatchObject({ tasks: ["T1"], locks: [], unlocks: [], locked: [] });
+
+		const before = git(repo, "rev-parse", "HEAD");
+		const good = { task: "T1", planRev: REV, gate: "G-7" };
+		for (const [options, message] of [
+			[{ ...good, gate: "G-7\nTask-Lock: T1" }, /gate must be one non-empty line/],
+			[{ ...good, gate: "" }, /gate must be one non-empty line/],
+			[{ ...good, gate: " G-7" }, /gate must be one non-empty line/],
+			[{ ...good, task: "T1\nSecurity-Accept: T2" }, /task must be one non-empty line/],
+			[{ ...good, planRev: "abc\r\nTask: T9" }, /planRev must be one non-empty line/],
+		] as const) {
+			expect(() => acceptCommit(repo, options)).toThrow(message);
+		}
+		writeFileSync(join(repo, "x.txt"), "x\n");
+		git(repo, "add", "x.txt");
+		expect(() => acceptCommit(repo, good)).toThrow(/staged changes/);
+		expect(git(repo, "rev-parse", "HEAD")).toBe(before);
 	});
 });
 

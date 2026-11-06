@@ -1,0 +1,26 @@
+id: S-parallel-sessions
+runner: scripted
+proves:
+  - R-49
+  - R-80
+description: "Two tasks run at concurrency 2 in overlapping SDK sessions that finish together: each session has its own agent id (never Main), integrations are serialized, the later task is replayed on the new tip and checked again; both end done."
+runs:
+  - name: run
+    plan: t3-parallel.md
+    expect:
+      - overlap:
+          - T3-SUM-T01
+          - T3-SUM-T03
+      - sessionOptions: true
+      - event: check
+        detail: replayed on
+        count: 1
+      - event: integrated
+        task: T3-SUM-T01
+        count: 1
+      - event: integrated
+        task: T3-SUM-T03
+        count: 1
+      - check-notes
+      - spec-status-done
+      - run-outcome-complete

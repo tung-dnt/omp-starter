@@ -1,0 +1,98 @@
+id: S-verdict-implementer-stop
+runner: scripted
+proves:
+  - R-09
+  - R-12
+  - R-13
+description: "implementer need_shared_change (the gate offers only stop, nothing is committed), need_clarification (retry with a note) and blocked (stop or retry)."
+runs:
+  - name: need_shared_change
+    plan: t3-single-normal.md
+    gates:
+      - title: "T3-SUM-T01: needs a shared change"
+        choose: ^Stop
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          verdict: need_shared_change
+      - gate:
+          cause: need_shared_change
+          task: T3-SUM-T01
+          choice: stop
+      - gateOptions:
+          title: needs a shared change
+          options:
+            - ^Stop this task \(add a foundation task to the plan\)$
+          only: true
+      - notify: "scripted: src/shared.ts must change"
+      - commitShape: []
+      - ticket: untouched
+      - noSlot:
+          task: story
+          slot: code_review
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: need_shared_change
+      - outcome: incomplete
+  - name: need_clarification-retry
+    plan: t3-single-normal.md
+    fresh: true
+    gates:
+      - title: "T3-SUM-T01: need_clarification"
+        choose: ^Retry now
+      - title: Note for T3-SUM-T01
+        choose: x
+        note: integers only
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 1
+          verdict: need_clarification
+      - gateOptions:
+          title: ": need_clarification"
+          options:
+            - ^Stop this task
+            - ^Retry now with a note$
+          only: true
+      - gate:
+          cause: need_clarification
+          task: T3-SUM-T01
+          choice: retry
+          note: integers only
+      - session:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 2
+          promptHas: "- integers only"
+      - spec-status-done
+      - run-outcome-complete
+  - name: blocked
+    plan: t3-single-normal.md
+    fresh: true
+    gates:
+      - title: "T3-SUM-T01: blocked"
+        choose: ^Stop
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          verdict: blocked
+      - gate:
+          cause: blocked
+          task: T3-SUM-T01
+          choice: stop
+      - gateOptions:
+          title: blocked by tooling
+          options:
+            - ^Stop this task$
+            - ^Retry once more$
+          only: true
+      - commitShape: []
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: blocked
+      - outcome: incomplete

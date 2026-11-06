@@ -1,0 +1,83 @@
+id: S-refusals
+runner: scripted
+proves:
+  - R-53
+description: "Each precondition refuses the run with no slot started: uncommitted vault plan, plan that does not parse, wrong kind, no checks.test_files, dirty clone."
+runs:
+  - name: vault-dirty
+    plan: t3-single.md
+    fresh: true
+    setup:
+      - vault-dirty
+    expect:
+      - refused: has uncommitted changes in the vault
+      - outcome: refused
+      - event: task-start
+        absent: true
+      - session:
+          task: T3-SUM-T01
+        absent: true
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+        absent: true
+  - name: unparsable
+    plan: t3-badparse.md
+    fresh: true
+    endOn: the plan does not parse
+    expect:
+      - notify: the plan does not parse
+      - event: run-start
+        absent: true
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+        absent: true
+  - name: wrong-kind
+    plan: t3-single.md
+    fresh: true
+    command: run-task
+    expect:
+      - refused: "runs a task plan, but T3-SUM is kind: story"
+      - outcome: refused
+      - event: task-start
+        absent: true
+      - session:
+          task: T3-SUM-T01
+        absent: true
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+        absent: true
+  - name: no-test-files
+    plan: t3-notestfiles.md
+    fresh: true
+    expect:
+      - refused: declares no checks.test_files
+      - outcome: refused
+      - event: task-start
+        absent: true
+      - session:
+          task: T3-SUM-T01
+        absent: true
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+        absent: true
+  - name: dirty-clone
+    plan: t3-single.md
+    fresh: true
+    setup:
+      - clone-dirty
+    expect:
+      - refused: is not clean
+      - outcome: refused
+      - event: task-start
+        absent: true
+      - session:
+          task: T3-SUM-T01
+        absent: true
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+        absent: true

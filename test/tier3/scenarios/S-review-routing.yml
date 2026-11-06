@@ -1,0 +1,37 @@
+id: S-review-routing
+runner: scripted
+proves:
+  - R-18
+description: "A validated plan with a technical risk, a security-flagged task and a plain task: the run log shows code_review for the technical risk, security_review for the flagged task, and neither otherwise."
+runs:
+  - name: run
+    plan: t3-routing.md
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: code_review
+          verdict: pass
+        count: 1
+      - slot:
+          task: T3-SUM-T01
+          slot: security_review
+        absent: true
+      - slot:
+          task: T3-SUM-T02
+          slot: security_review
+          verdict: pass
+        count: 1
+      - slot:
+          task: T3-SUM-T02
+          slot: code_review
+        absent: true
+      - slot:
+          task: T3-SUM-T03
+          slot: code_review
+        absent: true
+      - slot:
+          task: T3-SUM-T03
+          slot: security_review
+        absent: true
+      - spec-status-done
+      - run-outcome-complete

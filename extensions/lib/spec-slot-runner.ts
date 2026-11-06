@@ -101,6 +101,12 @@ async function runSlot(options: SlotRunnerOptions, spec: SlotSpec, signal: Abort
 		],
 	});
 
+	// The signal may have fired while the session was being created: its event is gone, so look at it now, before anything runs.
+	if (signal.aborted) {
+		await session.dispose().catch(() => undefined);
+		return stopped();
+	}
+
 	let costUsd = 0;
 	let contextTokens = 0;
 	let payload: unknown;

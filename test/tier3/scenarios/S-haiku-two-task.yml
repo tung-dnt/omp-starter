@@ -1,0 +1,49 @@
+id: S-haiku-two-task
+runner: haiku
+proves:
+  - R-01
+  - R-17
+  - R-20
+  - R-21
+  - R-56
+  - R-57
+  - R-79
+  - R-80
+  - R-81
+  - R-85
+  - R-92
+  - R-93
+  - R-97
+  - R-101
+  - R-102
+  - R-106
+  - R-107
+  - R-109
+description: "Baseline: a real two-task story at concurrency 2 over omp --mode rpc from a fixture without the pre-push hook; the hook gate is answered install; asserts outcome, spec-status, trailers, Task-Lock, check notes, hook, run log, no TypeSafe or Jev tool calls, real state untouched, cost, no leftover roots, status frames, the final notify, and no push (remote refs and vault git unchanged)."
+runs:
+  - name: run
+    plan: t3-sum.md
+    gates:
+      - title: the story review found problems
+        choose: ^Accept
+    expect:
+      - run-outcome-complete
+      - spec-status-done
+      - trailers
+      - task-lock
+      - check-notes
+      - pre-push-hook
+      - run-log-shape
+      - zero-typesafe
+      - real-state-untouched
+      - no-leftover-worktree
+      - cost-within-budget
+      - hook-installed-by-scheduler
+      - no-push-no-vault-write
+      - spec-guard-strict
+      - status-frames
+      - notify: "outcome: complete, \\$[\\d.]+ in \\d+ slot runs"
+      - ticket: advanced
+      - event: integrated
+        count: 2
+      - lockFile: absent

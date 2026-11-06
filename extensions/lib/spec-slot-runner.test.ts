@@ -292,6 +292,33 @@ describe("createSlotRunner: limits and failures", () => {
 		expect(idle.created).toEqual([]);
 	});
 
+	test("a signal that fires while the session is being created still stops the slot: the session is disposed and never prompted", async () => {
+		// The wall timeout of a slot can pass during `createAgentSession` (a second or more with a real SDK); the abort event is then gone
+		// before the runner listens for it, and the slot used to run to the end with no timeout at all.
+		const session = new FakeSession();
+		session.script = s => {
+			s.emit(yielded({ verdict: "pass", notes: "ran past the timeout", checks_run: [] }));
+			s.emit(END);
+		};
+		const creating = Promise.withResolvers<void>();
+		const sdk: SlotSdk = {
+			async createAgentSession() {
+				await creating.promise;
+				return session;
+			},
+			discoverAgents: async () => [],
+		};
+		const runner = createSlotRunner({ sdk, agents: [{ name: "task-builder", systemPrompt: "BUILDER BODY" }], resolveModel: () => MODEL });
+		const controller = new AbortController();
+		const run = runner.run(spec(), controller.signal);
+		await flush();
+		controller.abort();
+		creating.resolve();
+		expect(await run).toEqual({ payload: undefined, costUsd: 0, contextTokens: 0, aborted: "signal" });
+		expect(session.prompts).toEqual([]);
+		expect(session.disposals).toBe(1);
+	});
+
 	test("a prompt that fails rejects the run with its error, and the session is still disposed", async () => {
 		const h = harness();
 		h.session.script = () => {

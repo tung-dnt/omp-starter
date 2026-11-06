@@ -1,0 +1,40 @@
+id: S-haiku-plan-commit-midrun
+runner: haiku
+proves:
+  - R-64
+  - R-97
+description: "The driver commits a new plan revision to the vault while a real slot is in flight: no new starts, the plan-changed gate arrives over RPC, stop ends the run with the reason and the second task stays ready."
+runs:
+  - name: run
+    plan: t3-sum.md
+    args: "--concurrency 1"
+    actions:
+      - "on":
+          event: task-start
+          task: T3-SUM-T01
+        do: plan-commit
+        plan: t3-sum.v2.md
+        delayMs: 2000
+    gates:
+      - title: The plan changed in the vault
+        choose: ^Stop the run
+    expect:
+      - injected: planRev
+      - event: plan-changed
+      - gate:
+          cause: plan-changed
+          choice: stop
+      - gateOptions:
+          title: The plan changed in the vault
+          options:
+            - ^Stop the run
+            - ^Keep running
+          only: true
+      - event: task-start
+        task: T3-SUM-T02
+        absent: true
+      - status:
+          task: T3-SUM-T02
+          state: ready
+      - notify: the plan changed in the vault
+      - outcome: stopped

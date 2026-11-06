@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { CheckReport, FailsBeforeResult } from "./spec-check";
 import { planText } from "./spec-fixtures";
 import type { CheckNote, TaskCommit } from "./spec-git";
@@ -16,6 +16,7 @@ import {
 	type RunOptions,
 	type RunSummary,
 	type Worktree,
+	DEFAULTS,
 	RunLocked,
 	runPlan,
 	statusFromGit,
@@ -30,6 +31,8 @@ interface FCommit {
 	locks: string[];
 	unlocks: string[];
 	files: string[];
+	/** The gate of a `Security-Accept` commit. */
+	accepts?: string[];
 }
 interface FWt {
 	task: string;
@@ -70,6 +73,7 @@ interface TaskSpec {
 	risky?: boolean;
 	/** `sensitive_data` risk and `security_review`. */
 	secure?: boolean;
+	foundation?: boolean;
 }
 
 /** Edits the first `yaml task` block that carries `id`. */
@@ -80,7 +84,7 @@ function patch(text: string, id: string, edits: Array<[string, string]>): string
 
 function planFor(tasks: TaskSpec[], checks: Record<string, string | string[]> = { test: "true", test_files: "sh {files}", test_paths: ["t/**"] }): string {
 	let text = planText({
-		tasks: tasks.map(task => ({ id: task.id, depends_on: task.deps ?? [], new_paths: [`src/${lower(task.id)}.ts`, `t/${lower(task.id)}.sh`] })),
+		tasks: tasks.map(task => ({ id: task.id, depends_on: task.deps ?? [], foundation: task.foundation, new_paths: [`src/${lower(task.id)}.ts`, `t/${lower(task.id)}.sh`] })),
 		checks: { [REPO]: checks },
 	});
 	for (const task of tasks) {
@@ -179,7 +183,7 @@ function fakeGit(world: World): GitOps {
 			s.wts.clear();
 			return removed;
 		},
-		commits: (): TaskCommit[] => s.ticket.map(commit => ({ sha: commit.sha, tasks: commit.tasks, locks: commit.locks })),
+		commits: (): TaskCommit[] => s.ticket.map(commit => ({ sha: commit.sha, tasks: commit.tasks, locks: commit.locks, ...(commit.accepts === undefined ? {} : { accepts: commit.accepts }) })),
 		note: (_repo, sha) => s.notes.get(sha),
 		taskNote: (_repo, task) => s.taskNotes.get(task),
 		setTaskNote(_repo, task, note) {
@@ -239,6 +243,12 @@ function fakeGit(world: World): GitOps {
 			world.op(`unlock ${wt.task}`);
 			const fw = world.wtOf(wt.dir);
 			fw.commits.push({ sha: world.sha("u"), tasks: [task], locks: [], unlocks: [task], files: [] });
+			return fw.commits.at(-1)!.sha;
+		},
+		accept(wt, { task, gate }) {
+			world.op(`accept ${wt.task}`);
+			const fw = world.wtOf(wt.dir);
+			fw.commits.push({ sha: world.sha("a"), tasks: [task], locks: [], unlocks: [], files: [], accepts: [gate] });
 			return fw.commits.at(-1)!.sha;
 		},
 		diff: (at, from) => `diff of ${at.dir} since ${from}`,
@@ -340,7 +350,9 @@ interface Reply {
 
 const AUTHOR = (verdict = "pass") => ({ verdict, tests: ["t/x.sh"], acceptance_map: { works: "t/x.sh" }, notes: verdict === "pass" ? "" : `author says ${verdict}` });
 const IMPL = (verdict = "pass") => ({ verdict, notes: verdict === "pass" ? "done" : `implementer says ${verdict}`, checks_run: ["sh t/x.sh"] });
-const REVIEW = (verdict = "pass") => ({ verdict, findings: verdict === "pass" ? [] : [{ path: "src/a.ts", line: 1, severity: "high", text: `reviewer says ${verdict}` }] });
+const REVIEW = (verdict = "pass") => ({ verdict, findings: verdict === "pass" ? [] : [{ path: "src/a.ts", line: 1, severity: "high", category: "other", text: `reviewer says ${verdict}` }] });
+const PATIENT = { path: "src/a.ts", line: 7, severity: "high", category: "patient_data", text: "logs the patient name" };
+const OTHER = { path: "src/b.ts", line: 3, severity: "medium", category: "other", text: "missing authorisation check" };
 const TEST_REVIEW = (verdict = "pass") => ({ verdict, unmapped: verdict === "fix" ? ["criterion 1"] : [], findings: verdict === "pass" ? [] : [`test reviewer says ${verdict}`] });
 
 class FakeRunner implements SlotRunner {
@@ -659,6 +671,22 @@ describe("every verdict value leads to its branch", () => {
 			expect((await wrong.run()).outcome).toBe("incomplete");
 			expect(wrong.gate.requests[0].detail).toContain("reviewer says spec_wrong");
 			expect(wrong.world.state.ops).not.toContain("integrate T1");
+		}
+	});
+
+	test("a review spec_wrong with no findings answered retry reruns the implementer and the review", async () => {
+		for (const [slot, spec] of [["code_review", { id: "T1", risky: true }], ["security_review", { id: "T1", secure: true }]] as const) {
+			const fx = fixture([spec]);
+			fx.runner.on(slot, { payload: { verdict: "spec_wrong", findings: [] } });
+			fx.gate.on("spec_wrong", { choice: "retry", note: "the plan is right, review again" });
+			const summary = await fx.run();
+			expect(summary.outcome).toBe("complete");
+			expect(fx.runner.slots("T1")).toEqual(["test_author", "test_review", "implementer", slot, "implementer", slot]);
+			expect(fx.runner.calls[4].prompt).toContain("the reviewer gave no findings");
+			expect(fx.runner.calls[4].prompt).toContain("- the plan is right, review again");
+			const ops = fx.world.state.ops;
+			expect(ops.indexOf("integrate T1")).toBeGreaterThan(ops.lastIndexOf(`slot ${slot} T1`));
+			expect(ticketShape(fx, "T1")).toEqual(["work", "lock", "work", "work"]);
 		}
 	});
 
@@ -1328,5 +1356,225 @@ describe("M3: one run per ticket and clone", () => {
 		expect((await fx.run()).outcome).toBe("complete");
 		const takeover = fx.log.find(entry => entry.kind === "event" && entry.event === "lock-takeover");
 		expect(takeover).toMatchObject({ detail: expect.stringContaining("pid 31337") });
+	});
+});
+
+// ── Amendment 4 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+const firstOp = (fx: Fixture, prefix: string): number => fx.world.state.ops.findIndex(op => op.startsWith(prefix));
+
+describe("R-104: foundation first", () => {
+	test("no other task starts before the foundation task has landed", async () => {
+		const fx = fixture([{ id: "A" }, { id: "B" }, { id: "F1", foundation: true }]);
+		expect(fx.states()).toEqual({ A: "waiting", B: "waiting", F1: "ready" });
+		const summary = await fx.run({ concurrency: 2 });
+		expect(summary.outcome).toBe("complete");
+		const published = firstOp(fx, "publish F1");
+		expect(published).toBeGreaterThan(-1);
+		for (const task of ["A", "B"]) {
+			expect(firstOp(fx, `addWorktree ${task}`)).toBeGreaterThan(published);
+			expect(firstOp(fx, `slot test_author ${task}`)).toBeGreaterThan(published);
+		}
+		expect(fx.runner.slots("F1")[0]).toBe("test_author");
+		expect(fx.runner.calls[0].task.id).toBe("F1");
+	});
+
+	test("a blocked foundation task stops every other task and the summary names it", async () => {
+		const fx = fixture([{ id: "A" }, { id: "B", deps: ["A"] }, { id: "F1", foundation: true }]);
+		fx.runner.on("F1:test_author", { payload: AUTHOR("spec_wrong") });
+		fx.gate.on("spec_wrong", stop);
+		const summary = await fx.run();
+		expect(summary.outcome).toBe("incomplete");
+		expect(fx.runner.calls.map(call => call.task.id)).toEqual(["F1"]);
+		expect(fx.world.state.ops.filter(op => op.startsWith("addWorktree"))).toEqual(["addWorktree F1"]);
+		expect(summary.reasons).toEqual([
+			"A was not started: waits for foundation F1 (blocked)",
+			"B was not started: waits for foundation F1 (blocked)",
+			"F1 is blocked: spec_wrong",
+		]);
+		expect(fx.states()).toEqual({ A: "waiting", B: "waiting", F1: "blocked" });
+	});
+
+	test("two foundation tasks run together, then the rest", async () => {
+		const fx = fixture([{ id: "A" }, { id: "F1", foundation: true }, { id: "F2", foundation: true }]);
+		fx.runner.on("implementer", { waitMs: 15 });
+		const summary = await fx.run({ concurrency: 2 });
+		expect(summary.outcome).toBe("complete");
+		expect(firstOp(fx, "addWorktree F2")).toBeLessThan(firstOp(fx, "publish F1"));
+		const landed = Math.max(firstOp(fx, "publish F1"), firstOp(fx, "publish F2"));
+		expect(firstOp(fx, "addWorktree A")).toBeGreaterThan(landed);
+	});
+
+	test("a restart after the foundation task landed starts the rest at once", async () => {
+		const first = fixture([{ id: "F1", foundation: true }, { id: "A" }]);
+		const killer = new AbortController();
+		let snapshot: State | undefined;
+		first.world.hook = name => {
+			if (name !== "removeWorktree F1" || snapshot !== undefined) return;
+			snapshot = structuredClone(first.world.state);
+			snapshot.ops.pop();
+			killer.abort();
+		};
+		await first.run({ concurrency: 1, signal: killer.signal });
+		expect(snapshot).toBeDefined();
+
+		const second = fixture(snapshot!);
+		expect(second.states()).toEqual({ F1: "done", A: "ready" });
+		const summary = await second.run({ concurrency: 1 });
+		expect(summary.outcome).toBe("complete");
+		expect(second.runner.calls.some(call => call.task.id === "F1")).toBe(false);
+		expect(second.runner.calls[0].task.id).toBe("A");
+	});
+});
+
+describe("R-108: patient data", () => {
+	const SECURE: TaskSpec = { id: "T1", secure: true };
+	const patientGate = (fx: Fixture): GateRequest => fx.gate.requests.find(request => request.cause === "patient_data")!;
+
+	test("a patient_data finding opens a gate before any implementer rerun, for pass and for fix", async () => {
+		for (const verdict of ["pass", "fix"] as const) {
+			const fx = fixture([SECURE]);
+			fx.runner.on("security_review", { payload: { verdict, findings: [PATIENT] } });
+			let noteAtGate: string | undefined;
+			fx.gate.on("patient_data", request => {
+				noteAtGate = fx.world.state.taskNotes.get("T1")?.reason;
+				expect(request.detail).toContain("logs the patient name");
+				return stop;
+			});
+			expect(await fx.run()).toMatchObject({ outcome: "incomplete", reasons: ["T1 is blocked: patient_data"] });
+			expect(fx.gate.causes()).toEqual(["patient_data"]);
+			expect(fx.runner.slots("T1")).toEqual(["test_author", "test_review", "implementer", "security_review"]);
+			expect(noteAtGate).toBe("patient_data");
+			expect(fx.world.state.ops).not.toContain("integrate T1");
+			expect(patientGate(fx)).toMatchObject({ task: "T1", fallback: "stop" });
+			expect(patientGate(fx).choices.map(choice => choice.id)).toEqual(["fix", "accept", "stop"]);
+		}
+		// A spec_wrong verdict keeps its own gate, which lists the findings.
+		const wrong = fixture([SECURE]);
+		wrong.runner.on("security_review", { payload: { verdict: "spec_wrong", findings: [PATIENT] } });
+		wrong.gate.on("spec_wrong", stop);
+		await wrong.run();
+		expect(wrong.gate.causes()).toEqual(["spec_wrong"]);
+		expect(wrong.gate.requests[0].detail).toContain("logs the patient name");
+		// An `other` finding on a passing review is not a patient-data block.
+		const other = fixture([SECURE]);
+		other.runner.on("security_review", { payload: { verdict: "pass", findings: [OTHER] } });
+		expect((await other.run()).outcome).toBe("complete");
+		expect(other.gate.requests).toEqual([]);
+	});
+
+	test("fix at the patient_data gate reruns the implementer with all findings and reviews again", async () => {
+		const fx = fixture([SECURE]);
+		fx.runner.on("security_review", { payload: { verdict: "fix", findings: [PATIENT, OTHER] } });
+		fx.gate.on("patient_data", { choice: "fix", note: "redact the name" });
+		expect((await fx.run()).outcome).toBe("complete");
+		expect(fx.runner.slots("T1")).toEqual(["test_author", "test_review", "implementer", "security_review", "implementer", "security_review"]);
+		const rerun = fx.runner.calls[4].prompt;
+		expect(rerun).toContain("- [high, patient_data] src/a.ts:7: logs the patient name");
+		expect(rerun).toContain("- [medium] src/b.ts:3: missing authorisation check");
+		expect(rerun).toContain("- redact the name");
+		expect(fx.world.state.taskNotes.size).toBe(0);
+		expect(fx.world.state.ops).toContain("setTaskNote T1 clear");
+		expect(fx.world.state.ticket.some(commit => commit.accepts !== undefined)).toBe(false);
+
+		// The rerun counts toward the cap: with one attempt allowed, the next stop is the cap gate.
+		const capped = fixture([SECURE]);
+		capped.runner.on("security_review", { payload: { verdict: "pass", findings: [PATIENT] } });
+		capped.gate.on("patient_data", { choice: "fix" });
+		capped.gate.on("cap", stop);
+		expect((await capped.run({ maxAttempts: 1 })).outcome).toBe("incomplete");
+		expect(capped.gate.causes()).toEqual(["patient_data", "cap"]);
+		expect(capped.runner.slots("T1")).toEqual(["test_author", "test_review", "implementer", "security_review"]);
+	});
+
+	test("accept is offered only when every finding is patient_data, and lands the task with one accept commit", async () => {
+		const mixed = fixture([SECURE]);
+		mixed.runner.on("security_review", { payload: { verdict: "fix", findings: [PATIENT, OTHER] } });
+		mixed.gate.on("patient_data", stop);
+		await mixed.run();
+		expect(patientGate(mixed).choices.map(choice => choice.id)).toEqual(["fix", "stop"]);
+
+		const fx = fixture([SECURE]);
+		fx.runner.on("security_review", { payload: { verdict: "fix", findings: [PATIENT] } });
+		fx.gate.on("patient_data", { choice: "accept" });
+		const summary = await fx.run();
+		expect(summary).toMatchObject({ outcome: "complete", reasons: [] });
+		expect(patientGate(fx).choices.map(choice => choice.id)).toEqual(["fix", "accept", "stop"]);
+		const gateId = fx.log.find(entry => entry.kind === "gate" && entry.cause === "patient_data")!;
+		expect(gateId).toMatchObject({ choice: "accept" });
+		const accepts = fx.world.state.ticket.filter(commit => commit.accepts !== undefined);
+		expect(accepts).toHaveLength(1);
+		expect(accepts[0].accepts).toEqual([(gateId as { id: string }).id]);
+		expect(fx.runner.slots("T1")).toEqual(["test_author", "test_review", "implementer", "security_review"]);
+		// The accept commit is checked (same tree, one more run) before the task is integrated, and the tip carries that note.
+		const ops = fx.world.state.ops.filter(op => !op.startsWith("slot"));
+		expect(ops.slice(ops.indexOf("accept T1"), ops.indexOf("accept T1") + 3)).toEqual(["accept T1", "check T1", "integrate T1"]);
+		expect(fx.world.checked.at(-1)?.sha).toBe(accepts[0].sha);
+		expect(fx.world.state.notes.get(fx.world.tip())).toMatchObject({ task: "T1", checks: { guard: "pass" } });
+		expect(fx.world.state.taskNotes.size).toBe(0);
+		expect(statusFromGit(fx.git, parsePlanOrThrow(fx), "rev1").tasks[0]).toMatchObject({ state: "done", reason: `patient_data accepted (${(gateId as { id: string }).id})` });
+	});
+
+	test("stop holds the task: blocked, kept ref, nothing integrated, dependants wait", async () => {
+		const fx = fixture([SECURE, { id: "T2", deps: ["T1"] }]);
+		fx.runner.on("security_review", { payload: { verdict: "pass", findings: [PATIENT] } });
+		fx.gate.on("patient_data", stop);
+		const summary = await fx.run();
+		expect(summary.outcome).toBe("incomplete");
+		expect(summary.reasons).toEqual(["T1 is blocked: patient_data", "T2 was not started: it waits for T1"]);
+		expect(fx.world.state.kept.get("refs/spec-conflict/PAC-1/T1")).toHaveLength(3);
+		expect(patientGate(fx).detail).toContain("refs/spec-conflict/PAC-1/T1");
+		expect(fx.world.state.ticket).toEqual([]);
+		expect(fx.world.state.ops).not.toContain("integrate T1");
+		expect(fx.world.state.taskNotes.get("T1")).toMatchObject({ blocked: true, reason: "patient_data", plan_rev: "rev1" });
+		expect(fx.states()).toEqual({ T1: "blocked", T2: "waiting" });
+		expect(fx.runner.slots("T2")).toEqual([]);
+	});
+
+	test("a dismissed patient_data gate stops", async () => {
+		const fx = fixture([SECURE]);
+		fx.runner.on("security_review", { payload: { verdict: "pass", findings: [PATIENT] } });
+		// A dialog that was dismissed returns no usable choice: the request names the stopping fallback and the run takes it.
+		fx.gate.on("patient_data", { choice: "" });
+		const summary = await fx.run();
+		expect(patientGate(fx).fallback).toBe("stop");
+		expect(summary).toMatchObject({ outcome: "incomplete", reasons: ["T1 is blocked: patient_data"] });
+		expect(gateLog(fx)).toEqual([["patient_data", "stop"]]);
+		expect(fx.world.state.ticket).toEqual([]);
+		expect(fx.world.state.ops).not.toContain("accept T1");
+	});
+});
+
+function parsePlanOrThrow(fx: Fixture) {
+	const parsed = parsePlan(fx.world.state.planText);
+	if (!parsed.ok) throw new Error("fixture plan does not parse");
+	return parsed.plan;
+}
+
+describe("defaults", () => {
+	test("the default story budget is $100", async () => {
+		// No `budgetUsd` option: $99 spent leaves the next slot free, and the slot that brings the total to $100 closes the budget.
+		const fx = fixture([{ id: "T1" }]);
+		fx.runner.on("test_author", { cost: 99 });
+		fx.runner.on("test_review", { cost: 1 });
+		fx.gate.on("budget", stop);
+		const summary = await fx.run();
+		expect(summary).toMatchObject({ outcome: "stopped", costUsd: 100 });
+		expect(fx.runner.slots("T1")).toEqual(["test_author", "test_review"]);
+		expect(fx.gate.requests[0].title).toBe("The story budget is reached: $100.00 of $100");
+		expect(DEFAULTS.budgetUsd).toBe(100);
+	});
+
+	test("the default slot wall timeout is 20 minutes", async () => {
+		const timeouts = spyOn(AbortSignal, "timeout");
+		try {
+			const fx = fixture([{ id: "T1" }]);
+			expect((await fx.run()).outcome).toBe("complete");
+			expect(timeouts.mock.calls.length).toBeGreaterThan(0);
+			for (const [ms] of timeouts.mock.calls) expect(ms).toBe(20 * 60_000);
+		} finally {
+			timeouts.mockRestore();
+		}
+		expect(DEFAULTS.slotTimeoutMs).toBe(1_200_000);
 	});
 });

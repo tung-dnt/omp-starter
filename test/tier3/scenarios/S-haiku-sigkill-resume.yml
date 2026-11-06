@@ -1,0 +1,54 @@
+id: S-haiku-sigkill-resume
+runner: haiku
+proves:
+  - R-61
+description: "SIGKILL the omp process mid-slot of a two-task story, leaving real partial git state; the next run finishes the story from derived state, at concurrency 2 and at concurrency 1."
+runs:
+  - name: killed
+    plan: t3-sum.md
+    actions:
+      &actions
+      - "on":
+          event: task-start
+          task: T3-SUM-T01
+        do: sigkill
+        delayMs: 3000
+    expect:
+      - event: run-start
+      - event: run-end
+        absent: true
+  - name: resume
+    plan: t3-sum.md
+    fresh: false
+    gates:
+      - &item0
+        title: the story review found problems
+        choose: ^Accept
+    expect:
+      - spec-status-done
+      - trailers
+      - check-notes
+      - no-leftover-worktree
+      - run-outcome-complete
+  - name: killed-1
+    plan: t3-sum.md
+    fresh: true
+    args: "--concurrency 1"
+    actions:
+      *actions
+    expect:
+      - event: run-start
+      - event: run-end
+        absent: true
+  - name: resume-1
+    plan: t3-sum.md
+    fresh: false
+    args: "--concurrency 1"
+    gates:
+      - *item0
+    expect:
+      - spec-status-done
+      - trailers
+      - check-notes
+      - no-leftover-worktree
+      - run-outcome-complete

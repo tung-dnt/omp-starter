@@ -1,0 +1,20 @@
+id: S-tui-input-intercept
+runner: scripted
+proves:
+  - R-90
+description: "A pty-driven omp TUI session (no model): interactive input typed during a run is intercepted with a notice and starts no turn; run controls (/spec-status) pass; a second run is refused; the first run still finishes."
+runs:
+  - name: run
+    plan: t3-single.md
+    tui: true
+    setup:
+      - hook-installed
+    expect:
+      - tui: notice-shown
+      - tui: controls-pass
+      - tui: second-run-refused
+      - tui: no-model-turn
+      - tui: report-shown
+      - event: run-end
+        detail: ^complete
+      - spec-status-done

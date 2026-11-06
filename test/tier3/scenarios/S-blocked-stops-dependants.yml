@@ -1,0 +1,36 @@
+id: S-blocked-stops-dependants
+runner: scripted
+proves:
+  - R-03
+description: A task is blocked at the retry cap; its dependant never starts; the independent tasks complete.
+runs:
+  - name: run
+    plan: t3-deps.md
+    gates:
+      - title: "T3-SUM-T01: the tests did not pass"
+        choose: ^Stop
+    expect:
+      - gate:
+          cause: cap
+          task: T3-SUM-T01
+          choice: stop
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: cap
+      - status:
+          task: T3-SUM-T02
+          state: waiting
+      - status:
+          task: T3-SUM-T03
+          state: done
+      - status:
+          task: T3-SUM-T04
+          state: done
+      - event: task-start
+        task: T3-SUM-T02
+        absent: true
+      - noSlot:
+          task: T3-SUM-T02
+          slot: implementer
+      - outcome: incomplete

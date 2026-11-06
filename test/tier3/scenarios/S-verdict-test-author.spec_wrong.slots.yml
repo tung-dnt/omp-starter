@@ -1,0 +1,12 @@
+version: 1
+slots:
+  - match:
+      task: T3-SUM-T01
+      slot: test_author
+      attempt: 1
+    steps:
+      - yield:
+          verdict: spec_wrong
+          tests: []
+          acceptance_map: {}
+          notes: "scripted: the criteria contradict each other"

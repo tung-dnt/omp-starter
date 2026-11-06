@@ -1,0 +1,2079 @@
+# Step 5 requirements: the locked definition of done for the scheduler, slots and verdict schemas.
+# Checker: `bun run verify:step5` (exit 0 = done). Commit under draft: omp-starter 62a2973 (feat/spec-workflow).
+# Sources: LLD = vault Specs/omp-starter/stories/spec-workflow/lld/step5-scheduler.md (incl. Amendments 1-3 and the threat model);
+#          BRIEF = .ovis/OMP_Spec-Driven_Workflow_End-to-End_Setup-20261103-190349-b5f09408.md. Cited by heading.
+# scope: in = must be proven by its evidence; residual = accepted or deferred, no evidence; out = not step 5 (reason given).
+# evidence: empty list = MISSING (fails the checker until a test or scenario exists).
+# bun-test evidence: `name` is a substring of a describe()/test()/it() title in `file`. scenario evidence: id in `scenarios:` below (to be built under test/tier3).
+# Merged: R-52 (independent task completes when another is blocked) is merged into R-03.
+version: 1
+story: spec-workflow
+step: 5
+requirements:
+  - id: R-01
+    source: "BRIEF Division of work; LLD Per-task pipeline (Waves)"
+    text: "A task starts only when its dependencies are done."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a dependant starts only once its dependency is done"
+      - kind: scenario
+        id: S-deps-and-concurrency
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-02
+    source: "LLD Waves; Decision 3"
+    text: "At most --concurrency tasks run at once; the default is 2."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "at most `concurrency` tasks run at once"
+      - kind: scenario
+        id: S-deps-and-concurrency
+        runner: scripted
+        repeats: 1
+  - id: R-03
+    source: "LLD Failure cases; BRIEF Ph6.4"
+    text: "A blocked task stops its dependants; independent tasks keep going and complete."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "dependants never start"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a cherry-pick conflict blocks the task with reason conflict, stops its dependants"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "an independent task still completes when another is blocked"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a blocked note before the first commit is shown by status"
+      - kind: scenario
+        id: S-blocked-stops-dependants
+        runner: scripted
+        repeats: 1
+  - id: R-04
+    source: "LLD Per-task step 6; BRIEF Ph6.5, Setup 8"
+    text: "Retry cap: 3 attempts per stage, then a blocked note and the cap gate; answering retry grants exactly one more attempt."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "three failures reach the cap, a blocked note and a gate"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "retry once more at the cap gives exactly one more attempt"
+      - kind: scenario
+        id: S-haiku-failing-check
+        runner: haiku
+        repeats: 3
+  - id: R-05
+    source: "LLD Failure cases; BRIEF Verdicts"
+    text: "A schema-invalid or non-JSON payload is a failed attempt, and the reason is in the next prompt."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a schema-invalid payload and a payload that is not JSON each count as a failed attempt"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "payloads that are not an object are rejected with a reason"
+      - kind: scenario
+        id: S-payload-forms
+        runner: scripted
+        repeats: 1
+  - id: R-06
+    source: "LLD Failure cases (spike finding 2)"
+    text: "A string-encoded JSON payload is parsed, then validated."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a string payload that holds valid JSON is accepted"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: ", as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "a string payload is passed through for the scheduler to parse"
+      - kind: scenario
+        id: S-payload-forms
+        runner: scripted
+        repeats: 1
+  - id: R-07
+    source: "LLD Failure cases"
+    text: "A yield error, or no yield, is an invalid result with the runner's error in the reason."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a slot that yielded nothing is invalid, with the runner's error in the reason"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "a worker that only yields an error has no payload and says why"
+  - id: R-08
+    source: "LLD Verdicts table; BRIEF Agent slots (Output)"
+    text: "Each slot has a closed verdict schema whose enum equals the slot's verdict list; another slot's verdict is rejected."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "each schema is a closed object whose verdict enum is the slot's verdict list"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "rejects a verdict value of another slot, an unknown one and a missing one"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "every slot names its agent, role and thinking level"
+      - kind: scenario
+        id: S-payload-forms
+        runner: scripted
+        repeats: 1
+  - id: R-09
+    source: "LLD Verdicts; BRIEF Verdicts drive the next step"
+    text: "Every verdict value of every slot leads to its branch."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "test_author accepts pass, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "test_author accepts spec_wrong, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "test_author accepts need_clarification, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "test_author accepts blocked, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "test_review accepts pass, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "test_review accepts fix, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "test_review accepts spec_wrong, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "implementer accepts pass, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "implementer accepts test_wrong, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "implementer accepts need_shared_change, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "implementer accepts need_clarification, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "implementer accepts blocked, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "code_review accepts pass, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "code_review accepts fix, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "code_review accepts spec_wrong, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "security_review accepts pass, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "security_review accepts fix, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "security_review accepts spec_wrong, as an object and as a JSON string"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "every verdict value leads to its branch"
+      - kind: scenario
+        id: S-verdict-test-author
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-verdict-test-review
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-verdict-implementer-stop
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-test-wrong-approved
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-test-wrong-rejected
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-verdict-code-security-review
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-story-review-findings
+        runner: scripted
+        repeats: 1
+  - id: R-10
+    source: "LLD Gates (spec_wrong, need_clarification); Per-task step 2"
+    text: "test_author spec_wrong or need_clarification: stop with a blocked note and a gate {stop, retry with a note}; retry sends the note."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "test_author: spec_wrong and need_clarification stop with a note and a gate"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a blocked note before the first commit is shown by status"
+      - kind: scenario
+        id: S-verdict-test-author
+        runner: scripted
+        repeats: 1
+  - id: R-11
+    source: "LLD Verdicts table; Per-task step 4"
+    text: "test_review: pass locks; fix reruns the author once; a second fix opens the cap gate; spec_wrong opens a gate."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "test_review: pass locks; fix reruns the author with the findings"
+      - kind: scenario
+        id: S-verdict-test-review
+        runner: scripted
+        repeats: 1
+  - id: R-12
+    source: "LLD Gates (need_shared_change)"
+    text: "implementer need_shared_change: the gate offers only stop; nothing is committed."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "implementer: need_shared_change, need_clarification and blocked stop"
+      - kind: scenario
+        id: S-verdict-implementer-stop
+        runner: scripted
+        repeats: 1
+  - id: R-13
+    source: "LLD Gates (cap reached / blocked)"
+    text: "implementer need_clarification or blocked: gate {stop, retry}."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "implementer: need_shared_change, need_clarification and blocked stop"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "blocked offers a retry"
+      - kind: scenario
+        id: S-verdict-implementer-stop
+        runner: scripted
+        repeats: 1
+  - id: R-14
+    source: "LLD Gates (test_wrong); Per-task step 5"
+    text: "test_wrong approved at the gate: Task-Unlock commit with Unlock-Gate, tests rewritten, relocked, then the implementation."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "test_wrong, approved at the gate: a real unlock commit with Unlock-Gate"
+      - kind: scenario
+        id: S-test-wrong-approved
+        runner: scripted
+        repeats: 1
+  - id: R-15
+    source: "LLD Gates (test_wrong)"
+    text: "test_wrong rejected: the implementer reruns told the tests stand; stop blocks the task."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "implementer test_wrong: approving the unlock rewrites, reviews and relocks the tests; rejecting reruns the implementer"
+      - kind: scenario
+        id: S-test-wrong-rejected
+        runner: scripted
+        repeats: 1
+  - id: R-16
+    source: "LLD Per-task step 7; BRIEF Ph7"
+    text: "code_review and security_review: pass goes on; fix reruns the implementer with the findings and counts toward the cap; spec_wrong opens a gate; nothing is integrated before resolution."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "code_review and security_review: pass goes on, fix reruns the implementer with the findings, spec_wrong stops"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a task with a technical risk gets a code review"
+      - kind: scenario
+        id: S-verdict-code-security-review
+        runner: scripted
+        repeats: 1
+  - id: R-17
+    source: "LLD Story end"
+    text: "Story code_review runs over the ticket diff; findings open a gate (accept or stop); stop leaves the story incomplete."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "the story review: findings open a gate; accepting finishes the story, stopping leaves it incomplete"
+      - kind: scenario
+        id: S-story-review-findings
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-18
+    source: "LLD Per-task step 7; Decision 4; BRIEF Scaling"
+    text: "Review routing: code_review for any technical risk; security_review when flagged; none otherwise."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "reviewsFor: a code review for any technical risk, a security review when the plan flags it"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a task with a technical risk gets a code review, and a security-flagged one a security review"
+      - kind: scenario
+        id: S-review-routing
+        runner: scripted
+        repeats: 1
+  - id: R-19
+    source: "LLD Per-task (small); BRIEF Scaling"
+    text: "Small task: the implementer writes tests first; no test_review; fails-before and the lock still run."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a small task: the implementer writes the tests first, no test review"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "the small-task implementer writes tests first, then implements"
+  - id: R-20
+    source: "LLD Invariant 2; BRIEF Setup 2"
+    text: "Every scheduler commit carries Task and Plan-Rev equal to the revision read at run start."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "both tasks reach done on the ticket branch; the hook, the notes, the trailers and the run log are in place"
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-21
+    source: "LLD Per-task steps 2, 4, 5"
+    text: "Commit order per task: test commit, Task-Lock commit (Locked = the test files), implementation commit."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "both tasks reach done on the ticket branch; the hook, the notes, the trailers and the run log are in place"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a normal task: test author, fails-before, test review, lock, implementer, checks, integration, then the story review"
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-22
+    source: "LLD Invariant 1; Amendment 2"
+    text: "The lock commit is empty with exact trailers; it refuses unsafe paths, forged trailer values and staged changes; repo hooks do not run."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-lock.test.ts
+        name: "writes an empty commit with the Task, Plan-Rev, Task-Lock and Locked trailers"
+      - kind: bun-test
+        file: extensions/lib/spec-lock.test.ts
+        name: "refuses nothing to lock, unsafe paths, and values that could forge another trailer"
+      - kind: bun-test
+        file: extensions/lib/spec-lock.test.ts
+        name: "staged changes would ride along, so they refuse the commit"
+      - kind: bun-test
+        file: extensions/lib/spec-lock.test.ts
+        name: "unstaged edits are not committed, and repo hooks do not block the empty commit"
+      - kind: bun-test
+        file: extensions/lib/spec-lock.test.ts
+        name: "prepare-commit-msg and post-commit hooks do not run: a lock commit leaves no marker"
+      - kind: bun-test
+        file: extensions/lib/spec-lock.test.ts
+        name: "refuses a gate or task that could forge a trailer, and staged changes"
+  - id: R-23
+    source: "LLD Invariant 7; Amendment 1 M2; Decision 3"
+    text: "Only test-pattern files are locked; a tests-phase write to a non-test file is rejected; the retry locks the test only; checks.test_paths from the plan decides what a test is."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a source stub written next to the test rejects the slot; the retry with only the test passes and Locked lists the test only"
+      - kind: bun-test
+        file: extensions/lib/worker-guard.test.ts
+        name: "a tests-only scope blocks a write to a file that is not a test, however it is named"
+      - kind: bun-test
+        file: extensions/lib/spec-testfiles.test.ts
+        name: "matches the declared globs and directories"
+      - kind: scenario
+        id: S-guard-in-session
+        runner: scripted
+        repeats: 1
+  - id: R-24
+    source: "LLD Invariant 1; BRIEF Division of work"
+    text: "An implementer edit of a locked test is rejected and the file restored; the retry names the locked file."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a worker that edits a locked test is rejected, the file restored, and the retry passes"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a slot that writes outside its scope, edits a locked test or moves git is rejected, discarded and retried"
+      - kind: scenario
+        id: S-guard-in-session
+        runner: scripted
+        repeats: 1
+  - id: R-25
+    source: "LLD Invariant 1, Per-task steps 2, 5; BRIEF Setup 7.3"
+    text: "A file written outside the write scope rejects the slot; the file never reaches a commit; the retry gets the message."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a file written outside the write scope through fs rejects the slot; the file never reaches a commit"
+      - kind: bun-test
+        file: extensions/lib/worker-guard.test.ts
+        name: "write inside the scope is allowed; outside it, on a locked file, or above the worktree it is blocked"
+      - kind: bun-test
+        file: extensions/lib/worker-guard.test.ts
+        name: "a file written by a bash redirect outside the scope is caught"
+      - kind: scenario
+        id: S-guard-in-session
+        runner: scripted
+        repeats: 1
+  - id: R-26
+    source: "LLD Invariant 1; BRIEF Setup 7.2"
+    text: "A worker running git commit or moving HEAD is rejected and the commit undone; the bash guard blocks git commit."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a worker that runs git commit itself is rejected by the snapshot, and its commit is undone"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a worker that moves its own task branch is rejected"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "the prepared guard is the worker guard of this slot"
+      - kind: scenario
+        id: S-guard-in-session
+        runner: scripted
+        repeats: 1
+  - id: R-27
+    source: "LLD Gap1, N1-N2, R1; Amendment 2"
+    text: "The ticket branch, sibling spec-wt branches, spec-conflict refs and a forged notes ref moved by a slot are rejected and restored by compare-and-swap."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "update-ref of the ticket branch rejects the slot and restores the ref"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a branch made in the namespace of the sibling task branches is rejected and removed"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a forged notes ref is rejected and restored"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a notes ref forged to a plain commit is put right entry by entry"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "a ref the slot forges is put back by compare-and-swap"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "the ticket branch reset to a tip the scheduler recorded earlier is rejected and restored"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "a ticket branch rolled back to the slot-start tip after a sibling landed"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "a ref the scheduler moved twice during the slot"
+  - id: R-28
+    source: "LLD N7; Amendment 2"
+    text: "A ref turned into a symref (or retargeted, or un-symrefed) is rejected and restored."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/worker-guard.test.ts
+        name: "a ref that becomes a symref, changes its target or stops being one is listed with its target"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "the ticket branch turned into a symref to the task branch is reported and restored as a plain ref"
+  - id: R-29
+    source: "LLD N1; Amendment 3 deviation 1"
+    text: "Foreign writes during a slot (another process's note, a human commit on the ticket branch) survive a rejected slot."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a human commit on the ticket branch during a rejected slot survives the discard"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "a note another process writes during a slot survives a rejected slot"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "a human commit on the ticket branch during a slot is left in place by a rejected slot"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "a ref of another run's namespace that moves during a slot is neither reported nor touched"
+  - id: R-30
+    source: "LLD Amendment 2 N1, R1, R3; Amendment 3 deviation 1"
+    text: "A notes ref that is reset, deleted or rewritten is reported per entry and restored; only this run's entries are judged."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "the notes ref reset to an earlier value is reported per note and the lost notes are put back"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "the notes ref deleted, and a note rewritten to look like a pass, are caught the same way"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "a note the scheduler wrote during the slot on a target that had none, removed by the slot, is reported and written again"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "a note the scheduler rewrote twice during the slot (S, A, B) and the slot puts back to A is reported and ends as B"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a forged notes ref is rejected and restored"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a notes ref forged to a plain commit is put right entry by entry"
+  - id: R-31
+    source: "LLD N4; Amendment 2"
+    text: "core.fsmonitor, core.hooksPath and remote URL changes are rejected and the config restored byte for byte; fsmonitor never runs."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a config a slot rewrites (core.fsmonitor, core.hooksPath) is rejected and restored"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "a config the slot rewrites is reported, restored byte for byte, and its fsmonitor command never runs"
+      - kind: bun-test
+        file: extensions/lib/worker-guard.test.ts
+        name: "readGuarded covers the local config, and restoreGuarded puts its bytes back"
+  - id: R-32
+    source: "LLD H3c; Amendment 2"
+    text: "hooks/ and info/ are guarded: created, changed, deleted and re-moded files are listed; a linked worktree reads the shared git dir."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/worker-guard.test.ts
+        name: "hooks and info/ are guarded: a created, changed, deleted or re-moded file is listed with its path"
+  - id: R-33
+    source: "LLD H3c"
+    text: "A slot-written post-commit hook is rejected and removed; a replaced pre-push is rejected and restored from the run baseline."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a hook written into the git dir rejects the slot, naming the file, and the file is removed"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a replaced pre-push hook rejects the slot and is restored from the run baseline"
+  - id: R-34
+    source: "LLD N5"
+    text: "A reference-transaction hook planted by a slot never runs while discard restores refs; discard restores hooks and config before refs."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "a reference-transaction hook planted by the slot does not run while discard puts refs back"
+  - id: R-35
+    source: "LLD N6"
+    text: "A pre-push replaced by a directory is restored as a file; a restore that cannot succeed throws (no silent missing hook)."
+    scope: in
+    note: "The throw-path test returns early when uid is 0, so it proves nothing on a root runner."
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/worker-guard.test.ts
+        name: "a hook replaced by a directory (with a file in it), and a hooks folder replaced by a file, are restored as the original files"
+      - kind: bun-test
+        file: extensions/lib/worker-guard.test.ts
+        name: "a restore that cannot succeed throws instead of leaving the hook missing silently"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "pre-push replaced by a directory is restored as the hook file"
+  - id: R-36
+    source: "LLD H3c (hookState MARKER)"
+    text: "A pre-push hook without the marker reads as missing."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a pre-push hook without the marker reads as missing, even with the right workflow config"
+  - id: R-37
+    source: "LLD H3b; Decision 2"
+    text: "Ignored files a slot leaves are gone before the next slot; dependency folders are kept."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "an ignored file a slot leaves behind is gone when the next slot starts"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a dependency folder is kept by the per-slot clean"
+  - id: R-38
+    source: "LLD H3d; Amendment 1"
+    text: ".omp and .claude above the worktree are rejected and removed before the next slot."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "config folders above the worktree (.omp, .claude) reject the slot and are gone before the next one"
+      - kind: scenario
+        id: S-forged-worktree-config
+        runner: scripted
+        repeats: 1
+  - id: R-39
+    source: "LLD H3a; Invariant 4"
+    text: "Agent definitions are read once at run start from the starter folder; the runner never discovers them from a worktree."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "the agent body is the one read at run start: the runner never asks the SDK to discover agents from the worktree"
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "the agent definitions are read once, from the starter folder"
+      - kind: scenario
+        id: S-forged-worktree-config
+        runner: scripted
+        repeats: 1
+  - id: R-40
+    source: "LLD H3a; BRIEF Setup 6"
+    text: "A missing agent definition refuses the run before any slot starts."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "a missing one refuses the run before anything starts"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "a role with no model and an agent without a definition fail before a session exists"
+  - id: R-41
+    source: "LLD H1, N3, N10; Amendment 3"
+    text: "Check-note writes use compare-and-swap across processes (30 processes lose none); updateNotes checks the tip it was made from; temp refs are unpredictable; a planted symref is ignored; dead temp refs are pruned at run lock."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-git.test.ts
+        name: "30 processes writing notes on their own commits in one repo lose none"
+      - kind: bun-test
+        file: extensions/lib/spec-git.test.ts
+        name: "a copy deleted while the edit runs (a fresh notes tree) is not swapped in over the existing notes"
+      - kind: bun-test
+        file: extensions/lib/spec-git.test.ts
+        name: "a copy that is always deleted gives up with an error"
+      - kind: bun-test
+        file: extensions/lib/spec-git.test.ts
+        name: "a temp ref planted as a symref to spec-checks under the old predictable name does not wipe the notes"
+      - kind: bun-test
+        file: extensions/lib/spec-git.test.ts
+        name: "the temp ref has an unpredictable name and is gone after the write"
+      - kind: bun-test
+        file: extensions/lib/spec-git.test.ts
+        name: "pruneDeadTempRefs removes the temp refs of dead processes"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "taking the run lock prunes them, and leaves a live process's alone"
+  - id: R-42
+    source: "LLD Amendment 2 N8; Amendment 3 R4"
+    text: "A note written by checkCommit is recorded in the ledger at the write, so a parallel slot does not see it as foreign."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "the note checkCommit writes is recorded at the write"
+      - kind: bun-test
+        file: extensions/lib/spec-ops.test.ts
+        name: "a check run for another task while a slot is open is neither reported nor reverted by that slot"
+      - kind: bun-test
+        file: extensions/lib/spec-check.test.ts
+        name: "onNoteWritten runs at the moment of the write, before checkCommit returns, with the sha and the notes tip"
+  - id: R-43
+    source: "LLD Invariant 2; Amendment 1 H2"
+    text: "When the ticket has moved: replay, then check on the replayed sha, then the strict guard, then the note, then publish; a note comes only from a check on that exact commit."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "checks.check runs on the replayed sha when the ticket moved, under the integration order replay, check, guard, note, publish"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a replayed tip that fails its check goes back to the implementer on the adopted worktree"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "two tasks that pass alone and fail together"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a second task whose implementer removes the clash goes back through the build stage and ends done"
+  - id: R-44
+    source: "LLD Gates (conflict); Per-task step 8"
+    text: "Cherry-pick conflict: abort, the ticket branch stays untouched, the task is blocked with reason conflict, dependants stop."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a cherry-pick conflict blocks the task with reason conflict, stops its dependants and leaves the ticket branch alone"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a cherry-pick conflict opens the conflict gate, aborts cleanly and leaves the clone and the ticket branch usable"
+      - kind: scenario
+        id: S-conflict-gate
+        runner: scripted
+        repeats: 1
+  - id: R-45
+    source: "LLD M1; Invariant 5"
+    text: "Conflicting commits are kept under refs/spec-conflict/<ticket>/<task>; the gate names the ref and the cherry-pick command; a second run leaves it."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "the commits stay under refs/spec-conflict/<ticket>/<task>, the gate names the ref, and a second run leaves it alone"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "the branch tip is kept under refs/spec-conflict/<ticket>/<task> before the task is blocked, and the gate names the ref and how to resolve"
+  - id: R-46
+    source: "LLD Per-task step 8"
+    text: "A guard violation on the integrated range blocks the task before the ticket branch moves."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a guard violation on the integrated range blocks the task before the ticket branch moves"
+      - kind: scenario
+        id: S-integrated-guard-violation
+        runner: scripted
+        repeats: 1
+  - id: R-47
+    source: "LLD Failure cases (integration error)"
+    text: "A publish error opens a blocked gate; retry replays the whole integration."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "an integration error asks whether to retry; the retry replays the whole integration"
+      - kind: scenario
+        id: S-publish-error
+        runner: scripted
+        repeats: 1
+  - id: R-48
+    source: "LLD Failure cases (operation fails)"
+    text: "A failing git operation (for example index.lock) opens a gate with the error; retry replays only that operation."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "an operation that fails asks whether to retry it, and the retry replays that operation only"
+      - kind: scenario
+        id: S-index-lock-error
+        runner: scripted
+        repeats: 1
+  - id: R-49
+    source: "LLD Failure cases (parallel cherry-picks); Amendment 2"
+    text: "Integrations are serialized; the ticket moves by compare-and-swap; the later task is replayed on the new tip; both end done."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "cherry-picks are serialized: two tasks that finish together integrate one after the other"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "two independent tasks in parallel: the second to land is replayed on the new tip and still ends done with a passing guard"
+      - kind: scenario
+        id: S-parallel-sessions
+        runner: scripted
+        repeats: 1
+  - id: R-50
+    source: "LLD Amendment 1 H2"
+    text: "Two tasks that pass alone and fail together: the second is blocked by the cap and never done; a fixable clash ends done."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "two tasks that pass alone and fail together: the second to land is blocked by the cap gate, never done"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a second task whose implementer removes the clash goes back through the build stage and ends done"
+  - id: R-51
+    source: "LLD Gates; BRIEF Gates ask decisions"
+    text: "Gates are asked one at a time even when two tasks stop together."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "gates are asked one at a time even when two tasks stop together"
+      - kind: scenario
+        id: S-gate-queue
+        runner: scripted
+        repeats: 1
+  - id: R-53
+    source: "LLD Run preconditions"
+    text: "The run is refused, with no slot run, when: the vault plan is uncommitted, the plan does not parse, the wrong kind, no checks.test_files, or the clone is dirty."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "an uncommitted plan, a plan that does not parse, the wrong kind, a missing test_files command and a dirty clone each refuse the run"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a dirty clone is refused before anything runs"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a plan with uncommitted edits in the vault is refused"
+      - kind: scenario
+        id: S-refusals
+        runner: scripted
+        repeats: 1
+  - id: R-54
+    source: "LLD Run preconditions; BRIEF Ph5"
+    text: "An invalid plan is refused with the validator's findings."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "an invalid plan is refused with the validator's findings"
+  - id: R-55
+    source: "LLD Gates (missing branch); Run preconditions; BRIEF Setup 2"
+    text: "A missing ticket branch opens a gate (create it from the base, or stop); nothing is created without asking."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a missing ticket branch opens a gate: create makes it, stop refuses; nothing is created without asking"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a missing ticket branch is created only after the gate says so"
+      - kind: scenario
+        id: S-setup-gates
+        runner: scripted
+        repeats: 1
+  - id: R-56
+    source: "LLD Gates (missing hook); Run preconditions"
+    text: "A missing pre-push hook opens a gate (install or stop); install writes the marker hook and the workflow config."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a missing pre-push hook opens a gate: install puts it in place, stop refuses"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "both tasks reach done on the ticket branch; the hook, the notes, the trailers and the run log are in place"
+      - kind: scenario
+        id: S-setup-gates
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-57
+    source: "LLD Amendment 2 (tier-3 run 1 BUG 1)"
+    text: "Hook install runs bun, not the omp binary (process.execPath bug)."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-cli.test.ts
+        name: "inside omp (execPath is the omp binary) bun comes from PATH"
+      - kind: scenario
+        id: S-setup-gates
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-58
+    source: "LLD Run preconditions (--chain refusal semantics)"
+    text: "spec-hook install refuses an existing pre-push hook that spec-hook does not manage unless --chain is given; --chain keeps the old hook as pre-push.local and refuses to overwrite an existing pre-push.local."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-hook.test.ts
+        name: "a pre-push hook that is not ours is refused, and nothing is touched"
+      - kind: bun-test
+        file: extensions/lib/spec-hook.test.ts
+        name: "--chain keeps the existing hook as pre-push.local and runs it first"
+      - kind: bun-test
+        file: extensions/lib/spec-hook.test.ts
+        name: "--chain refuses to overwrite an existing pre-push.local"
+  - id: R-59
+    source: "LLD M3"
+    text: "One run per repo and ticket: a second run is refused naming the lock file, pid and start time; the first run's worktree survives; the lock is released after refused and completed runs."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a second run while the first waits at a gate is refused, and the first run's worktree survives"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "the lock is released after a refused run, too"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a lock another run holds refuses the run before any gate or cleanup, naming the file, the pid and the start time"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "the run lock is held from the start of the run to its end, and released after a refusal too"
+      - kind: scenario
+        id: S-run-lock
+        runner: scripted
+        repeats: 1
+  - id: R-60
+    source: "LLD M3; Amendment 1 decision 4"
+    text: "The lock of a dead pid on this host is taken over and logged; a live pid or another host refuses."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a lock of a dead process on this host is taken over and logged"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a lock of a live process, or of another host, refuses the run and stays in place"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "taking over the lock of a dead process is logged"
+      - kind: scenario
+        id: S-run-lock
+        runner: scripted
+        repeats: 1
+  - id: R-61
+    source: "LLD Failure (crash); Invariant 3"
+    text: "A run killed before any operation of a two-task story is finished by the next run from derived state, at concurrency 1 and 2."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "is finished by the next run (concurrency"
+      - kind: scenario
+        id: S-haiku-sigkill-resume
+        runner: haiku
+        repeats: 3
+  - id: R-62
+    source: "LLD Failure (crash)"
+    text: "Leftover spec-wt worktrees and branches are removed before the task starts again."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "worktrees and branches a killed run left behind are removed before the next run"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "leftover worktrees of a killed run are removed before the task starts again"
+  - id: R-63
+    source: "LLD Blocked state / Failure"
+    text: "Unexplained unfinished ticket commits are reported, not started."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "tasks left in a state the scheduler did not make are reported, not started"
+  - id: R-64
+    source: "LLD Failure (plan changed mid-run)"
+    text: "A plan revision committed mid-run: no new starts; a plan-changed gate opens; stop ends the run with the reason; the task stays ready."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a plan revision committed mid-run stops new starts and opens a gate; stop ends the run"
+      - kind: scenario
+        id: S-haiku-plan-commit-midrun
+        runner: haiku
+        repeats: 3
+  - id: R-65
+    source: "LLD Failure (plan changed); Amendment 1"
+    text: "An uncommitted vault edit mid-run counts as a change; continue keeps the run's own Plan-Rev in prompts."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "an uncommitted edit counts as a change too, and continue keeps the run's own plan revision"
+      - kind: scenario
+        id: S-haiku-plan-edit-midrun
+        runner: haiku
+        repeats: 3
+  - id: R-66
+    source: "LLD Blocked state before any task commit"
+    text: "A blocked task-key note at an old plan revision is ignored; a new plan commit unblocks; a rerun clears the note."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a blocked note before the first commit is shown by status and cleared by a plan fix"
+      - kind: bun-test
+        file: scripts/spec-status.test.ts
+        name: "a task-key note of the current plan revision shows blocked; a new plan revision shows ready"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a blocked note before any commit is shown, and a plan fix (a new revision) makes the task ready again"
+  - id: R-67
+    source: "LLD Budgets; BRIEF Ph6"
+    text: "Story budget: the sum of slot costUsd; past the limit nothing new starts; the budget gate opens; stop ends without blocked notes; raising the limit by $50 continues."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "past the budget nothing new starts: the budget gate asks, stop ends the run without blocked notes"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "raising the limit by $50 lets the run go on until the next limit"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "the payload of the last yield, the summed cost"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "an assistant message_end reports its cost and the context its request carried"
+      - kind: scenario
+        id: S-haiku-tiny-budget
+        runner: haiku
+        repeats: 3
+  - id: R-68
+    source: "LLD Budgets"
+    text: "In-flight slots finish before the budget gate opens."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "in-flight slots finish before the budget gate opens"
+      - kind: scenario
+        id: S-haiku-tiny-budget
+        runner: haiku
+        repeats: 3
+  - id: R-69
+    source: "LLD Budgets"
+    text: "The default story budget is $100."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "the default story budget is $100"
+  - id: R-70
+    source: "LLD Budgets; BRIEF Ph6"
+    text: "Context ceiling: the session is aborted past the ceiling with aborted: context; it counts as an attempt; the next prompt says so."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a context abort counts as an attempt and the next prompt says so"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "past the context ceiling the session is aborted, later events are ignored and the result says context"
+      - kind: scenario
+        id: S-haiku-tiny-context
+        runner: haiku
+        repeats: 3
+  - id: R-71
+    source: "LLD Budgets"
+    text: "The implementer slot receives the 300K token context ceiling."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "the prompts carry the plan, the paths, the locked tests of the implementer and the review's diff"
+  - id: R-72
+    source: "LLD Budgets"
+    text: "The wall timeout aborts the slot through its signal and counts as an attempt; a runner that ignores the signal is left behind."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "the wall timeout aborts the slot through its signal and counts as an attempt"
+      - kind: scenario
+        id: S-haiku-tiny-timeout
+        runner: haiku
+        repeats: 3
+  - id: R-73
+    source: "LLD Budgets"
+    text: "The default slot wall timeout is 20 minutes."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "the default slot wall timeout is 20 minutes"
+  - id: R-74
+    source: "LLD Real SlotRunner"
+    text: "The caller's signal aborts the session (aborted: signal) and disposes it; an already-aborted signal creates no session."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "the caller's signal aborts the session and the result says signal; an aborted signal never creates a session"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a run signal that is already aborted starts nothing"
+  - id: R-75
+    source: "LLD Gates (blocked); BRIEF blocked verdict"
+    text: "A runner throw is an environment failure: a blocked gate with the message, not a failed attempt."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a runner that throws is an environment failure for the human, not a failed attempt"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "a prompt that fails rejects the run with its error, and the session is still disposed"
+  - id: R-76
+    source: "LLD Real SlotRunner"
+    text: "An unresolved model role or agent definition fails before any session exists."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "a role with no model and an agent without a definition fail before a session exists"
+  - id: R-77
+    source: "LLD Real SlotRunner; BRIEF Agent slots"
+    text: "Session options: restricted tools, required yield, strict output schema, explicit thinking level, no process-state binding, no UI, no MCP, the guard preloaded, no extensions, title spec:S:T:slot; a fresh session per slot."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "restricted tools, a required yield, the schema, an explicit thinking level, no MCP or UI, the agent body and the model of the role"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "the prepared guard is the worker guard of this slot"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "the session title tags the story, task and slot"
+      - kind: scenario
+        id: S-session-options
+        runner: scripted
+        repeats: 1
+  - id: R-78
+    source: "BRIEF Agent slots; LLD slot table"
+    text: "Slot tool lists exclude find, task, ask, todo, yield and MCP; read-only slots lack edit, write and bash."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "no slot can spawn agents, ask, plan, find or reach MCP, and a read-only slot cannot write or run a shell"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "a read-only slot gets the reading tools and its own agent and role"
+      - kind: scenario
+        id: S-session-options
+        runner: scripted
+        repeats: 1
+  - id: R-79
+    source: "LLD Real SlotRunner; Decision D6"
+    text: "Every slot has an explicit thinking level; slot sessions make no TypeSafe or Jev calls."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "every slot names its agent, role and thinking level"
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-80
+    source: "LLD Real SlotRunner; Failure (parallel SDK sessions)"
+    text: "Every run registers under its own agent id (never Main); parallel runs do not replace each other; the id is released on dispose."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "every run registers under its own agent id"
+      - kind: scenario
+        id: S-parallel-sessions
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-81
+    source: "LLD Real SlotRunner"
+    text: "The payload comes from the last yield; cost is summed from message_end; the largest context is kept; the session file is reported; the session is disposed once; the run waits for the terminal agent_end."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "the payload of the last yield, the summed cost, the largest context and the session file; the session is disposed once"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "it waits for the terminal end even when the prompt has already returned"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "an assistant message_end reports its cost and the context its request carried"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "agent_end ends the run unless it is a scheduling pause"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "adaptSession maps events"
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-82
+    source: "LLD Real SlotRunner"
+    text: "A yield error followed by a later yield clears the error; a session without a file leaves the field absent."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "a worker that only yields an error has no payload and says why; a later yield clears the error"
+      - kind: bun-test
+        file: extensions/lib/spec-slot-runner.test.ts
+        name: "a session without a file leaves sessionFile out"
+  - id: R-83
+    source: "BRIEF Communication; LLD Prompt builders"
+    text: "Prompts carry the plan path and revision, the files to write and read, locked tests, test files, checks, risks, findings, notes, the attempt number, the LLD path or the reason it was skipped, and the story-review task list."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "every slot's prompt names the paths, the acceptance criteria and the yield shape"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "writers list the files they may write and read; reviewers do not"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "risks marked yes are listed with their reasons"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "locked files, the task's test files and the check commands appear when given"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "prior findings, human notes and the attempt number are carried to the next run"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "the LLD path or the reason it was skipped is stated"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "the story review lists every task"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "the prompts carry the plan, the paths, the locked tests of the implementer and the review's diff"
+  - id: R-84
+    source: "LLD Prompt builders"
+    text: "A diff over 80,000 characters is cut with a count of what is missing."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "a diff over the limit is cut with a note that counts what is missing"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "a review carries the diff, cut when it is long"
+  - id: R-85
+    source: "LLD Files; BRIEF Setup 6"
+    text: "/run-story, /run-task, /run-stop, /spec-status, the spec_status tool and the input handler are registered; exactly one run-story."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "registers the run commands, the status command and the read-only tool"
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-86
+    source: "LLD Files"
+    text: "Bad arguments print the usage and nothing starts; /run-stop when idle says so."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "bad arguments are reported with the usage line and nothing starts"
+  - id: R-87
+    source: "BRIEF Setup 6; LLD Files"
+    text: "/run-task runs a one-task plan to completion."
+    scope: in
+    evidence:
+      - kind: scenario
+        id: S-haiku-run-task
+        runner: haiku
+        repeats: 3
+  - id: R-88
+    source: "LLD Files"
+    text: "/run-task refuses a story plan."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "/run-task refuses a story plan"
+  - id: R-89
+    source: "LLD Files; BRIEF Setup 3"
+    text: "/spec-status and the spec_status tool print the status from git; the tool needs a plan before any run."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "/spec-status and the spec_status tool print the status from git"
+      - kind: bun-test
+        file: scripts/spec-status.test.ts
+        name: "a task-key note of the current plan revision shows blocked"
+      - kind: bun-test
+        file: extensions/lib/spec-git.test.ts
+        name: "exit 0 with text and --json on a two-task repo"
+  - id: R-90
+    source: "LLD TUI; Decision 1"
+    text: "During a run typed interactive input is intercepted (handled: true) with a notice; run controls and non-interactive input pass; a second run is refused."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "during a run typed prompts are intercepted and answered with a notice; run controls and non-interactive input pass; a second run is refused"
+      - kind: scenario
+        id: S-tui-input-intercept
+        runner: scripted
+        repeats: 1
+  - id: R-91
+    source: "LLD TUI; Failure (/run-stop)"
+    text: "/run-stop aborts in-flight slots, writes no blocked note, removes the worktrees, tasks stay ready; an open gate ends the run."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "/run-stop aborts the in-flight slot, writes no blocked note and removes the worktrees"
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "/run-stop aborts the active run: a gate that is open when the run is stopped ends it"
+      - kind: scenario
+        id: S-haiku-run-stop
+        runner: haiku
+        repeats: 3
+  - id: R-92
+    source: "LLD TUI; BRIEF Setup 3"
+    text: "Progress is shown through onStatus / formatStatusLine (for example 'S ▸ 1/2 done · 1 ready', 'running T1 test_author')."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "the status line is reported through onStatus and the run log has a line per slot run"
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-93
+    source: "LLD Run log"
+    text: "A JSONL run log has one line per slot, gate and event; it lives outside the vault; the story id is sanitized; it is append-only and never read as state."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-runlog.test.ts
+        name: "lives under the private HOME's ~/.omp/agent/spec-runs by default"
+      - kind: bun-test
+        file: extensions/lib/spec-runlog.test.ts
+        name: "creates nothing until the first entry, then appends one JSON object per line and never rewrites"
+      - kind: bun-test
+        file: extensions/lib/spec-runlog.test.ts
+        name: "a story id that is not a safe folder name is sanitized, never escaping the root"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "both tasks reach done on the ticket branch; the hook, the notes, the trailers and the run log are in place"
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-94
+    source: "LLD Run log; Gates (every answer)"
+    text: "Every gate answer is logged with the choice and the note."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "every gate answer goes to the run log, with the note"
+      - kind: scenario
+        id: S-setup-gates
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-verdict-test-author
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-haiku-failing-check
+        runner: haiku
+        repeats: 3
+  - id: R-95
+    source: "LLD Gates"
+    text: "An answer that is not one of the choices falls back to the stopping choice."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "an answer that is not one of the choices falls back to the stopping choice"
+  - id: R-96
+    source: "LLD Gates table"
+    text: "Each gate cause offers its own choices (spec_wrong, test_wrong, cap, budget, conflict, missing branch)."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "test_author: spec_wrong and need_clarification stop with a note and a gate"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "implementer test_wrong: approving the unlock rewrites"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "past the budget nothing new starts"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a missing ticket branch opens a gate"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "the commits stay under refs/spec-conflict/<ticket>/<task>, the gate names the ref"
+      - kind: scenario
+        id: S-verdict-test-author
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-test-wrong-approved
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-conflict-gate
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-setup-gates
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-haiku-failing-check
+        runner: haiku
+        repeats: 3
+      - kind: scenario
+        id: S-haiku-tiny-budget
+        runner: haiku
+        repeats: 3
+  - id: R-97
+    source: "LLD Gates; BRIEF Division of work (ctx.ui select)"
+    text: "A gate is delivered as a real RPC extension_ui_request and its answer is applied."
+    scope: in
+    evidence:
+      - kind: scenario
+        id: S-setup-gates
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-gate-queue
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-verdict-test-author
+        runner: scripted
+        repeats: 1
+      - kind: scenario
+        id: S-haiku-failing-check
+        runner: haiku
+        repeats: 3
+      - kind: scenario
+        id: S-haiku-tiny-budget
+        runner: haiku
+        repeats: 3
+      - kind: scenario
+        id: S-haiku-plan-commit-midrun
+        runner: haiku
+        repeats: 3
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-98
+    source: "LLD Gates (retry with an extra note via ctx.ui.input)"
+    text: "A free-text note is collected through ctx.ui.input and reaches the next prompt."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "retry reruns with the human's note"
+      - kind: scenario
+        id: S-verdict-test-author
+        runner: scripted
+        repeats: 1
+  - id: R-99
+    source: "BRIEF Ph6.3.2; LLD Per-task step 3"
+    text: "Fails-before is checked per locked test file (decision 2026-11-05)."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a fails-before result of already-passes reruns the test author with the evidence"
+      - kind: bun-test
+        file: extensions/lib/spec-check.test.ts
+        name: "accepts a new test that fails on the task base, refuses one that already passes, and reports each file"
+  - id: R-100
+    source: "LLD Per-task step 3"
+    text: "already-passes reruns test_author with the evidence."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a fails-before result of already-passes reruns the test author with the evidence"
+      - kind: scenario
+        id: S-already-passes
+        runner: scripted
+        repeats: 1
+  - id: R-101
+    source: "LLD Per-task step 3"
+    text: "failsBefore with the real runner on the base commit: the new tests fail."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-check.test.ts
+        name: "accepts a new test that fails on the task base"
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-102
+    source: "LLD Per-task step 6; BRIEF Ph6.3.4"
+    text: "test, typecheck and lint run by code; failing output goes back to the implementer up to the cap."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "failing checks send the output back to the implementer"
+      - kind: bun-test
+        file: extensions/lib/spec-check.test.ts
+        name: "pass, fail and skip per check; every check runs even after a failure"
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+      - kind: scenario
+        id: S-haiku-failing-check
+        runner: haiku
+        repeats: 3
+  - id: R-103
+    source: "BRIEF Ph6.3.4 (LSP diagnostics, e2e, vulnerability scan)"
+    text: "LSP diagnostics, e2e and vulnerability scan run by code, scaled to task size."
+    scope: out
+    reason: "User decision 2026-11-05: moved to step 6; the LLD checks are test, typecheck, lint and guard only."
+  - id: R-104
+    source: "BRIEF Ph6.1; LLD Amendment 4"
+    text: "The foundation task runs first and must pass its checks before any other task starts."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-status.test.ts
+        name: "a non-foundation task waits for every foundation task of the plan, with the reason"
+      - kind: bun-test
+        file: extensions/lib/spec-validate.test.ts
+        name: "foundation-order: a foundation task may not depend on a non-foundation task"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "no other task starts before the foundation task has landed"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a blocked foundation task stops every other task and the summary names it"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "two foundation tasks run together, then the rest"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a restart after the foundation task landed starts the rest at once"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a task started after the foundation task is made from a tip that holds its commits"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a foundation task whose checks fail never lets another task get a worktree"
+      - kind: scenario
+        id: S-foundation-first
+        runner: scripted
+        repeats: 1
+  - id: R-105
+    source: "LLD Per-task step 8; BRIEF Setup 7.1"
+    text: "spec-guard reruns on the integrated range before the ticket moves."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a guard violation on the integrated range blocks the task before the ticket branch moves"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "both tasks reach done on the ticket branch; the hook, the notes, the trailers and the run log are in place"
+      - kind: scenario
+        id: S-integrated-guard-violation
+        runner: scripted
+        repeats: 1
+  - id: R-106
+    source: "LLD Invariant 4; BRIEF Setup 7.2"
+    text: "The scheduler makes no push, no vault writes and no network calls beyond the model calls."
+    scope: in
+    evidence:
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-107
+    source: "LLD No push (governs; brief Ph8 corrected, user decision 2026-11-05)"
+    text: "The scheduler never pushes; humans push, through the pre-push hook (spec-guard strict)."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-hook.test.ts
+        name: "an out-of-scope commit blocks the push; after the fix the push goes through"
+      - kind: bun-test
+        file: extensions/lib/spec-hook.test.ts
+        name: "a commit without Task: blocks the push (strict), and --no-verify is the human way around"
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-108
+    source: "BRIEF Ph7 (security review checks)"
+    text: "A security finding on patient data blocks the merge until the human decides."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-status.test.ts
+        name: "an accepted patient-data finding shows on the done task"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a patient_data finding opens a gate before any implementer rerun, for pass and for fix"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "fix at the patient_data gate reruns the implementer with all findings and reviews again"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "accept is offered only when every finding is patient_data, and lands the task with one accept commit"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "stop holds the task: blocked, kept ref, nothing integrated, dependants wait"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a dismissed patient_data gate stops"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "an accepted patient-data finding lands with accept trailers and passes the strict guard"
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.git.test.ts
+        name: "a held patient-data task leaves the ticket branch alone, keeps its commits and starts again only after a plan commit"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "security findings need a category and code_review findings do not"
+      - kind: bun-test
+        file: extensions/lib/spec-slots.test.ts
+        name: "the security prompt defines patient_data and says to cite, not quote"
+      - kind: bun-test
+        file: extensions/lib/spec-lock.test.ts
+        name: "acceptCommit writes an empty commit with exact trailers and refuses forged values"
+      - kind: scenario
+        id: S-patient-data-block
+        runner: scripted
+        repeats: 1
+  - id: R-109
+    source: "LLD Failure cases (notifies); BRIEF Ph6.4"
+    text: "A failure notifies the human (ctx.ui.notify with the outcome)."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "during a run typed prompts are intercepted and answered with a notice"
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+      - kind: scenario
+        id: S-haiku-failing-check
+        runner: haiku
+        repeats: 3
+  - id: R-110
+    source: "BRIEF Setup 7.2 (remote refs unchanged)"
+    text: "The git snapshot covers remote-tracking refs."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/worker-guard.test.ts
+        name: "created, moved and deleted refs, a detached HEAD and tags are each listed"
+  - id: R-111
+    source: "BRIEF Setup 6"
+    text: "The built names are /run-story, /run-task, /run-stop, /spec-status and the read-only tool spec_status; /discover belongs to step 7."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "registers the run commands, the status command and the read-only tool"
+  - id: R-112
+    source: "BRIEF Ph4; LLD Preconditions"
+    text: "Each task repo maps to a clone by origin org/name."
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-git.test.ts
+        name: "cloneIdentities and listFilesByRepo key clones by origin org/name"
+      - kind: bun-test
+        file: extensions/lib/spec-git.test.ts
+        name: " is org/backend"
+      - kind: bun-test
+        file: extensions/lib/spec-git.test.ts
+        name: "no origin, or an origin without an org/name path, is undefined"
+  - id: R-113
+    source: "LLD Preconditions (per repo)"
+    text: "A run across two repos completes; each repo's ticket branch receives its commits."
+    scope: in
+    evidence:
+      - kind: scenario
+        id: S-haiku-two-repo
+        runner: haiku
+        repeats: 3
+  - id: R-114
+    source: "LLD Amendment 4 C"
+    text: "The scripted-slot seam is off unless the host's launch environment sets SPEC_SLOT_SCRIPT, and every use is visible (run log, status line, report)"
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "without SPEC_SLOT_SCRIPT nothing scripted is read or built"
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "a slot_script key in the plan changes nothing"
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "a relative path, a script inside a clone and a dotenv definition each refuse the run"
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "an enabled script is the first run-log entry with its sha256 and marks every status line and the final report"
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "--slot-timeout and --max-context reach runPlan"
+      - kind: bun-test
+        file: extensions/lib/spec-scripted-slots.test.ts
+        name: "rules match by task, slot and attempt, first unconsumed first"
+      - kind: bun-test
+        file: extensions/lib/spec-scripted-slots.test.ts
+        name: "a tool step goes through the real worker guard"
+      - kind: bun-test
+        file: extensions/lib/spec-scripted-slots.test.ts
+        name: "bash steps run in the worktree: git commit is blocked, a redirect is not"
+      - kind: bun-test
+        file: extensions/lib/spec-scripted-slots.test.ts
+        name: "usage past the ceiling aborts through the real runner"
+      - kind: bun-test
+        file: extensions/lib/spec-scripted-slots.test.ts
+        name: "sleep ends when the runner aborts the session"
+      - kind: bun-test
+        file: extensions/lib/spec-scripted-slots.test.ts
+        name: "a yield may be an object or a string"
+      - kind: bun-test
+        file: extensions/lib/spec-scripted-slots.test.ts
+        name: "a session with no rule rejects the prompt"
+      - kind: bun-test
+        file: extensions/lib/spec-scripted-slots.test.ts
+        name: "unused rules are reported"
+      - kind: scenario
+        id: S-haiku-two-task
+        runner: haiku
+        repeats: 3
+  - id: R-115
+    source: "LLD Amendment 4 B0"
+    text: "A review stage that has not passed never lands the task: after a human retry the implementer and the review run again"
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/lib/spec-scheduler.test.ts
+        name: "a review spec_wrong with no findings answered retry reruns the implementer and the review"
+  - id: R-116
+    source: "LLD Amendment 4 C (flags)"
+    text: "--slot-timeout and --max-context reach runPlan"
+    scope: in
+    evidence:
+      - kind: bun-test
+        file: extensions/spec-workflow.test.ts
+        name: "--slot-timeout and --max-context reach runPlan"
+  - id: AR-01
+    source: "LLD Amendment 3 threat model R2"
+    text: "A slot-forged, well-formed fast-forward of the ticket branch is rejected but stays on the branch; PR review is the last line."
+    scope: residual
+  - id: AR-02
+    source: "LLD threat model R5"
+    text: "User-global git config (filters, gpg.program) can change what check worktrees run."
+    scope: residual
+  - id: AR-03
+    source: "LLD threat model"
+    text: ".git/spec-workflow.json is unguarded; a slot can change base and narrow the first push check."
+    scope: residual
+  - id: AR-04
+    source: "LLD threat model"
+    text: "The worktree .git pointer file is not in the snapshot."
+    scope: residual
+  - id: AR-05
+    source: "LLD threat model"
+    text: "Any write under ~ (for example ~/.omp) can affect the next run; an OS sandbox is required before step 9."
+    scope: residual
+  - id: AR-06
+    source: "LLD threat model"
+    text: "A deliberately hostile slot running bash as the user can write anywhere the user can."
+    scope: residual
+  - id: AR-07
+    source: "LLD Amendment 3 deviation 3; README"
+    text: "A slot that removes only other processes' notes is not reported."
+    scope: residual
+  - id: AR-08
+    source: "LLD M3 failure case"
+    text: "PID reuse makes a stale lock refuse spuriously; the user deletes the named file."
+    scope: residual
+  - id: AR-09
+    source: "LLD Amendment 2 deferred N9"
+    text: "Two processes taking over the same stale lock at once."
+    scope: residual
+  - id: AR-10
+    source: "LLD Deferred M4"
+    text: "Budget undercount on thrown, post-abort and abandoned runners."
+    scope: residual
+  - id: AR-11
+    source: "LLD Deferred L1-L4"
+    text: "Wall-timeout signal outside the retry; story diff base..HEAD; /run-stop during a gate leaves a blocked note; publish is ff-only in the user's clone."
+    scope: residual
+  - id: AR-12
+    source: "LLD Deferred L5; BRIEF Setup 7.4"
+    text: "Slot sessions may run plugin-judged rules (L5); a human --no-verify push is outside agent reach."
+    scope: residual
+  - id: OS-01
+    source: "BRIEF Phase 0"
+    text: "Phase 0 discovery, /discover and the discover slot."
+    scope: out
+    reason: "Step 7."
+  - id: OS-02
+    source: "BRIEF Setup 6"
+    text: "Merging the risk checklist into the agent-skills HLD and LLD skills; wiring /story, /task, /build, /review to /run-story and /run-task."
+    scope: out
+    reason: "Step 6."
+  - id: OS-03
+    source: "BRIEF Setup 9"
+    text: "The review rules file for code-reviewer and security-auditor."
+    scope: out
+    reason: "Step 6."
+  - id: OS-04
+    source: "BRIEF Phase 1, Phase 2"
+    text: "Authoring of the epic, story, HLD and LLD, done by the human and skills."
+    scope: out
+    reason: "Step 6 and skills."
+  - id: OS-05
+    source: "BRIEF Phase 9"
+    text: "The reconcile slot writing under $SPECS, with a scheduler commit."
+    scope: out
+    reason: "Step 8."
+  - id: OS-06
+    source: "BRIEF Setup 8, Phase 10"
+    text: "Audit metrics in scripts/usage-report.ts."
+    scope: out
+    reason: "Step 8."
+  - id: OS-07
+    source: "BRIEF Setup 9"
+    text: "Pilot on a real repo, the OS sandbox prerequisite and the $/accepted-task rollout criteria."
+    scope: out
+    reason: "Step 9."
+  - id: OS-08
+    source: "BRIEF Out of scope"
+    text: "Cleanup of the 329 legacy vault task notes."
+    scope: out
+    reason: "A separate user-approved migration."
+scenarios:
+  - id: S-haiku-two-task
+    runner: haiku
+    repeats: 3
+    description: "Baseline: a real two-task story at concurrency 2 over omp --mode rpc from a fixture without the pre-push hook; the hook gate is answered install; asserts T3-1..T3-11 (outcome, spec-status, trailers, Task-Lock, check notes, hook, run log, no TypeSafe or Jev tool calls, real state untouched, cost, no leftover roots) plus run-story registered once, setStatus frames, the final notify, and no push (remote refs and vault git unchanged)."
+    proves: [R-01, R-17, R-20, R-21, R-56, R-57, R-79, R-80, R-81, R-85, R-92, R-93, R-97, R-101, R-102, R-106, R-107, R-109]
+  - id: S-haiku-failing-check
+    runner: haiku
+    repeats: 3
+    description: "Real slots with a test command that always fails: the output goes back to the implementer, 3 attempts reach the cap, a blocked note and the cap gate; the gate is answered retry once (exactly one more attempt), then stop; the failure notifies; every gate answer is logged."
+    proves: [R-04, R-94, R-96, R-97, R-102, R-109]
+  - id: S-haiku-tiny-budget
+    runner: haiku
+    repeats: 3
+    description: "A tiny --budget with real slots: in-flight slots finish, the budget gate opens, a raise by $50 continues, stop ends the run without blocked notes."
+    proves: [R-67, R-68, R-96, R-97]
+  - id: S-haiku-tiny-context
+    runner: haiku
+    repeats: 3
+    description: "A tiny context ceiling makes every real slot abort with aborted: context; each counts as an attempt and the next prompt says so; the cap gate opens."
+    proves: [R-70]
+  - id: S-haiku-tiny-timeout
+    runner: haiku
+    repeats: 3
+    description: "A 1-second slot wall timeout with real slots: the SDK session is aborted through the signal, the abort counts as an attempt, the cap gate opens."
+    proves: [R-72]
+  - id: S-haiku-plan-commit-midrun
+    runner: haiku
+    repeats: 3
+    description: "The driver commits a new plan revision to the vault while a real slot is in flight: no new starts, the plan-changed gate arrives over RPC, stop ends the run with the reason and the task stays ready."
+    proves: [R-64, R-97]
+  - id: S-haiku-plan-edit-midrun
+    runner: haiku
+    repeats: 3
+    description: "The driver edits the vault plan without committing while a real slot is in flight: counts as a change; answering continue keeps the run's own Plan-Rev in later prompts."
+    proves: [R-65]
+  - id: S-haiku-run-stop
+    runner: haiku
+    repeats: 3
+    description: "The driver sends /run-stop over RPC while a real slot is in flight: the slot aborts, no blocked note is written, worktrees are removed, tasks stay ready."
+    proves: [R-91]
+  - id: S-haiku-sigkill-resume
+    runner: haiku
+    repeats: 3
+    description: "SIGKILL the omp process mid-slot of a two-task story, leaving real partial git state; the next run finishes the story from derived state, at concurrency 1 and 2."
+    proves: [R-61]
+  - id: S-haiku-run-task
+    runner: haiku
+    repeats: 3
+    description: "/run-task with a one-block task plan runs to completion over RPC."
+    proves: [R-87]
+  - id: S-haiku-two-repo
+    runner: haiku
+    repeats: 3
+    description: "A two-repo fixture: a run completes and each repo's ticket branch receives its commits, with a per-repo hook and lock."
+    proves: [R-113]
+  - id: S-deps-and-concurrency
+    runner: scripted
+    repeats: 1
+    description: "Scripted slots over RPC in a four-task plan with a dependency: the dependant starts only after its dependency is done, and the run log never shows more than 2 tasks running at once."
+    proves: [R-01, R-02]
+  - id: S-blocked-stops-dependants
+    runner: scripted
+    repeats: 1
+    description: "A task is blocked at the cap; its dependant never starts; an independent task completes."
+    proves: [R-03]
+  - id: S-payload-forms
+    runner: scripted
+    repeats: 1
+    description: "Scripted yields through the real session with strict outputSchema: a schema-invalid payload, a non-JSON payload, a string-encoded JSON payload, a yield error and another slot's verdict value; each outcome and the reason in the next prompt are asserted."
+    proves: [R-05, R-06, R-08]
+  - id: S-verdict-test-author
+    runner: scripted
+    repeats: 1
+    description: "test_author spec_wrong, need_clarification and blocked: blocked note and gate over RPC; retry collects a note through ctx.ui.input and the next prompt carries it; each answer is logged."
+    proves: [R-09, R-10, R-94, R-96, R-97, R-98]
+  - id: S-verdict-test-review
+    runner: scripted
+    repeats: 1
+    description: "test_review pass locks; fix reruns the author once; a second fix opens the cap gate; spec_wrong opens a gate."
+    proves: [R-09, R-11]
+  - id: S-verdict-implementer-stop
+    runner: scripted
+    repeats: 1
+    description: "implementer need_shared_change (gate offers only stop, nothing committed), need_clarification and blocked (gate stop or retry)."
+    proves: [R-09, R-12, R-13]
+  - id: S-test-wrong-approved
+    runner: scripted
+    repeats: 1
+    description: "implementer test_wrong with the gate approved over RPC: Task-Unlock commit with Unlock-Gate, rewritten tests, relock, then the implementation."
+    proves: [R-09, R-14, R-96]
+  - id: S-test-wrong-rejected
+    runner: scripted
+    repeats: 1
+    description: "implementer test_wrong with the gate rejected: the implementer reruns told the tests stand; a second case answers stop and the task is blocked."
+    proves: [R-09, R-15]
+  - id: S-verdict-code-security-review
+    runner: scripted
+    repeats: 1
+    description: "code_review and security_review fix and spec_wrong: fix reruns the implementer with the findings and counts toward the cap; spec_wrong opens a gate; nothing is integrated before resolution."
+    proves: [R-09, R-16]
+  - id: S-story-review-findings
+    runner: scripted
+    repeats: 1
+    description: "Story code_review findings open a gate over RPC: accept finishes the story; stop leaves it incomplete."
+    proves: [R-09, R-17]
+  - id: S-review-routing
+    runner: scripted
+    repeats: 1
+    description: "A validated plan with technical and security-flagged risks: the run log shows code_review for any risk, security_review when flagged, and none otherwise."
+    proves: [R-18]
+  - id: S-guard-in-session
+    runner: scripted
+    repeats: 1
+    description: "Scripted slots inside a real session try git commit and HEAD moves in bash, writes outside the scope, an edit of a locked test, and a non-test write in the tests phase with a plan-declared checks.test_paths; the in-session guard and the post-slot snapshot reject each, and the retry prompt carries the message."
+    proves: [R-23, R-24, R-25, R-26]
+  - id: S-forged-worktree-config
+    runner: scripted
+    repeats: 1
+    description: "A scripted slot writes .omp and .claude agent definitions above and inside the worktree; the slot is rejected, the folders are removed, and the next session uses the agent definitions read at run start."
+    proves: [R-38, R-39]
+  - id: S-session-options
+    runner: scripted
+    repeats: 1
+    description: "Reads back the effective options and tool list of a real slot session (restricted tools, required yield, strict schema, thinking level, no MCP or UI, guard preloaded, title, fresh session per slot) for a writing and a read-only slot."
+    proves: [R-77, R-78]
+  - id: S-conflict-gate
+    runner: scripted
+    repeats: 1
+    description: "Two tasks edit the same lines: the conflict gate arrives over RPC naming refs/spec-conflict/<ticket>/<task> and the cherry-pick command; the ticket branch is untouched, the task blocked with reason conflict, its dependants stop."
+    proves: [R-44, R-96]
+  - id: S-integrated-guard-violation
+    runner: scripted
+    repeats: 1
+    description: "A task whose integrated range violates spec-guard (real guard): blocked before the ticket branch moves."
+    proves: [R-46, R-105]
+  - id: S-publish-error
+    runner: scripted
+    repeats: 1
+    description: "A real non-fast-forward publish error: the blocked gate arrives over RPC; retry replays the whole integration."
+    proves: [R-47]
+  - id: S-index-lock-error
+    runner: scripted
+    repeats: 1
+    description: "A real index.lock held in the clone during a git operation: the gate carries the error; retry replays that operation only."
+    proves: [R-48]
+  - id: S-gate-queue
+    runner: scripted
+    repeats: 1
+    description: "Two tasks stop at the same time: the two gates reach the RPC client one at a time, each answered in order."
+    proves: [R-51, R-97]
+  - id: S-setup-gates
+    runner: scripted
+    repeats: 1
+    description: "A fixture with no ticket branch and no pre-push hook: the missing-branch and missing-hook gates arrive over RPC; create and install are answered and applied (hook installed by the omp binary path, not bun), a second run answers stop and creates nothing; every answer is logged."
+    proves: [R-55, R-56, R-57, R-94, R-96, R-97]
+  - id: S-refusals
+    runner: scripted
+    repeats: 1
+    description: "Each precondition refuses the run with no slot started: uncommitted vault plan, plan that does not parse, wrong kind, no checks.test_files, dirty clone."
+    proves: [R-53]
+  - id: S-run-lock
+    runner: scripted
+    repeats: 1
+    description: "A second omp run while the first is parked at a gate is refused naming the lock file, pid and start time, and the first run's worktree survives; a dead-pid lock is taken over and logged; a live pid or another host refuses; the lock is released after refused and completed runs."
+    proves: [R-59, R-60]
+  - id: S-parallel-sessions
+    runner: scripted
+    repeats: 1
+    description: "Two tasks run at concurrency 2 in real parallel SDK sessions finishing together: each session has its own agent id (never Main), both are released on dispose, integrations are serialized and the later task is replayed on the new tip; both end done."
+    proves: [R-49, R-80]
+  - id: S-already-passes
+    runner: scripted
+    repeats: 1
+    description: "A scripted test_author writes a test that already passes on the base: the real test runner reports already-passes and test_author reruns with the evidence."
+    proves: [R-100]
+  - id: S-tui-input-intercept
+    runner: scripted
+    repeats: 1
+    description: "A pty-driven omp TUI session (no model): typed interactive input during a run is intercepted with a notice; run controls pass; a second run is refused."
+    proves: [R-90]
+  - id: S-foundation-first
+    runner: scripted
+    repeats: 1
+    description: "A plan with a foundation task and dependants: the foundation task runs first and must pass its checks before any other task starts; a failing foundation keeps the others unstarted."
+    proves: [R-104]
+  - id: S-patient-data-block
+    runner: scripted
+    repeats: 1
+    description: "A security_review finding on patient data blocks the merge until the human decides at the gate; no integration happens before the answer."
+    proves: [R-108]

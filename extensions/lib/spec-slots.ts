@@ -72,11 +72,17 @@ export const isStopVerdict = (verdict: string): verdict is StopVerdict => STOP_V
 export const SEVERITIES = ["low", "medium", "high", "critical"] as const;
 export type Severity = (typeof SEVERITIES)[number];
 
+/** `patient_data`: patient or personal data in logs, errors, fixtures, test data, prompts or third-party flows. Only a security review sets it. */
+export const FINDING_CATEGORIES = ["patient_data", "other"] as const;
+export type FindingCategory = (typeof FINDING_CATEGORIES)[number];
+
 export interface Finding {
 	path: string;
 	line?: number;
 	severity: Severity;
 	text: string;
+	/** Set on every finding of a `security_review`, never on a `code_review` finding: silence is not `other`. */
+	category?: FindingCategory;
 }
 
 export interface TestAuthorVerdict {
@@ -141,6 +147,13 @@ const FINDING = {
 	additionalProperties: false,
 } as const;
 
+/** A security finding must say whether it is about patient data: the category is required, so a missing one fails the payload. */
+const SECURITY_FINDING = {
+	...FINDING,
+	properties: { ...FINDING.properties, category: { type: "string", enum: FINDING_CATEGORIES } },
+	required: [...FINDING.required, "category"],
+} as const;
+
 const object = (properties: Record<string, object>, required: readonly string[]): object => ({
 	type: "object",
 	properties,
@@ -159,8 +172,9 @@ const TEST_AUTHOR_SCHEMA = object(
 );
 const TEST_REVIEW_SCHEMA = object({ verdict: verdictField(VERDICTS.test_review), unmapped: strings, findings: strings }, ["verdict", "unmapped", "findings"]);
 const IMPLEMENTER_SCHEMA = object({ verdict: verdictField(VERDICTS.implementer), notes: { type: "string" }, checks_run: strings }, ["verdict", "notes", "checks_run"]);
-/** Both review slots return the same verdict values and findings. */
+/** Both review slots return the same verdict values; a security review's findings also carry a category. */
 const REVIEW_SCHEMA = object({ verdict: verdictField(VERDICTS.code_review), findings: { type: "array", items: FINDING } }, ["verdict", "findings"]);
+const SECURITY_SCHEMA = object({ verdict: verdictField(VERDICTS.security_review), findings: { type: "array", items: SECURITY_FINDING } }, ["verdict", "findings"]);
 
 const WRITING_TOOLS = ["read", "glob", "ast_grep", "lsp", "edit", "write", "bash"] as const;
 const READING_TOOLS = ["read", "glob", "ast_grep", "lsp"] as const;
@@ -171,7 +185,7 @@ export const SLOTS: Record<SlotName, SlotDefinition> = {
 	implementer: { agent: "task-builder", modelRole: "task", thinkingLevel: "medium", tools: WRITING_TOOLS, writes: "scope", verdicts: VERDICTS.implementer, schema: IMPLEMENTER_SCHEMA },
 	test_review: { agent: "code-reviewer", modelRole: "slow", thinkingLevel: "medium", tools: READING_TOOLS, writes: "none", verdicts: VERDICTS.test_review, schema: TEST_REVIEW_SCHEMA },
 	code_review: { agent: "code-reviewer", modelRole: "slow", thinkingLevel: "high", tools: READING_TOOLS, writes: "none", verdicts: VERDICTS.code_review, schema: REVIEW_SCHEMA },
-	security_review: { agent: "security-auditor", modelRole: "slow", thinkingLevel: "high", tools: READING_TOOLS, writes: "none", verdicts: VERDICTS.security_review, schema: REVIEW_SCHEMA },
+	security_review: { agent: "security-auditor", modelRole: "slow", thinkingLevel: "high", tools: READING_TOOLS, writes: "none", verdicts: VERDICTS.security_review, schema: SECURITY_SCHEMA },
 };
 
 /** `spec:<story>:<task>:<slot>`: the session title that tells a slot's session from a main session in the usage report. */
@@ -226,7 +240,7 @@ class Reader {
 		return this.#fail(`"${key}" must be an object that maps each criterion to a test name`);
 	}
 
-	findings(key: string): Finding[] | undefined {
+	findings(key: string, withCategory = false): Finding[] | undefined {
 		const value = this.data[key];
 		if (!Array.isArray(value)) return this.#fail(`"${key}" must be an array of findings`);
 		const found: Finding[] = [];
@@ -235,7 +249,9 @@ class Reader {
 			const severity = SEVERITIES.find(candidate => candidate === item.severity);
 			if (severity === undefined) return this.#fail(`"${key}[${i}].severity" must be one of ${SEVERITIES.join(", ")}`);
 			if (item.line !== undefined && item.line !== null && (typeof item.line !== "number" || !Number.isInteger(item.line))) return this.#fail(`"${key}[${i}].line" must be an integer`);
-			found.push({ path: item.path, ...(typeof item.line === "number" ? { line: item.line } : {}), severity, text: item.text });
+			const category = FINDING_CATEGORIES.find(candidate => candidate === item.category);
+			if (withCategory && category === undefined) return this.#fail(`"${key}[${i}].category" must be one of ${FINDING_CATEGORIES.join(", ")}`);
+			found.push({ path: item.path, ...(typeof item.line === "number" ? { line: item.line } : {}), severity, text: item.text, ...(withCategory && category !== undefined ? { category } : {}) });
 		}
 		return found;
 	}
@@ -267,13 +283,13 @@ const READERS: { [S in SlotName]: (reader: Reader) => Parsed<SlotVerdicts[S]> } 
 		if (reader.error !== undefined || verdict === undefined || notes === undefined || !checks_run) return bad(reader.error ?? "the payload is incomplete");
 		return { ok: true, value: { verdict, notes, checks_run } };
 	},
-	code_review: reader => readReview(reader, VERDICTS.code_review),
-	security_review: reader => readReview(reader, VERDICTS.security_review),
+	code_review: reader => readReview(reader, VERDICTS.code_review, false),
+	security_review: reader => readReview(reader, VERDICTS.security_review, true),
 };
 
-function readReview(reader: Reader, values: typeof VERDICTS.code_review): Parsed<ReviewVerdict> {
+function readReview(reader: Reader, values: typeof VERDICTS.code_review, withCategory: boolean): Parsed<ReviewVerdict> {
 	const verdict = reader.verdict(values);
-	const findings = reader.findings("findings");
+	const findings = reader.findings("findings", withCategory);
 	if (reader.error !== undefined || verdict === undefined || !findings) return bad(reader.error ?? "the payload is incomplete");
 	if (verdict === "fix" && findings.length === 0) return bad('verdict "fix" needs at least one finding');
 	return { ok: true, value: { verdict, findings } };
@@ -299,7 +315,7 @@ export function parseVerdict<S extends SlotName>(slot: S, payload: unknown): Par
 
 /** Findings as the plain lines the next run of the implementer or test author reads. */
 export function findingLines(findings: readonly Finding[]): string[] {
-	return findings.map(finding => `[${finding.severity}] ${finding.path}${finding.line === undefined ? "" : `:${finding.line}`}: ${finding.text}`);
+	return findings.map(finding => `[${finding.severity}${finding.category === "patient_data" ? ", patient_data" : ""}] ${finding.path}${finding.line === undefined ? "" : `:${finding.line}`}: ${finding.text}`);
 }
 
 // ── Prompts ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -386,7 +402,7 @@ const SHAPE: Record<SlotName, string> = {
 	test_review: '{"verdict": "pass", "unmapped": [], "findings": []}',
 	implementer: '{"verdict": "pass", "notes": "<what you did>", "checks_run": ["<command you ran>"]}',
 	code_review: '{"verdict": "pass", "findings": [{"path": "<file>", "line": 12, "severity": "low|medium|high|critical", "text": "<what to change>"}]}',
-	security_review: '{"verdict": "pass", "findings": [{"path": "<file>", "line": 12, "severity": "low|medium|high|critical", "text": "<what to change>"}]}',
+	security_review: '{"verdict": "pass", "findings": [{"path": "<file>", "line": 12, "severity": "low|medium|high|critical", "category": "patient_data|other", "text": "<what to change>"}]}',
 };
 
 /** What counts as a test file in the tests phase, as the prompt says it: the repo's `checks.test_paths`, else the built-in patterns. */
@@ -437,6 +453,8 @@ function role(input: PromptInput): string[] {
 			return [
 				"Role: security reviewer (read-only: you change nothing). The diff below is this task's change.",
 				"Check authorisation on every new path, personal or patient data in logs, errors, fixtures or prompts, secrets handling, input validation of external data, data minimisation and new third-party data flows.",
+				"Give every finding a `category`: `patient_data` when patient or personal data is, or would be, written to logs or errors, kept in fixtures or test data, put in prompts or sent through a third-party data flow; `other` for everything else.",
+				"A `patient_data` finding blocks the merge until a human decides. Cite the file and line, and never quote the data itself.",
 			];
 	}
 }

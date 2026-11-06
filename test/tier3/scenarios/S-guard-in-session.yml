@@ -1,0 +1,76 @@
+id: S-guard-in-session
+runner: scripted
+proves:
+  - R-23
+  - R-24
+  - R-25
+  - R-26
+description: "Scripted slots inside a real session run git commit through a variable, write a non-test file in the tests phase (with a plan-declared checks.test_paths), edit a locked test and write outside the scope; the post-slot snapshot and scope check reject each, and the retry prompt carries the message."
+runs:
+  - name: run
+    plan: t3-guard.md
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 1
+          outcome: rejected
+          detail: HEAD moved from
+      - session:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          promptHas: HEAD moved from
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          outcome: rejected
+          detail: src/sum\.ts is not a test file
+      - session:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 3
+          promptHas: src/sum\.ts is not a test file
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 3
+          verdict: pass
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 1
+          outcome: rejected
+          detail: test/sum\.test\.ts is a locked test
+      - session:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 2
+          promptHas: test/sum\.test\.ts is a locked test
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 2
+          outcome: rejected
+          detail: docs/outside\.md is outside the write scope
+      - session:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 3
+          promptHas: docs/outside\.md is outside the write scope
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 3
+          verdict: pass
+      - commitShape:
+          - work
+          - lock
+          - work
+      - ticketFile:
+          path: src/sum.ts
+          contains: a + b
+      - spec-guard-strict
+      - spec-status-done
+      - run-outcome-complete

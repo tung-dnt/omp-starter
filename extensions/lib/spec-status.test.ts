@@ -255,6 +255,56 @@ describe("computeStatus: task-key notes and plan revisions", () => {
 	});
 });
 
+describe("computeStatus: foundation tasks and accepted findings", () => {
+	const foundation = (id: string, depends_on: string[] = [], repo = REPO): TaskBlock => ({ ...task(id, depends_on, repo), foundation: true });
+	const F1_DONE = [commit("f1", ["F1"], ["F1"])];
+	const NOTES: Record<string, CheckNote> = { f1: note({ task: "F1" }), f2: note({ task: "F2" }) };
+
+	test("a non-foundation task waits for every foundation task of the plan, with the reason", () => {
+		const tasks = [task("T01"), task("T02", ["T01"]), foundation("F1"), foundation("F2", ["F1"])];
+		const none = statusOf(tasks, []);
+		expect(none.tasks).toEqual([
+			{ id: "T01", state: "waiting", reason: "waits for foundation F1 (ready), F2 (waiting)" },
+			{ id: "T02", state: "waiting", reason: "waits for foundation F1 (ready), F2 (waiting)" },
+			{ id: "F1", state: "ready" },
+			{ id: "F2", state: "waiting" },
+		]);
+		const oneDone = statusOf(tasks, F1_DONE, NOTES);
+		expect(oneDone.tasks.map(t => [t.id, t.state, t.reason])).toEqual([
+			["T01", "waiting", "waits for foundation F2 (ready)"],
+			["T02", "waiting", "waits for foundation F2 (ready)"],
+			["F1", "done", undefined],
+			["F2", "ready", undefined],
+		]);
+		const bothDone = statusOf(tasks, [...F1_DONE, commit("f2", ["F2"], ["F2"])], NOTES);
+		expect(states(bothDone)).toEqual(["ready", "waiting", "done", "done"]);
+		expect(formatStatusLine(none)).toBe("S-1 ▸ 0/4 done · 1 ready · 3 waiting");
+	});
+
+	test("the barrier spans repos, names a blocked foundation task, and leaves a task with commits in its derived state", () => {
+		const tasks = [task("T01", [], "org/frontend"), task("T02"), foundation("F1")];
+		const blocked = computeStatus(plan(tasks), new Map(), () => undefined, undefined, {
+			taskNote: (_repo, id) => (id === "F1" ? note({ checks: {}, blocked: true, reason: "cap", attempts: 3 }) : undefined),
+		});
+		expect(blocked.tasks.map(t => [t.id, t.state, t.reason])).toEqual([
+			["T01", "waiting", "waits for foundation F1 (blocked)"],
+			["T02", "waiting", "waits for foundation F1 (blocked)"],
+			["F1", "blocked", "cap"],
+		]);
+		const started = computeStatus(plan(tasks), new Map([[REPO, [commit("a1", ["T02"])]]]), () => undefined);
+		expect(started.tasks.map(t => [t.id, t.state])).toEqual([["T01", "waiting"], ["T02", "awaiting-lock"], ["F1", "ready"]]);
+	});
+
+	test("an accepted patient-data finding shows on the done task", () => {
+		const accepted: TaskCommit = { ...commit("a1", ["T1"], ["T1"]), accepts: ["R-G4"] };
+		const done = statusOf([task("T1")], [commit("a0", ["T1"], ["T1"]), accepted], { a1: note() });
+		expect(done.tasks).toEqual([{ id: "T1", state: "done", lastSha: "a1", attempts: 1, reason: "patient_data accepted (R-G4)" }]);
+		const twice = statusOf([task("T1")], [accepted, { ...commit("a2", ["T1"]), accepts: ["R-G9"] }], { a2: note() });
+		expect(twice.tasks[0].reason).toBe("patient_data accepted (R-G4, R-G9)");
+		expect(statusOf([task("T1")], [commit("a1", ["T1"], ["T1"])], { a1: note() }).tasks[0].reason).toBeUndefined();
+	});
+});
+
 describe("renderStatus", () => {
 	test("the status line, one aligned row per task with its short sha, attempts and reason, then the story state", () => {
 		const status: StoryStatus = {

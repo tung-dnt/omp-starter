@@ -45,7 +45,7 @@ import {
 	writeCheckNote,
 } from "./spec-git";
 import { guardCommits } from "./spec-guard";
-import { lockCommit, unlockCommit } from "./spec-lock";
+import { acceptCommit, lockCommit, unlockCommit } from "./spec-lock";
 import { type CheckOps, type Committed, type GitOps, type IntegrateResult, type PlanSnapshot, type RepoState, type RunLock, RunLocked, type SlotWatch, type Workdir, type Worktree } from "./spec-scheduler";
 import { isRecord } from "./tooling/runtime";
 import { type GitSnapshot, type GuardedFile, NOT_A_TEST_FILE, compareSnapshot, readGuarded, restoreGuarded, scopeCheck, snapshotGit } from "./worker-guard";
@@ -587,6 +587,11 @@ export function realGitOps(config: OpsConfig): GitOps {
 		},
 		unlock(wt, unlock) {
 			const sha = unlockCommit(wt.dir, unlock);
+			recordBranch(wt.repo, wt.branch);
+			return sha;
+		},
+		accept(wt, accept) {
+			const sha = acceptCommit(wt.dir, accept);
 			recordBranch(wt.repo, wt.branch);
 			return sha;
 		},

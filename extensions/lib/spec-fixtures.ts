@@ -103,6 +103,7 @@ export interface PlanTask {
 	new_paths?: string[];
 	depends_on?: string[];
 	repo?: string;
+	foundation?: boolean;
 }
 
 export interface PlanOptions {
@@ -129,7 +130,7 @@ export function planText(options: PlanOptions): string {
 			`id: ${task.id}`,
 			`repo: ${task.repo ?? "org/backend"}`,
 			`depends_on: ${list(task.depends_on ?? [])}`,
-			"foundation: false",
+			`foundation: ${task.foundation === true}`,
 			`owns: ${list(task.owns ?? [])}`,
 			`new_paths: ${list(task.new_paths ?? [])}`,
 			"reads: []",

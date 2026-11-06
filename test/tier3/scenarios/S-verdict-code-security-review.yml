@@ -1,0 +1,95 @@
+id: S-verdict-code-security-review
+runner: scripted
+proves:
+  - R-09
+  - R-16
+description: "code_review and security_review fix and spec_wrong: fix reruns the implementer with the findings; spec_wrong opens a gate; nothing is integrated before resolution."
+runs:
+  - name: fix
+    plan: t3-routing.md
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: code_review
+          attempt: 1
+          verdict: fix
+      - session:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 2
+          promptHas: "\\[high\\] src/sum\\.ts:1: scripted: code reviewer wants a comment"
+      - slot:
+          task: T3-SUM-T01
+          slot: code_review
+          attempt: 2
+          verdict: pass
+      - slot:
+          task: T3-SUM-T02
+          slot: security_review
+          attempt: 1
+          verdict: fix
+      - session:
+          task: T3-SUM-T02
+          slot: implementer
+          attempt: 2
+          promptHas: "\\[high\\] src/max\\.ts:1: scripted: security reviewer wants a comment"
+      - slot:
+          task: T3-SUM-T02
+          slot: security_review
+          attempt: 2
+          verdict: pass
+      - order:
+          - slot:
+              task: T3-SUM-T01
+              slot: code_review
+              attempt: 1
+          - event: integrated
+            task: T3-SUM-T01
+      - spec-status-done
+      - run-outcome-complete
+  - name: spec_wrong
+    plan: t3-routing.md
+    fresh: true
+    args: "--concurrency 1"
+    gates:
+      - title: "T3-SUM-T01: spec_wrong"
+        choose: ^Stop
+      - title: "T3-SUM-T02: spec_wrong"
+        choose: ^Stop
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: code_review
+          verdict: spec_wrong
+      - slot:
+          task: T3-SUM-T02
+          slot: security_review
+          verdict: spec_wrong
+      - gate:
+          cause: spec_wrong
+          task: T3-SUM-T01
+          choice: stop
+      - gate:
+          cause: spec_wrong
+          task: T3-SUM-T02
+          choice: stop
+      - notify: "scripted: the plan asks for the wrong thing"
+      - notify: "scripted: the plan forces an insecure design"
+      - event: integrated
+        task: T3-SUM-T01
+        absent: true
+      - event: integrated
+        task: T3-SUM-T02
+        absent: true
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: spec_wrong
+      - status:
+          task: T3-SUM-T02
+          state: blocked
+          reason: spec_wrong
+      - status:
+          task: T3-SUM-T03
+          state: done
+      - outcome: incomplete

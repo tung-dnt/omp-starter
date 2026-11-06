@@ -1,0 +1,58 @@
+id: S-setup-gates
+runner: scripted
+proves:
+  - R-55
+  - R-56
+  - R-57
+  - R-94
+  - R-96
+  - R-97
+description: "A fixture with no ticket branch and no pre-push hook: both gates arrive over RPC, create and install are answered and applied (the hook runs bun, not the omp binary); a second run answers stop and creates nothing; every answer is logged."
+runs:
+  - name: create-install
+    plan: t3-single.md
+    setup:
+      - no-branch
+    expect:
+      - order:
+          - gate:
+              cause: missing-branch
+              choice: create
+          - gate:
+              cause: missing-hook
+              choice: install
+      - gateOptions:
+          title: branch T3-SUM does not exist
+          options:
+            - ^Create T3-SUM from main$
+            - ^Stop$
+          only: true
+      - gateOptions:
+          title: pre-push hook is not installed
+          options:
+            - ^Install the pre-push hook$
+            - ^Stop$
+          only: true
+      - pre-push-hook
+      - hook-installed-by-scheduler
+      - ticket: advanced
+      - real-state-untouched
+      - spec-status-done
+      - run-outcome-complete
+  - name: stop
+    plan: t3-single.md
+    fresh: true
+    setup:
+      - no-branch
+    gates:
+      - title: branch .* does not exist
+        choose: ^Stop
+    expect:
+      - gate:
+          cause: missing-branch
+          choice: stop
+      - refused: does not exist
+      - outcome: refused
+      - noTicketBranch: true
+      - event: task-start
+        absent: true

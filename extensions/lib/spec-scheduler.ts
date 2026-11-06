@@ -11,6 +11,7 @@ import { RISK_FIELDS } from "./spec-risk";
 import type { RunLog } from "./spec-runlog";
 import {
 	SLOTS,
+	type Finding,
 	type SlotName,
 	type SlotResult,
 	type SlotRunner,
@@ -149,6 +150,8 @@ export interface GitOps {
 	lock(wt: Worktree, lock: { task: string; planRev: string; files: string[] }): string;
 	/** The empty `Task-Unlock` commit a human gate approved; returns its sha. */
 	unlock(wt: Worktree, unlock: { task: string; planRev: string; gate: string }): string;
+	/** The empty `Security-Accept` commit a human gate accepted a patient-data finding with, trailers `Task`, `Plan-Rev`, `Security-Accept` and `Accept-Gate`; returns its sha. */
+	accept(wt: Worktree, accept: { task: string; planRev: string; gate: string }): string;
 	/** The change of the work directory since `from`, as a unified diff. */
 	diff(at: Workdir, from: string): string;
 	/**
@@ -191,7 +194,8 @@ export type GateCause =
 	| "missing-branch"
 	| "missing-hook"
 	| "plan-changed"
-	| "review";
+	| "review"
+	| "patient_data";
 
 export interface GateChoice {
 	id: string;
@@ -508,7 +512,7 @@ class Run {
 				reasons.push(`${task.id} has unfinished commits on the ticket branch (${task.state}); finish it by hand`);
 			} else if (task.state === "waiting") {
 				const upstream = this.#plan.tasks.find(candidate => candidate.id === task.id)?.depends_on.filter(id => byId.get(id)?.state !== "done") ?? [];
-				if (!this.#signal.aborted) reasons.push(`${task.id} was not started: it waits for ${upstream.join(", ")}`);
+				if (!this.#signal.aborted) reasons.push(`${task.id} was not started: ${task.reason ?? `it waits for ${upstream.join(", ")}`}`);
 			} else if (task.state === "ready" && !this.#signal.aborted) reasons.push(`${task.id} was not started`);
 		}
 		for (const repo of this.#reviewOpen) reasons.push(`the story review of ${repo} left findings; fix them by hand and rerun`);
@@ -1022,20 +1026,67 @@ class Run {
 			}
 			tr.report = report;
 
-			let fix: string[] = [];
+			// A review that did not pass never lets the task land. After a human retried a `spec_wrong`, the implementer and the review run
+			// again, whether or not the reviewer listed anything.
+			let rerun: string[] | undefined;
 			for (const slot of reviewsFor(task)) {
 				const review = await this.#review(tr, slot, { wd: wt, tasks: [task], diff: this.#diff(wt, wt.startTip) });
+				// A patient-data finding is a human decision before anything else: no implementer rerun, no integration. A `spec_wrong`
+				// verdict keeps its own gate, which lists the findings.
+				if (slot === "security_review" && review.verdict !== "spec_wrong" && review.findings.some(finding => finding.category === "patient_data")) {
+					const fix = await this.#patientData(tr, wt, review.findings);
+					if (fix === undefined) continue;
+					rerun = fix;
+					break;
+				}
 				if (review.verdict === "pass") continue;
-				fix = findingLines(review.findings);
-				if (review.verdict === "spec_wrong") await this.#stopVerdict(tr, "spec_wrong", fix.join("\n"));
+				const lines = findingLines(review.findings);
+				if (review.verdict === "spec_wrong") await this.#stopVerdict(tr, "spec_wrong", lines.join("\n"));
+				rerun = lines.length > 0 ? lines : [`The ${slot} ended with ${review.verdict}, but the reviewer gave no findings. Address the human's note, then the review runs again.`];
 				break;
 			}
-			if (fix.length > 0) {
-				tr.findings = fix;
+			if (rerun !== undefined) {
+				tr.findings = rerun;
 				continue;
 			}
 			return;
 		}
+	}
+
+	/**
+	 * A security review found patient data. Code never fixes or accepts it: the task is held and a human chooses. `fix` hands every finding
+	 * to the implementer (counts toward the cap) and the review runs again; `accept`, offered only when every finding is `patient_data`,
+	 * records the decision in an empty accept commit and checks it; `stop` (also a dismissed dialog) keeps the task's commits under
+	 * `refs/spec-conflict/<ticket>/<task>` and blocks it. Returns what the implementer must fix, or undefined once accepted and checked.
+	 */
+	async #patientData(tr: TaskRun, wt: Worktree, findings: readonly Finding[]): Promise<string[] | undefined> {
+		const { task } = tr;
+		const lines = findingLines(findings);
+		const ref = await this.#op(tr, "keeping the commits", () => this.#deps.git.keep(wt));
+		this.#block(tr, "patient_data");
+		const choices: GateChoice[] = [{ id: "fix", label: "Fix: the implementer gets every finding, then the review runs again", note: true }];
+		if (findings.every(finding => finding.category === "patient_data")) choices.push({ id: "accept", label: "Accept: keep it, and record the decision on the branch" });
+		choices.push({ id: "stop", label: `Stop this task (its commits are kept as ${ref})` });
+		const answer = await this.#ask({
+			cause: "patient_data",
+			task: task.id,
+			title: `${task.id}: the security review found patient data`,
+			detail: `${lines.join("\n")}\n\nThe task's commits so far are kept as ${ref}. Nothing is integrated until you decide.`,
+			choices,
+			fallback: "stop",
+		});
+		if (answer.choice === "stop") throw new TaskBlocked("patient_data");
+		this.#unblock(tr);
+		if (answer.note) tr.notes.push(answer.note);
+		if (answer.choice === "fix") return lines;
+
+		const sha = await this.#op(tr, "the accept commit", () => this.#deps.git.accept(wt, { task: task.id, planRev: this.#snapshot.rev, gate: answer.id }));
+		this.#event("accept", task.id, `${answer.id} ${sha.slice(0, 7)}`);
+		const report = await this.#op(tr, "the checks", () => this.#deps.checks.check(wt, sha));
+		this.#event("check", task.id, `${report.ok ? "pass" : "fail"} on the accept commit`);
+		if (!report.ok) return failureLines(report);
+		tr.report = report;
+		return undefined;
 	}
 
 	#worktree(tr: TaskRun): Worktree {
@@ -1258,10 +1309,12 @@ class Run {
 		// over a clone it could not restore.
 		const discard = (): Promise<void> => this.#op(tr, "restoring the clone after a slot", () => watch.discard());
 		if (result.aborted !== undefined) {
+			const timeoutMs = this.#opts.slotTimeoutMs ?? DEFAULTS.slotTimeoutMs;
+			const limit = timeoutMs >= 60_000 ? `${Math.round(timeoutMs / 60_000)} minute` : `${Number((timeoutMs / 1000).toFixed(2))} second`;
 			const why =
 				result.aborted === "context"
 					? `The slot passed the ${spec.maxContextTokens} token context ceiling and was stopped. Work in smaller steps and read less.`
-					: `The slot ran past the ${Math.round((this.#opts.slotTimeoutMs ?? DEFAULTS.slotTimeoutMs) / 60_000)} minute wall timeout and was stopped.`;
+					: `The slot ran past the ${limit} wall timeout and was stopped.`;
 			await discard();
 			log("aborted", why);
 			return { kind: "retry", reason: why };

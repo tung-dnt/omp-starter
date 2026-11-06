@@ -1,0 +1,49 @@
+id: S-test-wrong-rejected
+runner: scripted
+proves:
+  - R-09
+  - R-15
+description: "implementer test_wrong with the gate rejected: the implementer reruns told the tests stand; a second case answers stop and the task is blocked."
+runs:
+  - name: reject
+    plan: t3-single-normal.md
+    gates:
+      - title: "T3-SUM-T01: the implementer says a locked test is wrong"
+        choose: ^Reject
+    expect:
+      - gate:
+          cause: test_wrong
+          task: T3-SUM-T01
+          choice: reject
+      - session:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 2
+          promptHas: "rejected it: the locked tests stand"
+      - noSlot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+      - commitShape:
+          - work
+          - lock
+          - work
+      - spec-status-done
+      - run-outcome-complete
+  - name: stop
+    plan: t3-single-normal.md
+    fresh: true
+    gates:
+      - title: "T3-SUM-T01: the implementer says a locked test is wrong"
+        choose: ^Stop
+    expect:
+      - gate:
+          cause: test_wrong
+          task: T3-SUM-T01
+          choice: stop
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: test_wrong
+      - ticket: untouched
+      - outcome: incomplete

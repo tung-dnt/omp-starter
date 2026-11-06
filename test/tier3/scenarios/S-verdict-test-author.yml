@@ -1,0 +1,93 @@
+id: S-verdict-test-author
+runner: scripted
+proves:
+  - R-09
+  - R-10
+  - R-94
+  - R-96
+  - R-97
+  - R-98
+description: "test_author spec_wrong, need_clarification and blocked: a blocked note and a gate over RPC; retry collects a note through ctx.ui.input and the next prompt carries it; each answer is logged with its note."
+runs:
+  - name: spec_wrong
+    plan: t3-single-normal.md
+    gates:
+      - title: "T3-SUM-T01: spec_wrong"
+        choose: ^Stop
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          verdict: spec_wrong
+      - gate:
+          cause: spec_wrong
+          task: T3-SUM-T01
+          choice: stop
+      - gateOptions:
+          title: ": spec_wrong"
+          options:
+            - "^Stop this task \\(edit the plan, then rerun\\)$"
+            - ^Retry now with a note$
+          only: true
+      - notify: "scripted: the criteria contradict each other"
+      - noSlot:
+          task: T3-SUM-T01
+          slot: implementer
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: spec_wrong
+      - outcome: incomplete
+  - name: need_clarification-retry
+    plan: t3-single-normal.md
+    fresh: true
+    gates:
+      - title: "T3-SUM-T01: need_clarification"
+        choose: ^Retry now
+      - title: Note for T3-SUM-T01
+        choose: x
+        note: use the v2 endpoint
+    expect:
+      - gate:
+          cause: need_clarification
+          task: T3-SUM-T01
+          choice: retry
+          note: use the v2 endpoint
+      - session:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          promptHas: "## Notes from the human who owns this task\\n- use the v2 endpoint"
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          verdict: pass
+      - spec-status-done
+      - run-outcome-complete
+  - name: blocked
+    plan: t3-single-normal.md
+    fresh: true
+    gates:
+      - title: "T3-SUM-T01: blocked"
+        choose: ^Stop
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          verdict: blocked
+      - gate:
+          cause: blocked
+          task: T3-SUM-T01
+          choice: stop
+      - gateOptions:
+          title: blocked by tooling
+          options:
+            - ^Stop this task$
+            - ^Retry once more$
+          only: true
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: blocked
+      - outcome: incomplete

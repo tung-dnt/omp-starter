@@ -9,6 +9,7 @@ export type RuleId =
 	| "missing-dep"
 	| "owns-overlap"
 	| "shared-path"
+	| "foundation-order"
 	| "risk-reason"
 	| "size-risk"
 	| "lld-missing"
@@ -195,6 +196,16 @@ export function validatePlan(plan: Plan, filesByRepo: ReadonlyMap<string, readon
 				if (hit) report("shared-path", i, `${entry.field} "${entry.pattern}" intersects shared_paths "${shared.pattern}"; only a foundation task may change it`);
 			}
 		}
+	});
+
+	// foundation-order: no task starts before every foundation task has landed, so a foundation task that waits (directly or through
+	// other tasks) for a non-foundation one would deadlock with it.
+	tasks.forEach((task, i) => {
+		if (!task.foundation) return;
+		const blocker = [...reach[i]].find(j => !tasks[j].foundation);
+		if (blocker === undefined) return;
+		const direct = edges[i].includes(blocker);
+		report("foundation-order", i, `foundation task ${task.id} depends${direct ? "" : ", through other tasks,"} on ${tasks[blocker].id}, which is not a foundation task; no other task starts before every foundation task is done, so the two would wait for each other`);
 	});
 
 	tasks.forEach((task, i) => {

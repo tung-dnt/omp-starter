@@ -1,0 +1,69 @@
+version: 1
+slots:
+  - match:
+      task: T3-SUM-T01
+      slot: implementer
+      attempt: 1
+    steps:
+      - &item0
+        yield:
+          verdict: pass
+          checks_run:
+            - bun test
+          notes: done
+  - match:
+      task: T3-SUM-T01
+      slot: implementer
+      attempt: 2
+    steps:
+      - *item0
+  - match:
+      task: T3-SUM-T01
+      slot: implementer
+      attempt: 3
+    steps:
+      - *item0
+  - match:
+      task: T3-SUM-T03
+      slot: implementer
+      attempt: 1
+    steps:
+      - tool:
+          name: write
+          input:
+            path: test/other.test.ts
+            content: "import { expect, test } from \"bun:test\";\nimport { other } from \"../src/other.ts\";\n\ntest(\"other returns 1\", () => {\n\texpect(other()).toBe(1);\n});\n"
+      - *item0
+  - match:
+      task: T3-SUM-T03
+      slot: implementer
+      attempt: 2
+    steps:
+      - tool:
+          name: write
+          input:
+            path: src/other.ts
+            content: "export function other(): number {\n\treturn 1;\n}\n"
+      - *item0
+  - match:
+      task: T3-SUM-T04
+      slot: implementer
+      attempt: 1
+    steps:
+      - tool:
+          name: write
+          input:
+            path: test/min.test.ts
+            content: "import { expect, test } from \"bun:test\";\nimport { min } from \"../src/min.ts\";\n\ntest(\"min finds the smallest\", () => {\n\texpect(min([3, 1, 2])).toBe(1);\n});\n"
+      - *item0
+  - match:
+      task: T3-SUM-T04
+      slot: implementer
+      attempt: 2
+    steps:
+      - tool:
+          name: write
+          input:
+            path: src/min.ts
+            content: "export function min(xs: number[]): number {\n\treturn Math.min(...xs);\n}\n"
+      - *item0

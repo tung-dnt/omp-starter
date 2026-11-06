@@ -4,7 +4,7 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { loadGuardInput } from "./spec-diff";
 import { CHECKS, PLAN_PATH, type Vault, cleanScratch, git, initRepo, initVault, planText, scratch } from "./spec-fixtures";
-import { readTaskCommits } from "./spec-git";
+import { readCheckNote, readTaskCommits } from "./spec-git";
 import { guardCommits } from "./spec-guard";
 import { parsePlan } from "./spec-plan";
 import { type OpsConfig, realCheckOps, realGitOps } from "./spec-ops";
@@ -102,6 +102,10 @@ interface WorldOptions {
 	paths?: Record<string, string[]>;
 	/** Committed on `main` before the ticket branch is made. */
 	gitignore?: string;
+	/** Ids of the tasks that are `foundation: true`. */
+	foundation?: string[];
+	/** Ids of the tasks that handle sensitive data, so the plan sends them to the security review. */
+	secure?: string[];
 }
 
 function world(tasks = ["T1", "T2"], options: WorldOptions = {}): World {
@@ -113,7 +117,7 @@ function world(tasks = ["T1", "T2"], options: WorldOptions = {}): World {
 	}
 	git(repo, "checkout", "-q", "-b", "PAC-1");
 	const vault = initVault();
-	const text = planText({
+	let text = planText({
 		id: STORY,
 		tasks: tasks.map(id => ({
 			id,
@@ -121,9 +125,16 @@ function world(tasks = ["T1", "T2"], options: WorldOptions = {}): World {
 			new_paths: [TESTS[id][0], ...(options.paths?.[id] ?? [])],
 			// A chain: each task waits for the one before it, unless the caller asks for independent tasks (ids T1 and T3).
 			depends_on: id === "T2" ? ["T1"] : [],
+			foundation: options.foundation?.includes(id) === true,
 		})),
 		checks: { [REPO]: options.checks ?? { ...CHECKS, test_paths: ["t/**"] } },
 	});
+	for (const id of options.secure ?? []) {
+		text = text
+			.split("```yaml task")
+			.map(part => (part.startsWith(`\nid: ${id}\n`) ? part.replace("sensitive_data: {value: no}", 'sensitive_data: {value: yes, reason: "patient names"}').replace("security_review: false", "security_review: true") : part))
+			.join("```yaml task");
+	}
 	const rev = vault.commitPlan(PLAN_PATH, text);
 	const config: OpsConfig = {
 		clones: new Map([[REPO, repo]]), story: STORY, ticket: "PAC-1", base: "main", vaultGitDir: vault.gitDir, vaultRoot: vault.root, planPath: PLAN_PATH,
@@ -718,5 +729,113 @@ describe("M3: one run per ticket and clone", () => {
 		expect(summary.outcome).toBe("refused");
 		expect(summary.reasons[0]).toContain("is not clean");
 		expect(existsSync(lockFile(w))).toBe(false);
+	});
+});
+
+// ── Amendment 4 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+const eventLog = (): { log: RunLog; events: string[] } => {
+	const events: string[] = [];
+	return { events, log: { append: entry => void (entry.kind === "event" && events.push(`${entry.event}${entry.task === undefined ? "" : ` ${entry.task}`}`)) } };
+};
+
+describe("foundation first on real repos", () => {
+	test("a task started after the foundation task is made from a tip that holds its commits", async () => {
+		const w = world(["T1", "T3"], { foundation: ["T1"] });
+		const seen: Array<{ aTs: boolean; aOnTip: boolean; foundationTrailers: string }> = [];
+		const worker = new FileWorker().on("T3:test_author", spec => {
+			seen.push({
+				aTs: existsSync(join(spec.cwd, "src/a.ts")),
+				aOnTip: git(spec.cwd, "rev-parse", "HEAD") === git(w.repo, "rev-parse", "PAC-1"),
+				foundationTrailers: git(spec.cwd, "log", "--format=%(trailers:key=Task,valueonly,separator=%x2c)", "main..HEAD").split("\n").filter(Boolean).join(","),
+			});
+			return undefined;
+		});
+		const { log, events } = eventLog();
+		const summary = await w.run(worker, new ScriptedGate(INSTALL), { concurrency: 2 }, log);
+		expect(summary.outcome).toBe("complete");
+		expect(seen).toEqual([{ aTs: true, aOnTip: true, foundationTrailers: "T1,T1,T1" }]);
+		expect(events.indexOf("integrated T1")).toBeGreaterThan(-1);
+		expect(events.indexOf("task-start T3")).toBeGreaterThan(events.indexOf("integrated T1"));
+		expect(shape(w.repo, "T1")).toEqual(["work", "lock", "work"]);
+		expect(guardFindings(w)).toEqual([]);
+	});
+
+	test("a foundation task whose checks fail never lets another task get a worktree", async () => {
+		const w = world(["T1", "T3"], { foundation: ["T1"] });
+		const broken = (spec: SlotSpec): SlotResult => {
+			write(spec.cwd, "src/a.ts", "export const a = 1;\n");
+			return pass({ verdict: "pass", notes: "done", checks_run: [] });
+		};
+		const worker = new FileWorker().on("T1:implementer", broken, broken, broken);
+		const gate = new ScriptedGate({ ...INSTALL, cap: [stop] });
+		const { log, events } = eventLog();
+		const summary = await w.run(worker, gate, { concurrency: 2 }, log);
+		expect(summary.outcome).toBe("incomplete");
+		expect(worker.calls.map(call => call.task.id)).not.toContain("T3");
+		expect(events.filter(event => event.startsWith("task-start"))).toEqual(["task-start T1"]);
+		expect(summary.reasons).toContain("T3 was not started: waits for foundation T1 (blocked)");
+		expect(git(w.repo, "branch", "--list", "spec-wt/*")).toBe("");
+		expect(git(w.repo, "rev-parse", "PAC-1")).toBe(git(w.repo, "rev-parse", "main"));
+	});
+});
+
+const PATIENT = { path: "src/a.ts", line: 4, severity: "high", category: "patient_data", text: "logs the patient name" };
+const gateIds = (): { log: RunLog; gates: Array<{ id: string; cause: string; choice: string }> } => {
+	const gates: Array<{ id: string; cause: string; choice: string }> = [];
+	return { gates, log: { append: entry => void (entry.kind === "gate" && gates.push({ id: entry.id, cause: entry.cause, choice: entry.choice })) } };
+};
+
+describe("patient data on real repos", () => {
+	test("an accepted patient-data finding lands with accept trailers and passes the strict guard", async () => {
+		const w = world(["T1"], { secure: ["T1"] });
+		const worker = new FileWorker().on("T1:security_review", () => pass({ verdict: "fix", findings: [PATIENT] }));
+		const gate = new ScriptedGate({ ...INSTALL, patient_data: [{ choice: "accept" }] });
+		const { log, gates } = gateIds();
+		const summary = await w.run(worker, gate, {}, log);
+		expect(summary).toMatchObject({ outcome: "complete", reasons: [] });
+		const accepted = gates.find(entry => entry.cause === "patient_data")!;
+		expect(accepted.choice).toBe("accept");
+
+		expect(trailers(w.repo, "Task")).toEqual(["T1", "T1", "T1", "T1"]);
+		expect(trailers(w.repo, "Security-Accept")).toEqual(["T1"]);
+		expect(trailers(w.repo, "Accept-Gate")).toEqual([accepted.id]);
+		expect(new Set(trailers(w.repo, "Plan-Rev"))).toEqual(new Set([w.rev]));
+		const tip = git(w.repo, "rev-parse", "PAC-1");
+		expect(git(w.repo, "show", "--format=", "--name-only", tip)).toBe("");
+		expect(git(w.repo, "log", "-1", "--format=%s", tip)).toBe("chore(spec): accept the patient-data finding of T1");
+		expect(worker.calls.filter(call => call.slot === "implementer")).toHaveLength(1);
+		expect(worker.calls.filter(call => call.slot === "security_review")).toHaveLength(1);
+		expect(guardFindings(w)).toEqual([]);
+		expect(readCheckNote(w.repo, tip)).toMatchObject({ task: "T1", blocked: false, checks: { guard: "pass" } });
+		expect(w.status()).toContain(`patient_data accepted (${accepted.id})`);
+		expect(w.status()).toContain("1/1 done");
+	});
+
+	test("a held patient-data task leaves the ticket branch alone, keeps its commits and starts again only after a plan commit", async () => {
+		const w = world(["T1"], { secure: ["T1"] });
+		const worker = new FileWorker().on("T1:security_review", () => pass({ verdict: "pass", findings: [PATIENT] }));
+		const held = await w.run(worker, new ScriptedGate({ ...INSTALL, patient_data: [stop] }));
+		expect(held).toMatchObject({ outcome: "incomplete", reasons: ["T1 is blocked: patient_data"] });
+		expect(git(w.repo, "rev-parse", "PAC-1")).toBe(git(w.repo, "rev-parse", "main"));
+		const kept = git(w.repo, "log", "--reverse", "--format=%(trailers:key=Task,valueonly)", "main..refs/spec-conflict/PAC-1/T1").split("\n").filter(Boolean);
+		expect(kept).toEqual(["T1", "T1", "T1"]);
+		expect(git(w.repo, "branch", "--list", "spec-wt/*")).toBe("");
+		expect(w.status()).toMatch(/T1\s+blocked\s+attempts \d+\s+patient_data/);
+
+		// The same plan revision: the hold stands, nothing starts.
+		const calls = worker.calls.length;
+		const again = await w.run(worker, new ScriptedGate());
+		expect(again).toMatchObject({ outcome: "incomplete", reasons: ["T1 is blocked: patient_data"] });
+		expect(worker.calls.length).toBe(calls);
+
+		// A plan commit is a new Plan-Rev: the task starts from scratch, and the clean review lets it land.
+		const fixed = w.vault.commitPlan(PLAN_PATH, `${w.text}\nThe name is hashed before it is logged.\n`);
+		const rerun = await w.run(worker, new ScriptedGate());
+		expect(rerun).toMatchObject({ outcome: "complete", reasons: [] });
+		expect(worker.calls.length).toBeGreaterThan(calls);
+		expect(new Set(trailers(w.repo, "Plan-Rev"))).toEqual(new Set([fixed]));
+		expect(trailers(w.repo, "Security-Accept")).toEqual([]);
+		expect(w.status(fixed)).toContain("1/1 done");
 	});
 });

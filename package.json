@@ -13,7 +13,9 @@
     "spec-status": "bun scripts/spec-status.ts",
     "spec-guard": "bun scripts/spec-guard.ts",
     "spec-check": "bun scripts/spec-check.ts",
-    "spec-hook": "bun scripts/spec-hook.ts"
+    "spec-hook": "bun scripts/spec-hook.ts",
+    "verify:step5": "bun test/tier3/check.ts",
+    "tier3": "bun test/tier3/cli.ts"
   },
   "omp": {
     "extensions": [

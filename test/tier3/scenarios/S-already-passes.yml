@@ -1,0 +1,39 @@
+id: S-already-passes
+runner: scripted
+proves:
+  - R-100
+description: "A scripted test_author writes a test that passes on the base commit; the real fails-before check says already-passes, and test_author reruns with that evidence."
+runs:
+  - name: run
+    plan: t3-single-normal.md
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 1
+          verdict: pass
+      - event: fails-before
+        task: T3-SUM-T01
+        detail: already-passes
+        count: 1
+      - event: fails-before
+        task: T3-SUM-T01
+        detail: ": fails"
+        count: 1
+      - session:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          promptHas: "passes on the base commit, before the work is done"
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          verdict: pass
+      - commitShape:
+          - work
+          - work
+          - lock
+          - work
+      - spec-status-done
+      - run-outcome-complete

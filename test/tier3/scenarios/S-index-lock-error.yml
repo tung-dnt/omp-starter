@@ -1,0 +1,47 @@
+id: S-index-lock-error
+runner: scripted
+proves:
+  - R-48
+description: "A real index.lock is held in the task's worktree during the tests commit: the blocked gate carries git's error over RPC, and retry replays only the commit, not the slot."
+runs:
+  - name: run
+    plan: t3-single.md
+    actions:
+      - "on":
+          session:
+            task: T3-SUM-T01
+            slot: implementer
+            attempt: 1
+        do: index-lock-on
+        task: T3-SUM-T01
+      - "on":
+          request: committing the tests failed
+        do: index-lock-off
+      - "on":
+          start: true
+        do: release
+        name: unlock
+    gates:
+      - title: "T3-SUM-T01: committing the tests failed"
+        choose: ^Retry once more
+        holdUntil: unlock
+    expect:
+      - gate:
+          cause: blocked
+          task: T3-SUM-T01
+          choice: retry
+      - notify: index\.lock
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+        count: 2
+      - session:
+          task: T3-SUM-T01
+          slot: implementer
+        count: 2
+      - commitShape:
+          - work
+          - lock
+          - work
+      - spec-status-done
+      - run-outcome-complete

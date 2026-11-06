@@ -1,0 +1,25 @@
+id: S-deps-and-concurrency
+runner: scripted
+proves:
+  - R-01
+  - R-02
+description: "A four-task plan with one dependency: the dependant starts only after its dependency is integrated, and the log never shows more than 2 tasks running at once."
+runs:
+  - name: run
+    plan: t3-deps.md
+    expect:
+      - order:
+          - event: integrated
+            task: T3-SUM-T01
+          - event: task-start
+            task: T3-SUM-T02
+      - event: task-start
+        count: 4
+      - overlap:
+          - T3-SUM-T01
+          - T3-SUM-T03
+      - maxConcurrent:
+          atMost: 2
+          reached: 2
+      - spec-status-done
+      - run-outcome-complete

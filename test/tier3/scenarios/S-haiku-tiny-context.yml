@@ -1,0 +1,38 @@
+id: S-haiku-tiny-context
+runner: haiku
+proves:
+  - R-70
+description: "A tiny context ceiling makes every real slot abort with aborted: context; each counts as an attempt; the cap gate opens."
+runs:
+  - name: run
+    plan: t3-sum.md
+    args: "--max-context 1000"
+    gates:
+      - title: "^T3-SUM-T01: the tests did not pass"
+        choose: ^Stop
+      - title: "^T3-SUM-T02: the tests did not pass"
+        choose: ^Stop
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 1
+          outcome: aborted
+          detail: 1000 token context ceiling
+      - slot:
+          task: T3-SUM-T02
+          slot: test_author
+          attempt: 1
+          outcome: aborted
+          detail: 1000 token context ceiling
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 3
+          outcome: aborted
+      - gate:
+          cause: cap
+          task: T3-SUM-T01
+          choice: stop
+      - ticket: untouched
+      - outcome: incomplete

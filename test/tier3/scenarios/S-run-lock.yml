@@ -1,0 +1,73 @@
+id: S-run-lock
+runner: scripted
+proves:
+  - R-59
+  - R-60
+description: "A second omp run while the first is parked at a gate is refused naming the lock file, pid and start time, and the first run's worktree survives; a dead-pid lock is taken over and logged; a live pid or another host refuses; the lock is released after refused and completed runs."
+runs:
+  - name: live-pid
+    plan: t3-single.md
+    setup:
+      - lock-live
+    expect:
+      - refused: "holds .*spec-run-T3-SUM\\.lock \\(pid \\d+ on [^,]+, started 2026-11-05T01:02:03\\.000Z\\)"
+      - lockFile: present
+      - outcome: refused
+      - event: task-start
+        absent: true
+  - name: other-host
+    plan: t3-single.md
+    fresh: true
+    setup:
+      - lock-foreign
+    expect:
+      - refused: "holds .*spec-run-T3-SUM\\.lock \\(pid \\d+ on some-other-host, started 2026-11-05T01:02:03\\.000Z\\)"
+      - lockFile: present
+      - outcome: refused
+      - event: task-start
+        absent: true
+  - name: dead-pid
+    plan: t3-single.md
+    fresh: true
+    setup:
+      - lock-dead
+    expect:
+      - event: lock-takeover
+        detail: took over the lock of pid \d+ on .+ \(started 2026-11-05T01:02:03\.000Z\)
+      - lockFile: absent
+      - spec-status-done
+      - run-outcome-complete
+  - name: released-after-refusal
+    plan: t3-single.md
+    fresh: true
+    setup:
+      - clone-dirty
+    expect:
+      - refused: is not clean
+      - outcome: refused
+      - lockFile: absent
+  - name: second-run
+    plan: t3-single.md
+    fresh: true
+    actions:
+      - "on":
+          request: need_clarification
+        do: second-run
+      - "on":
+          start: true
+        do: release
+        name: parked
+    gates:
+      - title: "T3-SUM-T01: need_clarification"
+        choose: ^Stop
+        holdUntil: parked
+    expect:
+      - secondRun:
+          refused: "holds .*spec-run-T3-SUM\\.lock \\(pid \\d+ on [^,]+, started \\d{4}-"
+      - worktreeSurvives: T3-SUM-T01
+      - gate:
+          cause: need_clarification
+          task: T3-SUM-T01
+          choice: stop
+      - lockFile: absent
+      - outcome: incomplete

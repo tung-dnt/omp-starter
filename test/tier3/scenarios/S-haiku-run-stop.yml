@@ -1,0 +1,34 @@
+id: S-haiku-run-stop
+runner: haiku
+proves:
+  - R-91
+description: "The driver sends /run-stop over RPC while a real slot is in flight: the slot aborts, no blocked note is written, worktrees are removed; the rerun finishes the story."
+runs:
+  - name: stop
+    plan: t3-sum.md
+    actions:
+      - "on":
+          event: task-start
+          task: T3-SUM-T01
+        do: run-stop
+        delayMs: 3000
+    expect:
+      - outcome: stopped
+      - event: task-stopped
+      - event: task-blocked
+        absent: true
+      - event: run-end
+        detail: ^stopped
+      - no-leftover-worktree
+  - name: resume
+    plan: t3-sum.md
+    fresh: false
+    gates:
+      - title: the story review found problems
+        choose: ^Accept
+    expect:
+      - spec-status-done
+      - trailers
+      - check-notes
+      - no-leftover-worktree
+      - run-outcome-complete

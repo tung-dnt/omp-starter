@@ -328,6 +328,17 @@ describe("validatePlan rules", () => {
 		expect(validatePlan(plan([task("T01", { owns: ["src/orders/**"] })], shared), FILES)).toEqual([]);
 	});
 
+	test("foundation-order: a foundation task may not depend on a non-foundation task", () => {
+		const found = validatePlan(plan([task("T01"), task("F1", { foundation: true, depends_on: ["T01"] })]), FILES);
+		expect(only(found)).toEqual(["foundation-order:F1"]);
+		expect(found[0].detail).toContain("T01");
+		// Through another foundation task: both reach the non-foundation task, and both are named.
+		const chain = validatePlan(plan([task("T01"), task("F1", { foundation: true, depends_on: ["F2"] }), task("F2", { foundation: true, depends_on: ["T01"] })]), FILES);
+		expect(only(chain)).toEqual(["foundation-order:F1", "foundation-order:F2"]);
+		// Foundation tasks may depend on each other, and any task may depend on a foundation task.
+		expect(validatePlan(plan([task("F1", { foundation: true }), task("F2", { foundation: true, depends_on: ["F1"] }), task("T01", { depends_on: ["F2"] })]), FILES)).toEqual([]);
+	});
+
 	test("risk-reason", () => {
 		const found = validatePlan(plan([routed("T01", { shared_state: "  " })]), FILES);
 		expect(only(found)).toEqual(["risk-reason:T01"]);

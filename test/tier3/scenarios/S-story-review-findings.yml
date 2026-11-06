@@ -1,0 +1,47 @@
+id: S-story-review-findings
+runner: scripted
+proves:
+  - R-09
+  - R-17
+description: "Story code_review findings open a gate over RPC: accept finishes the story; stop leaves it incomplete."
+runs:
+  - name: accept
+    plan: t3-single.md
+    gates:
+      - title: the story review found problems
+        choose: ^Accept
+    expect:
+      - slot:
+          task: story
+          slot: code_review
+          verdict: fix
+      - gate:
+          cause: review
+          choice: accept
+      - gateOptions:
+          title: story review found problems
+          options:
+            - ^Accept
+            - ^Stop
+          only: true
+      - spec-status-done
+      - run-outcome-complete
+  - name: stop
+    plan: t3-single.md
+    fresh: true
+    gates:
+      - title: the story review found problems
+        choose: ^Stop
+    expect:
+      - slot:
+          task: story
+          slot: code_review
+          verdict: fix
+      - gate:
+          cause: review
+          choice: stop
+      - status:
+          task: T3-SUM-T01
+          state: done
+      - notify: the story review of org/fixture left findings
+      - outcome: incomplete

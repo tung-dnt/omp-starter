@@ -1,0 +1,38 @@
+id: S-forged-worktree-config
+runner: scripted
+proves:
+  - R-38
+  - R-39
+description: "A scripted slot writes .omp and .claude above the worktree and a .omp inside it; the slot is rejected, the folders are gone before the next session, and the retry runs clean."
+runs:
+  - name: run
+    plan: t3-single-normal.md
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 1
+          outcome: rejected
+          detail: \.omp appeared outside the worktree
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 1
+          outcome: rejected
+          detail: \.claude appeared outside the worktree
+      - session:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          promptHas: appeared outside the worktree
+      - slot:
+          task: T3-SUM-T01
+          slot: test_author
+          attempt: 2
+          verdict: pass
+      - commitShape:
+          - work
+          - lock
+          - work
+      - spec-status-done
+      - run-outcome-complete

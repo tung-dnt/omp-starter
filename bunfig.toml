@@ -1,3 +1,4 @@
 [test]
 # Private HOME for the whole test run; see extensions/test-preload.ts.
 preload = ["./extensions/test-preload.ts"]
+pathIgnorePatterns = ["test/tier3/**"]

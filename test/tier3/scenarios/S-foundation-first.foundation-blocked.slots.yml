@@ -1,0 +1,11 @@
+version: 1
+slots:
+  - match:
+      task: T3-SUM-T01
+      slot: implementer
+      attempt: 1
+    steps:
+      - yield:
+          verdict: blocked
+          checks_run: []
+          notes: the toolchain is broken

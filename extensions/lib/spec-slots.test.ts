@@ -102,9 +102,9 @@ const VALID: Record<SlotName, Record<string, unknown>> = {
 		spec_wrong: { verdict: "spec_wrong", findings: [finding({ severity: "low" })] },
 	},
 	security_review: {
-		pass: { verdict: "pass", findings: [finding({ severity: "low" })] },
-		fix: { verdict: "fix", findings: [finding({ severity: "critical", line: undefined })] },
-		spec_wrong: { verdict: "spec_wrong", findings: [finding()] },
+		pass: { verdict: "pass", findings: [finding({ severity: "low", category: "other" })] },
+		fix: { verdict: "fix", findings: [finding({ severity: "critical", line: undefined, category: "patient_data" })] },
+		spec_wrong: { verdict: "spec_wrong", findings: [finding({ category: "other" })] },
 	},
 };
 
@@ -191,6 +191,30 @@ describe("parseVerdict: fields", () => {
 		expect(error("security_review", { verdict: "fix", findings: [] })).toContain("needs at least one finding");
 		const parsed = parseVerdict("code_review", { verdict: "pass", findings: [{ path: "a", severity: "low", text: "t", line: null, extra: 1 }] });
 		expect(parsed).toEqual({ ok: true, value: { verdict: "pass", findings: [{ path: "a", severity: "low", text: "t" }] } });
+	});
+
+	test("security findings need a category and code_review findings do not", () => {
+		const bare = { path: "a", severity: "low", text: "t" } as const;
+		expect(error("security_review", { verdict: "pass", findings: [bare] })).toContain("category");
+		expect(error("security_review", { verdict: "pass", findings: [{ ...bare, category: "pii" }] })).toContain("category");
+		expect(error("security_review", { verdict: "pass", findings: [{ ...bare, category: null }] })).toContain("category");
+		expect(error("security_review", { verdict: "fix", findings: [{ ...bare, category: "other" }, bare] })).toContain("findings[1].category");
+		expect(parseVerdict("security_review", { verdict: "fix", findings: [{ ...bare, category: "patient_data" }, { ...bare, category: "other" }] })).toEqual({
+			ok: true,
+			value: { verdict: "fix", findings: [{ ...bare, category: "patient_data" }, { ...bare, category: "other" }] },
+		});
+		// A code review never has one: the field is neither required nor kept.
+		expect(parseVerdict("code_review", { verdict: "pass", findings: [bare] })).toEqual({ ok: true, value: { verdict: "pass", findings: [bare] } });
+		expect(parseVerdict("code_review", { verdict: "pass", findings: [{ ...bare, category: "patient_data" }] })).toEqual({ ok: true, value: { verdict: "pass", findings: [bare] } });
+
+		// The strict schemas say the same: required and closed for security, absent for code review.
+		const items = (slot: "code_review" | "security_review") =>
+			(JSON.parse(JSON.stringify(SLOTS[slot].schema)) as { properties: { findings: { items: { required: string[]; additionalProperties: boolean; properties: Record<string, { enum?: string[] }> } } } }).properties.findings.items;
+		expect(items("security_review").required).toEqual(["path", "severity", "text", "category"]);
+		expect(items("security_review").additionalProperties).toBe(false);
+		expect(items("security_review").properties.category.enum).toEqual(["patient_data", "other"]);
+		expect(items("code_review").required).toEqual(["path", "severity", "text"]);
+		expect(items("code_review").properties.category).toBeUndefined();
 	});
 
 	test("the first problem is the one reported", () => {
@@ -289,5 +313,15 @@ describe("buildPrompt", () => {
 	test("the LLD path or the reason it was skipped is stated", () => {
 		expect(prompt({ slot: "implementer", lldFile: "/vault/lld/T1.md" })).toContain("LLD: /vault/lld/T1.md");
 		expect(prompt({ slot: "implementer", tasks: [task({ lld_skip_reason: "mechanical" })] })).toContain("LLD skipped: mechanical");
+	});
+
+	test("the security prompt defines patient_data and says to cite, not quote", () => {
+		const security = prompt({ slot: "security_review" });
+		expect(security).toContain('"category": "patient_data|other"');
+		expect(security).toContain("`patient_data`");
+		for (const place of ["logs", "errors", "fixtures", "test data", "prompts", "third-party"]) expect(security).toContain(place);
+		expect(security).toMatch(/cite the file and line/i);
+		expect(security).toMatch(/never quote the data/i);
+		expect(prompt({ slot: "code_review" })).not.toContain("patient_data");
 	});
 });

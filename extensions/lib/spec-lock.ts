@@ -1,6 +1,7 @@
-// Scheduler-only helpers: the lock and unlock commits that freeze and reopen a task's tests, and the files a lock covers.
-// Both commits are empty, so they never mix with a content change. Only the scheduler calls them, after the test review
-// (lock) or after a human gate approved `test_wrong` (unlock).
+// Scheduler-only helpers: the lock, unlock and accept commits, and the files a lock covers. The lock freezes a task's tests, the unlock
+// reopens them, the accept records a human's decision on a patient-data finding. All three are empty, so they never mix with a content
+// change. Only the scheduler calls them: the lock after the test review, the unlock after a human gate approved `test_wrong`, the
+// accept after a human gate accepted a `patient_data` finding.
 import { readCommitFacts } from "./spec-diff";
 import { NO_HOOKS, git, gitOrThrow } from "./spec-git";
 import { LockState } from "./spec-guard";
@@ -66,6 +67,21 @@ export function unlockCommit(repo: string, options: UnlockOptions): string {
 	const planRev = oneLine("planRev", options.planRev);
 	const gate = oneLine("gate", options.gate);
 	return emptyCommit(repo, `chore(spec): unlock the tests of ${task}`, [`Task: ${task}`, `Plan-Rev: ${planRev}`, `Task-Unlock: ${task}`, `Unlock-Gate: ${gate}`]);
+}
+
+export interface AcceptOptions {
+	task: string;
+	planRev: string;
+	/** The id of the human gate where the patient-data finding was accepted. */
+	gate: string;
+}
+
+/** Commits `Task: <id>`, `Plan-Rev`, `Security-Accept: <id>` and `Accept-Gate: <gate>`. Returns the new commit's sha. */
+export function acceptCommit(repo: string, options: AcceptOptions): string {
+	const task = oneLine("task", options.task);
+	const planRev = oneLine("planRev", options.planRev);
+	const gate = oneLine("gate", options.gate);
+	return emptyCommit(repo, `chore(spec): accept the patient-data finding of ${task}`, [`Task: ${task}`, `Plan-Rev: ${planRev}`, `Security-Accept: ${task}`, `Accept-Gate: ${gate}`]);
 }
 
 /**

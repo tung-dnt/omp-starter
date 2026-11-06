@@ -1,0 +1,17 @@
+id: S-haiku-run-task
+runner: haiku
+proves:
+  - R-87
+description: /run-task with a one-block task plan runs to completion over RPC.
+runs:
+  - name: run
+    plan: t3-task.md
+    command: run-task
+    gates:
+      - title: the story review found problems
+        choose: ^Accept
+    expect:
+      - run-outcome-complete
+      - spec-status-done
+      - trailers
+      - check-notes

@@ -1,0 +1,141 @@
+id: S-patient-data-block
+runner: scripted
+proves:
+  - R-108
+description: "A security_review finding on patient data blocks the merge until the human decides at the gate: stop holds the task (nothing integrated, a rerun at the same plan revision starts nothing), fix reruns the implementer and the review, accept lands it with Security-Accept and an Accept-Gate equal to the gate id, passing the strict guard."
+runs:
+  - name: stop
+    plan: t3-security.md
+    gates:
+      - title: "T3-SUM-T01: the security review found patient data"
+        choose: ^Stop
+    expect:
+      - gate:
+          cause: patient_data
+          task: T3-SUM-T01
+          choice: stop
+      - gateOptions:
+          title: found patient data
+          options:
+            - ^Fix
+            - ^Accept
+            - ^Stop this task \(its commits are kept as refs/spec-conflict/T3-SUM/T3-SUM-T01\)$
+          only: true
+      - order:
+          - slot:
+              task: T3-SUM-T01
+              slot: security_review
+          - gate:
+              cause: patient_data
+              task: T3-SUM-T01
+      - noSlot:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 2
+      - noSlot:
+          task: story
+          slot: code_review
+      - event: integrated
+        absent: true
+      - ticket: untouched
+      - keptRef: T3-SUM-T01
+      - notify: kept as refs/spec-conflict/T3-SUM/T3-SUM-T01
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: patient_data
+      - outcome: incomplete
+  - name: again
+    plan: t3-security.md
+    fresh: false
+    expect:
+      - event: run-start
+        count: 1
+      - event: task-start
+        absent: true
+      - session:
+          task: T3-SUM-T01
+        absent: true
+      - status:
+          task: T3-SUM-T01
+          state: blocked
+          reason: patient_data
+      - ticket: untouched
+      - outcome: incomplete
+  - name: fix
+    plan: t3-security.md
+    fresh: true
+    gates:
+      - title: "T3-SUM-T01: the security review found patient data"
+        choose: ^Fix
+      - title: Note for T3-SUM-T01
+        choose: x
+        note: redact the name
+    expect:
+      - gate:
+          cause: patient_data
+          task: T3-SUM-T01
+          choice: fix
+          note: redact the name
+      - slot:
+          task: T3-SUM-T01
+          slot: security_review
+        count: 2
+      - order:
+          - gate:
+              cause: patient_data
+              task: T3-SUM-T01
+          - session:
+              task: T3-SUM-T01
+              slot: implementer
+              attempt: 2
+      - session:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 2
+          promptHas: "\\[high, patient_data\\] src/sum\\.ts:1: scripted: logs a patient name"
+      - session:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 2
+          promptHas: "scripted: add a comment"
+      - session:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 2
+          promptHas: redact the name
+      - commitTrailer: Security-Accept
+        absent: true
+      - spec-status-done
+      - run-outcome-complete
+  - name: accept
+    plan: t3-security.md
+    fresh: true
+    gates:
+      - title: "T3-SUM-T01: the security review found patient data"
+        choose: ^Accept
+    expect:
+      - gate:
+          cause: patient_data
+          task: T3-SUM-T01
+          choice: accept
+      - event: accept
+        task: T3-SUM-T01
+      - accept-trailers
+      - spec-guard-strict
+      - commitShape:
+          - work
+          - lock
+          - work
+          - accept
+      - status:
+          task: T3-SUM-T01
+          state: done
+          reason: ^patient_data accepted \(
+      - slot:
+          task: story
+          slot: code_review
+          verdict: pass
+      - trailers
+      - check-notes
+      - run-outcome-complete

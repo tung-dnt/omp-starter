@@ -1,0 +1,22 @@
+id: S-session-options
+runner: scripted
+proves:
+  - R-77
+  - R-78
+description: "Reads back the options the real runner passed to every scripted session (restricted tools, required yield, strict schema, thinking level, no process state, UI or MCP, the guard preloaded, no extensions, title, a fresh agent id per slot) for writing and read-only slots."
+runs:
+  - name: run
+    plan: t3-security.md
+    expect:
+      - sessionOptions: true
+      - slot:
+          task: T3-SUM-T01
+          slot: security_review
+          verdict: pass
+      - slot:
+          task: story
+          slot: code_review
+          verdict: pass
+      - real-state-untouched
+      - no-push-no-vault-write
+      - run-outcome-complete

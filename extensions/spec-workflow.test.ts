@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
-import { CHECKS, PLAN_PATH, cleanScratch, git, initRepo, initVault, planText } from "./lib/spec-fixtures";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { CHECKS, PLAN_PATH, cleanScratch, git, initRepo, initVault, planText, scratch } from "./lib/spec-fixtures";
 import { SLOTS } from "./lib/spec-slots";
 import specWorkflow from "./spec-workflow";
 import { fakePi, type FakePi } from "./test-harness";
@@ -19,7 +20,10 @@ function withAgents(fp: FakePi, names: readonly string[] = SLOT_AGENTS): string[
 	return asked;
 }
 
-afterEach(cleanScratch);
+afterEach(() => {
+	delete process.env.SPEC_SLOT_SCRIPT;
+	cleanScratch();
+});
 
 interface Ui {
 	notes: Array<{ message: string; type: string | undefined }>;
@@ -190,5 +194,195 @@ describe("spec-workflow extension", () => {
 		const fresh = fakePi();
 		specWorkflow(fresh.pi);
 		await expect(fresh.callTool("spec_status", {}, { cwd: "/elsewhere" })).rejects.toThrow("no run yet: pass the plan");
+	});
+});
+
+// ── Scripted slots and the run flags ────────────────────────────────────────────────────────────────────────────────────────────
+
+const SCRIPT_TASK = `version: 1
+slots:
+  - match: {task: T1, slot: test_author, attempt: 1}
+    steps:
+      - yield: {verdict: spec_wrong, tests: [], acceptance_map: {}, notes: "scripted says no"}
+  - match: {task: T9, slot: code_review}
+    steps: []
+`;
+
+/** A script file in its own folder, outside every clone and the vault. */
+function scriptFile(text = SCRIPT_TASK): { file: string; sha256: string } {
+	const file = join(scratch("slots-"), "slots.yml");
+	writeFileSync(file, text);
+	return { file, sha256: new Bun.CryptoHasher("sha256").update(text).digest("hex") };
+}
+
+/** A context whose models resolve to something, so the real slot runner reaches its (scripted) session. */
+function scriptedContext(cwd: string) {
+	const made = context(cwd);
+	(made.ctx.models as { resolve: () => unknown }).resolve = () => ({ id: "fake-model" });
+	return made;
+}
+
+/** The run log the last notification names. */
+function runLog(ui: Ui): Array<Record<string, unknown>> {
+	const note = ui.notes.map(entry => entry.message).findLast(message => message.includes("run log: "));
+	const file = note?.split("run log: ")[1]?.split("\n")[0];
+	if (file === undefined || !existsSync(file)) return [];
+	return readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
+}
+
+const names = (entries: Array<Record<string, unknown>>): string[] => entries.filter(entry => entry.kind === "event").map(entry => String(entry.event));
+
+describe("scripted slots", () => {
+	/** Starts a run, installs the hook at its first gate and stops at the first gate after that. Returns the notes and the status lines. */
+	async function scriptedRun(args: string, ctx: ReturnType<typeof scriptedContext>["ctx"], ui: Ui, stopLabel: string) {
+		const fp = fakePi();
+		specWorkflow(fp.pi);
+		withAgents(fp);
+		const running = fp.runCommand("run-story", args, ctx);
+		await until(() => ui.pending.length === 1);
+		ui.pending[0]("Install the pre-push hook");
+		await until(() => ui.pending.length === 2);
+		ui.pending[1](stopLabel);
+		await running;
+	}
+
+	/** Stops a plain run at its hook gate: the run starts, so a refusal or a seam would show. */
+	async function plainRun(args: string, ctx: ReturnType<typeof context>["ctx"], ui: Ui) {
+		const fp = fakePi();
+		specWorkflow(fp.pi);
+		withAgents(fp);
+		const running = fp.runCommand("run-story", args, ctx);
+		await until(() => ui.pending.length === 1);
+		ui.pending[0]("Stop");
+		await running;
+	}
+
+	test("without SPEC_SLOT_SCRIPT nothing scripted is read or built", async () => {
+		const { args } = story();
+		// A file that is not a script, and a variable that is empty: neither may be read, so neither may refuse.
+		const broken = scriptFile("not: [a script");
+		for (const value of [undefined, ""]) {
+			if (value === undefined) delete process.env.SPEC_SLOT_SCRIPT;
+			else process.env.SPEC_SLOT_SCRIPT = value;
+			const { ctx, ui } = context("/elsewhere");
+			await plainRun(args, ctx, ui);
+			expect(ui.notes.some(note => note.message.includes("SCRIPTED SLOTS") || note.message.includes("SPEC_SLOT_SCRIPT"))).toBe(false);
+			expect(ui.status.filter(line => line !== undefined && line.includes("SCRIPTED"))).toEqual([]);
+			expect(names(runLog(ui)).filter(name => name.startsWith("scripted"))).toEqual([]);
+			expect(ui.notes.at(-1)?.message).toContain("outcome: refused");
+		}
+		expect(readFileSync(broken.file, "utf8")).toBe("not: [a script");
+	});
+
+	test("a slot_script key in the plan changes nothing", async () => {
+		const repo = initRepo("git@github.com:org/backend.git");
+		git(repo, "checkout", "-q", "-b", "PAC-1");
+		const vault = initVault();
+		const { file } = scriptFile();
+		const text = planText({ id: "PAC-1", tasks: [{ id: "T1", owns: ["src/a.ts"], new_paths: ["t/t1.sh"] }], checks: { "org/backend": CHECKS } })
+			.replace("kind: story\n", `kind: story\nslot_script: ${file}\n`)
+			.replace("repo: org/backend\n", `repo: org/backend\nslot_script: ${file}\n`);
+		vault.commitPlan(PLAN_PATH, text);
+		delete process.env.SPEC_SLOT_SCRIPT;
+		const { ctx, ui } = context("/elsewhere");
+		await plainRun(`${PLAN_PATH} --repo ${repo} --vault-git-dir ${vault.gitDir}`, ctx, ui);
+		expect(ui.notes.some(note => note.message.includes("SCRIPTED SLOTS"))).toBe(false);
+		expect(names(runLog(ui)).filter(name => name.startsWith("scripted"))).toEqual([]);
+		expect(ui.notes.at(-1)?.message).toContain("outcome: refused");
+	});
+
+	test("a relative path, a script inside a clone and a dotenv definition each refuse the run", async () => {
+		const { args, repo, vault } = story();
+		const fp = fakePi();
+		specWorkflow(fp.pi);
+		withAgents(fp);
+		const refused = async (value: string, ctx: ReturnType<typeof context>["ctx"], ui: Ui, why: string): Promise<void> => {
+			process.env.SPEC_SLOT_SCRIPT = value;
+			await fp.runCommand("run-story", args, ctx);
+			expect(ui.notes.at(-1)).toMatchObject({ type: "error" });
+			expect(ui.notes.at(-1)?.message).toContain("The spec run was not started");
+			expect(ui.notes.at(-1)?.message).toContain(why);
+			expect(ui.selects).toEqual([]);
+			expect(ui.status).toEqual([]);
+		};
+		const outside = scriptFile();
+		const a = context("/elsewhere");
+		await refused("slots.yml", a.ctx, a.ui, "must be an absolute path");
+		await refused(join(scratch("gone-"), "missing.yml"), a.ctx, a.ui, "cannot be read");
+		await refused(scriptFile("version: 2").file, a.ctx, a.ui, "not a valid slot script");
+
+		writeFileSync(join(repo, "slots.yml"), SCRIPT_TASK);
+		await refused(join(repo, "slots.yml"), a.ctx, a.ui, "lies inside");
+		writeFileSync(join(vault.root, "slots.yml"), SCRIPT_TASK);
+		await refused(join(vault.root, "slots.yml"), a.ctx, a.ui, "lies inside");
+
+		// A dotenv file next to the host session (Bun loads it, and omp copies it into the environment) that defines the same value.
+		const cwd = scratch("host-");
+		writeFileSync(join(cwd, ".env.local"), `export SPEC_SLOT_SCRIPT="${outside.file}"\n`);
+		const b = context(cwd);
+		await refused(outside.file, b.ctx, b.ui, ".env.local");
+
+		// A dotenv file with another value does not refuse; the run starts and waits at its first gate.
+		writeFileSync(join(cwd, ".env.local"), "SPEC_SLOT_SCRIPT=/somewhere/else.yml\n");
+		process.env.SPEC_SLOT_SCRIPT = outside.file;
+		const running = fp.runCommand("run-story", args, b.ctx);
+		await until(() => b.ui.pending.length === 1);
+		b.ui.pending[0]("Stop");
+		await running;
+		expect(b.ui.notes.some(note => note.message.includes("SCRIPTED SLOTS"))).toBe(true);
+	});
+
+	test("an enabled script is the first run-log entry with its sha256 and marks every status line and the final report", async () => {
+		const { args } = story();
+		const { file, sha256 } = scriptFile();
+		process.env.SPEC_SLOT_SCRIPT = file;
+		const { ctx, ui } = scriptedContext("/elsewhere");
+		await scriptedRun(args, ctx, ui, "Stop this task (edit the plan, then rerun)");
+
+		expect(ui.notes[0]).toMatchObject({ type: "warning" });
+		expect(ui.notes[0].message).toContain(`SCRIPTED SLOTS`);
+		expect(ui.notes[0].message).toContain(sha256);
+		const entries = runLog(ui);
+		expect(entries[0]).toMatchObject({ kind: "event", event: "scripted-slots", detail: `${file} ${sha256}` });
+		const session = entries.find(entry => entry.event === "scripted-session");
+		expect(session).toMatchObject({ task: "T1" });
+		expect(JSON.parse(String(session?.detail))).toMatchObject({ slot: "test_author", attempt: 1, rule: 0, thinkingLevel: "medium", outputSchemaMode: "strict", title: "spec:PAC-1:T1:test_author" });
+		expect(entries.find(entry => entry.kind === "slot")).toMatchObject({ task: "T1", slot: "test_author", verdict: "spec_wrong", sessionFile: `scripted:${sha256.slice(0, 12)}#0` });
+		expect(entries.find(entry => entry.event === "scripted-slots-unused")).toMatchObject({ detail: expect.stringContaining('"task":"T9"') });
+
+		const lines = ui.status.filter((line): line is string => line !== undefined);
+		expect(lines.length).toBeGreaterThan(0);
+		for (const line of lines) expect(line.endsWith(" · SCRIPTED SLOTS")).toBe(true);
+		const final = ui.notes.at(-1)?.message ?? "";
+		expect(final).toContain("outcome: incomplete");
+		expect(final).toContain(`SCRIPTED SLOTS: ${file} sha256 ${sha256}`);
+	});
+
+	test("--slot-timeout and --max-context reach runPlan", async () => {
+		const { args } = story();
+		const { file } = scriptFile(`version: 1
+slots:
+  - match: {task: T1, slot: test_author, attempt: 1}
+    steps: [{usage: {costUsd: 0, contextTokens: 100}}, {yield: {verdict: pass}}]
+  - match: {task: T1, slot: test_author, attempt: 2}
+    steps: [{sleep: 30000}]
+`);
+		process.env.SPEC_SLOT_SCRIPT = file;
+		const { ctx, ui } = scriptedContext("/elsewhere");
+		// The third session has no rule: its prompt fails, which is an environment failure and ends the run at a gate.
+		await scriptedRun(`${args} --slot-timeout 0.05 --max-context 50`, ctx, ui, "Stop this task");
+		const slots = runLog(ui).filter(entry => entry.kind === "slot");
+		expect(slots.map(entry => `${entry.slot}:${entry.outcome}`)).toEqual(["test_author:aborted", "test_author:aborted"]);
+		expect(String(slots[0].detail)).toContain("50 token context ceiling");
+		expect(String(slots[1].detail)).toContain("wall timeout");
+		expect(ui.selects[1]).toEqual(["Stop this task", "Retry once more"]);
+
+		const bad = context("/nowhere");
+		const fp = fakePi();
+		specWorkflow(fp.pi);
+		await fp.runCommand("run-story", "plan.md --slot-timeout 0", bad.ctx);
+		await fp.runCommand("run-story", "plan.md --max-context nope", bad.ctx);
+		expect(bad.ui.notes.map(note => note.message.split("\n")[0])).toEqual(["--slot-timeout must be a positive number, got 0", "--max-context must be a positive number, got nope"]);
+		expect(bad.ui.notes[0].message).toContain("[--slot-timeout <seconds>] [--max-context <tokens>]");
 	});
 });

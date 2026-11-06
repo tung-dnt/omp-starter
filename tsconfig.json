@@ -13,5 +13,6 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["extensions/**/*.ts", "scripts/**/*.ts"]
+  "include": ["extensions/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
+  "exclude": ["test/tier3/runs"]
 }

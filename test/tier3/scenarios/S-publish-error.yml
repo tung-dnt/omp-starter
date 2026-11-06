@@ -1,0 +1,66 @@
+id: S-publish-error
+runner: scripted
+proves:
+  - R-47
+description: "The ticket branch moves under the integration twice (a human commits while the checks run, and again while the replayed tip is checked), so the publish update-ref fails for real; the blocked gate arrives over RPC and retry replays the whole integration."
+runs:
+  - name: run
+    plan: t3-hold.md
+    actions:
+      - "on":
+          start: true
+        do: hold-on
+        name: "1"
+      - "on":
+          start: true
+        do: hold-on
+        name: "2"
+      - "on":
+          marker: checks
+          min: 1
+        do: ticket-commit
+        file: src/unrelated-a.txt
+        content: "a\n"
+        tag: a
+      - "on":
+          start: true
+        do: hold-off
+        name: "1"
+      - "on":
+          marker: checks
+          min: 2
+        do: ticket-commit
+        file: src/unrelated-b.txt
+        content: "b\n"
+        tag: b
+      - "on":
+          start: true
+        do: hold-off
+        name: "2"
+    gates:
+      - title: "T3-SUM-T01: integration failed"
+        choose: ^Retry once more
+    expect:
+      - gate:
+          cause: blocked
+          task: T3-SUM-T01
+          choice: retry
+      - notify: update-ref
+      - event: check
+        task: T3-SUM-T01
+        detail: replayed on
+        count: 2
+      - event: integrated
+        task: T3-SUM-T01
+        count: 1
+      - ticketFile:
+          path: src/unrelated-a.txt
+          contains: a
+      - ticketFile:
+          path: src/unrelated-b.txt
+          contains: b
+      - ticketFile:
+          path: src/sum.ts
+          contains: a + b
+      - spec-status-done
+      - run-outcome-complete

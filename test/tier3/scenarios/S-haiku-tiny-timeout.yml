@@ -1,0 +1,38 @@
+id: S-haiku-tiny-timeout
+runner: haiku
+proves:
+  - R-72
+description: "A 1-second slot wall timeout with real slots: the SDK session is aborted through the signal, the abort counts as an attempt, the cap gate opens."
+runs:
+  - name: run
+    plan: t3-sum.md
+    args: "--slot-timeout 1"
+    gates:
+      - title: "^T3-SUM-T01: the tests did not pass"
+        choose: ^Stop
+      - title: "^T3-SUM-T02: the tests did not pass"
+        choose: ^Stop
+    expect:
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 1
+          outcome: aborted
+          detail: 1 second wall timeout
+      - slot:
+          task: T3-SUM-T02
+          slot: test_author
+          attempt: 1
+          outcome: aborted
+          detail: 1 second wall timeout
+      - slot:
+          task: T3-SUM-T01
+          slot: implementer
+          attempt: 3
+          outcome: aborted
+      - gate:
+          cause: cap
+          task: T3-SUM-T01
+          choice: stop
+      - ticket: untouched
+      - outcome: incomplete

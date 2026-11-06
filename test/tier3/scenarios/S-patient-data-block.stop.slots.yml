@@ -1,0 +1,56 @@
+version: 1
+slots:
+  - match:
+      task: T3-SUM-T01
+      slot: test_author
+      attempt: 1
+    steps:
+      - tool:
+          name: write
+          input:
+            path: test/sum.test.ts
+            content: "import { expect, test } from \"bun:test\";\nimport { sum } from \"../src/sum.ts\";\n\ntest(\"sum adds\", () => {\n\texpect(sum(2, 3)).toBe(5);\n});\n"
+      - yield:
+          verdict: pass
+          tests:
+            - test/sum.test.ts
+          acceptance_map:
+            acceptance: test/sum.test.ts
+          notes: ""
+  - match:
+      task: T3-SUM-T01
+      slot: test_review
+      attempt: 1
+    steps:
+      - yield:
+          verdict: pass
+          unmapped: []
+          findings: []
+  - match:
+      task: T3-SUM-T01
+      slot: implementer
+      attempt: 1
+    steps:
+      - tool:
+          name: write
+          input:
+            path: src/sum.ts
+            content: "export function sum(a: number, b: number): number {\n\treturn a + b;\n}\n"
+      - yield:
+          verdict: pass
+          checks_run:
+            - bun test
+          notes: done
+  - match:
+      task: T3-SUM-T01
+      slot: security_review
+      attempt: 1
+    steps:
+      - yield:
+          verdict: pass
+          findings:
+            - path: src/sum.ts
+              line: 1
+              severity: high
+              category: patient_data
+              text: "scripted: logs a patient name"
