@@ -1297,6 +1297,7 @@ class Run {
 				contextTokens: result.contextTokens,
 				durationMs: this.#deps.now().getTime() - started,
 				...(result.sessionFile === undefined ? {} : { sessionFile: result.sessionFile }),
+				...(result.agentId === undefined ? {} : { agentId: result.agentId }),
 				...(detail === undefined ? {} : { detail }),
 			});
 		};

@@ -156,8 +156,16 @@ export function fakePi(exec?: FakeExec): FakePi {
 	const host = {
 		zod,
 		on: (event: string, handler: Handler) => void handlers.set(event, handler),
-		registerTool: (tool: FakeTool) => void tools.set(tool.name, tool),
-		registerCommand: (name: string, command: FakeCommand) => void commands.set(name, command),
+		// A second registration of a name replaces the first in the real host's table silently; the fake refuses, so a test that registers an
+		// extension proves each tool and command is registered exactly once.
+		registerTool: (tool: FakeTool) => {
+			if (tools.has(tool.name)) throw new Error(`tool "${tool.name}" is registered twice`);
+			tools.set(tool.name, tool);
+		},
+		registerCommand: (name: string, command: FakeCommand) => {
+			if (commands.has(name)) throw new Error(`command "${name}" is registered twice`);
+			commands.set(name, command);
+		},
 		exec: async (command: string, args: string[], options?: { timeout?: number }) => {
 			execCalls.push({ command, args });
 			return (await exec?.(command, args, options)) ?? { stdout: "", stderr: "", code: 0 };

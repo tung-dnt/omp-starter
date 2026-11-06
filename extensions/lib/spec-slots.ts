@@ -43,6 +43,8 @@ export interface SlotResult {
 	/** Summed from the usage of each assistant `message_end`. */
 	costUsd: number;
 	sessionFile?: string;
+	/** The registry id the session ran under (`spec-<story>-<task>-<slot>-<n>`), so the run log can show that slots never shared one. */
+	agentId?: string;
 	/** The largest context a request of the slot carried. */
 	contextTokens: number;
 	/** `context`: the runner stopped the slot at the context ceiling. `signal`: the caller's signal fired. */

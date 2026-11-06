@@ -19,6 +19,8 @@ export interface SlotLogEntry {
 	contextTokens: number;
 	durationMs: number;
 	sessionFile?: string;
+	/** The agent id of the slot's session (never `Main`). */
+	agentId?: string;
 	/** Why, for an outcome other than `verdict`. */
 	detail?: string;
 }

@@ -140,7 +140,9 @@ describe("createSlotRunner: the options of the session", () => {
 			session.emit(yielded({ verdict: "pass" }));
 			session.emit(END);
 		}
-		await Promise.all(running);
+		const results = await Promise.all(running);
+		// Each result names the registry id its session ran under, so the run log can show it.
+		expect(results.map(result => result.agentId)).toEqual(registered);
 		expect(new Set(registered).size).toBe(3);
 		expect(registered).not.toContain("Main");
 		for (const id of registered) expect(id).toMatch(/^spec-S-1-T[12]-implementer-\d+$/);
@@ -314,7 +316,7 @@ describe("createSlotRunner: limits and failures", () => {
 		await flush();
 		controller.abort();
 		creating.resolve();
-		expect(await run).toEqual({ payload: undefined, costUsd: 0, contextTokens: 0, aborted: "signal" });
+		expect(await run).toEqual({ payload: undefined, costUsd: 0, contextTokens: 0, aborted: "signal", agentId: expect.stringMatching(/^spec-S-1-T1-implementer-\d+$/) });
 		expect(session.prompts).toEqual([]);
 		expect(session.disposals).toBe(1);
 	});

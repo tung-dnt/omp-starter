@@ -2,7 +2,7 @@
 // Tier-3 harness CLI (plan D; `bun run tier3 <command>`). Commands:
 //   run <id> [--runner scripted|haiku] [--repeat n] [--out dir] [--code dir]
 //       one repeat of a scenario. Exit 0 PASS, 1 FAIL (a named assertion or a driver failure), 2 harness error.
-//   assert <run dir>      re-run the assertions over a finished run dir
+//   assert <run dir> [--also check,check]      re-run the assertions over a finished run dir
 //   setup [--out dir] [--plan file]   build an isolated segment for manual inspection (copies credentials: delete its home)
 //   selftest              embedded cases for the pure parts (no model, no HOME)
 //   smoke                 not wired here: a driven session with one tiny prompt is a Haiku call (see driver.ts)
@@ -144,7 +144,10 @@ async function main(): Promise<number> {
 	}
 	if (command === "assert") {
 		const dir = path.resolve(rest[0] ?? "");
-		const results = assertRun(readContext(dir));
+		// `--also name,name` adds named checks to the run's own expect[] (to try a new check on a run that is already finished).
+		const also = (flag("also") ?? "").split(",").map(s => s.trim()).filter(Boolean);
+		const ctx = readContext(dir);
+		const results = assertRun({ ...ctx, expect: [...ctx.expect, ...also] });
 		for (const x of results) console.log(`${x.pass ? "PASS" : "FAIL"} ${x.id}: ${x.detail}`);
 		return results.every(x => x.pass) ? 0 : 1;
 	}

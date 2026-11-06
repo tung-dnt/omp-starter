@@ -5,6 +5,10 @@ import { capFor, mayStartHaiku, slotCostOf } from "./ledger.ts";
 import { validateRequirements } from "./schema.ts";
 import { isNarrowed, judgeScenario, type RepeatResult } from "./scenario-verdict.ts";
 import { expectProblem } from "../assert.ts";
+import { scanCode, scanText } from "./network-scan.ts";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 export interface Case {
 	name: string;
@@ -105,5 +109,24 @@ export function runSelftest(): Case[] {
 	add("expect: a misspelt key is a problem, not a check that matches nothing", expectProblem({ event: "x", tsak: "T" }) !== undefined && expectProblem({ noSlot: { slots: "x" } }) !== undefined && expectProblem({ slot: { task: "T", slot: "x", outcom: "y" } }) !== undefined);
 	add("expect: a flat slot or gate string and an unknown name are problems", expectProblem({ slot: "implementer" }) !== undefined && expectProblem({ gate: "cap" }) !== undefined && expectProblem("no-such-check") !== undefined && expectProblem({ ticket: "maybe" }) !== undefined);
 	add("expect: two forms in one mapping are a problem", expectProblem({ event: "x", slot: { task: "T", slot: "implementer" } }) !== undefined);
+	// R-106 scan: network modules, fetch, WebSocket and a git push are hits; an array push, a comment and a blocklist entry are not
+	const scan = (text: string) => scanText("x.ts", text).map(h => h.why);
+	add("network scan: node:http(s), net, tls, dgram imports and requires are hits", ["import h from \"node:https\";", "const n = require(\"net\");", "import(\"node:dgram\")", "import { x } from 'node:tls';"].every(t => scan(t).length === 1));
+	add("network scan: fetch( and WebSocket are hits", scan("const r = await fetch(url);").length === 1 && scan("const ws = new WebSocket(u);").length === 1);
+	add("network scan: a git argv with push is a hit", scan('git(repo, ["push", "origin"]);').length === 1 && scan('hookless(dir, ["push"]);').length === 1 && scan('Bun.spawnSync(["git", "-C", d,\n"push"]);').length === 1);
+	add("network scan: items.push(x), comments and a blocklist entry are not hits", scan("items.push(x);").length === 0 && scan("// fetch(url) is not used").length === 0 && scan(" * calls fetch( here").length === 0 && scan('const GIT_MUTATIONS = [\n"commit",\n"push",\n];').length === 0);
+	const tree = fs.mkdtempSync(path.join(os.tmpdir(), "t3-scan-"));
+	fs.mkdirSync(path.join(tree, "extensions/lib"), { recursive: true });
+	fs.mkdirSync(path.join(tree, "scripts"), { recursive: true });
+	fs.writeFileSync(path.join(tree, "extensions/spec-workflow.ts"), 'import { a } from "./lib/a";\nexport default a;\n');
+	fs.writeFileSync(path.join(tree, "extensions/lib/a.ts"), "export const a = 1;\n");
+	fs.writeFileSync(path.join(tree, "extensions/lib/other.ts"), "await fetch(url);\n");
+	fs.writeFileSync(path.join(tree, "extensions/lib/a.test.ts"), "await fetch(url);\n");
+	const clean = scanCode(tree);
+	add("network scan: only the entry's import closure is scanned, and tests are excluded", clean.files === 2 && clean.hits.length === 0, JSON.stringify(clean));
+	fs.appendFileSync(path.join(tree, "extensions/lib/a.ts"), "export const r = fetch(\"https://x\");\n");
+	const dirty = scanCode(tree);
+	add("network scan: an injected fetch( in a loaded file fails with file and line", dirty.hits.length === 1 && dirty.hits[0]?.file === "extensions/lib/a.ts" && dirty.hits[0]?.line === 2, JSON.stringify(dirty.hits));
+	fs.rmSync(tree, { recursive: true, force: true });
 	return cases;
 }

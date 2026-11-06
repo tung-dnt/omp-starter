@@ -410,6 +410,7 @@ class FakeRunner implements SlotRunner {
 				costUsd: reply.cost ?? 0.01,
 				contextTokens: reply.context ?? 1000,
 				sessionFile: `/sessions/${spec.task.id}-${spec.slot}.jsonl`,
+				agentId: `spec-${spec.story}-${spec.task.id}-${spec.slot}-${this.calls.length}`,
 				...(reply.aborted ? { aborted: reply.aborted } : {}),
 				...(reply.error ? { error: reply.error } : {}),
 			};
@@ -557,7 +558,9 @@ describe("happy path", () => {
 		expect(lines.at(-1)).toBe("S-1 ▸ 1/1 done");
 		const slotLines = fx.log.filter(entry => entry.kind === "slot");
 		expect(slotLines).toHaveLength(4);
-		expect(slotLines[0]).toMatchObject({ task: "T1", slot: "test_author", attempt: 1, outcome: "verdict", verdict: "pass", costUsd: 0.01, contextTokens: 1000, sessionFile: "/sessions/T1-test_author.jsonl" });
+		expect(slotLines[0]).toMatchObject({ task: "T1", slot: "test_author", attempt: 1, outcome: "verdict", verdict: "pass", costUsd: 0.01, contextTokens: 1000, sessionFile: "/sessions/T1-test_author.jsonl", agentId: "spec-S-1-T1-test_author-1" });
+		// Every slot line names the agent id its session ran under.
+		for (const line of slotLines) expect(line).toMatchObject({ agentId: expect.stringMatching(/^spec-S-1-/) });
 		expect(fx.log[0]).toMatchObject({ kind: "event", event: "run-start" });
 		expect(fx.log.at(-1)).toMatchObject({ kind: "event", event: "run-end" });
 	});

@@ -40,6 +40,8 @@ runs:
       - cost-within-budget
       - hook-installed-by-scheduler
       - no-push-no-vault-write
+      - no-network-code
+      - slot-agent-ids
       - spec-guard-strict
       - status-frames
       - notify: "outcome: complete, \\$[\\d.]+ in \\d+ slot runs"

@@ -76,6 +76,7 @@ async function runSlot(options: SlotRunnerOptions, spec: SlotSpec, signal: Abort
 	const testPaths = spec.testPaths;
 	const only = spec.testsOnly ? (file: string): boolean => isTestPath(file, testPaths === undefined ? undefined : { test_paths: testPaths }) : undefined;
 
+	const agentId = slotAgentId(spec, run);
 	const session = await options.sdk.createAgentSession({
 		cwd: spec.cwd,
 		model,
@@ -90,7 +91,7 @@ async function runSlot(options: SlotRunnerOptions, spec: SlotSpec, signal: Abort
 		hasUI: false,
 		enableMCP: false,
 		appendSystemPrompt: agent.systemPrompt,
-		agentId: slotAgentId(spec, run),
+		agentId,
 		preloadedPreparedExtensions: [
 			{
 				path: GUARD_LABEL,
@@ -104,7 +105,7 @@ async function runSlot(options: SlotRunnerOptions, spec: SlotSpec, signal: Abort
 	// The signal may have fired while the session was being created: its event is gone, so look at it now, before anything runs.
 	if (signal.aborted) {
 		await session.dispose().catch(() => undefined);
-		return stopped();
+		return { ...stopped(), agentId };
 	}
 
 	let costUsd = 0;
@@ -160,6 +161,7 @@ async function runSlot(options: SlotRunnerOptions, spec: SlotSpec, signal: Abort
 		costUsd,
 		contextTokens,
 		...(session.sessionFile === undefined ? {} : { sessionFile: session.sessionFile }),
+		agentId,
 		...(aborted === undefined ? {} : { aborted }),
 		...(error === undefined ? {} : { error }),
 	};

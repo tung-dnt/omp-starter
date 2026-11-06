@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fingerprint, lockFileOf, specWorktreeRoots } from "./setup.ts";
+import { scanCode } from "./lib/network-scan.ts";
 import type { Expect } from "./scenario.ts";
 
 export interface CheckResult {
@@ -264,6 +265,23 @@ const named: Record<string, Check> = {
 		const remotes = ctx.repos.map(r => git(r, "for-each-ref", "refs/remotes").out.trim()).filter(Boolean);
 		const pass = vaultHead === before.vaultHead && vaultStatus === "" && remotes.length === 0;
 		return { id: "no-push-no-vault-write", pass, detail: `vault HEAD moved=${vaultHead !== before.vaultHead} vault status="${vaultStatus}" remote-tracking refs=${remotes.length}` };
+	},
+	/** R-106: no network use and no push in the scheduler's code (the run's own copy of it): a hit names file and line. */
+	"no-network-code": ctx => {
+		const { files, hits } = scanCode(ctx.code);
+		return { id: "no-network-code", pass: files >= 10 && hits.length === 0, detail: `scanned ${files} files of the scheduler's code; hits: ${hits.map(h => `${h.file}:${h.line} ${h.why}: ${h.text}`).join(" | ") || "none"}` };
+	},
+	/** R-80: every slot line names the agent id its session ran under; none is Main; no two slots of the run share one (so overlapping slots never do). */
+	"slot-agent-ids": ctx => {
+		const slots = readEntries(ctx).filter(e => e.kind === "slot");
+		const missing = slots.filter(e => typeof e.agentId !== "string" || e.agentId === "").length;
+		const main = slots.filter(e => e.agentId === "Main").length;
+		const ids = slots.map(e => e.agentId as string);
+		const dup = ids.filter((id, i) => ids.indexOf(id) !== i);
+		const spans = slots.map(e => [Date.parse(e.at) - Number(e.durationMs), Date.parse(e.at), e.agentId as string] as const);
+		let overlapping = 0;
+		for (let i = 0; i < spans.length; i++) for (let j = i + 1; j < spans.length; j++) if ((spans[i] as readonly [number, number, string])[0] < (spans[j] as readonly [number, number, string])[1] && (spans[j] as readonly [number, number, string])[0] < (spans[i] as readonly [number, number, string])[1]) overlapping++;
+		return { id: "slot-agent-ids", pass: slots.length > 0 && missing === 0 && main === 0 && dup.length === 0, detail: `slot lines=${slots.length} without agentId=${missing} Main=${main} duplicate ids=${dup.join(",") || "none"} overlapping pairs=${overlapping}` };
 	},
 	"spec-guard-strict": ctx => {
 		const bad: string[] = [];
