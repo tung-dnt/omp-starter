@@ -24,7 +24,7 @@ Before the knowledge-base step, open Obsidian once so your vault is registered (
 
 ## Model routing
 
-Applied with `omp config set` after you confirm, on any subscription. Setup always saves both subscription presets and the settings that name no concrete model: effort, cycle order, per-agent overrides (role aliases such as `@tiny`), LSP diagnostics after every edit (`lsp.diagnosticsOnEdit`), and repeating rule reminders (`ttsr.repeatMode: after-gap`, `ttsr.repeatGap: 10`). It then applies active routing for the first subscription whose models are all available: Claude (table below), otherwise Codex (the `codex` preset's roles). With neither, active routing stays unchanged. Role assignments, named presets and per-agent overrides are merged into your existing settings; same-named entries are replaced.
+Applied with `omp config set` after you confirm, on any subscription. Setup always saves the three model presets and the settings that name no concrete model: effort, cycle order, per-agent overrides (role aliases such as `@tiny`), LSP diagnostics after every edit (`lsp.diagnosticsOnEdit`), and repeating rule reminders (`ttsr.repeatMode: after-gap`, `ttsr.repeatGap: 10`). It then applies active routing for the first subscription whose models are all available: Claude (table below), otherwise Codex (the `codex` preset's roles). With neither, active routing stays unchanged. Role assignments, named presets and per-agent overrides are merged into your existing settings; same-named entries are replaced.
 
 | Work | Model | Effort |
 |---|---|---|
@@ -36,15 +36,16 @@ Applied with `omp config set` after you confirm, on any subscription. Setup alwa
 | Security agents | Opus 5.5 | `high` (never Fable) |
 | `deep` agent, Ctrl+P `deep` role | Fable 5.1 | `high` |
 
-The idea: spend effort on the plan, since it runs once and feeds every coding slice. Keep coders at a `high` floor and use `max` only for concurrency, migrations and shared contracts. Fallbacks stay within the subscription: Fable → Opus → Sonnet on Claude, Astra → Sol on Codex. A subscription limit stops the session instead of switching to paid API usage.
+The idea: spend effort on the plan, since it runs once and feeds every coding slice. Keep coders at a `high` floor and use `max` only for concurrency, migrations and shared contracts. Fallbacks stay within the subscription: Fable → Opus → Sonnet on Claude, Astra → Sol on Codex. The one exception is Antigravity: a failed or exhausted Gemini request falls back to Haiku 5.5. A subscription limit stops the session instead of switching to paid API usage.
 
 ### Subscription presets
 
-The model step saves two complete role setups, even when neither provider is logged in:
+The model step saves three complete role setups, even when no provider is logged in:
 
 | Preset | Main session | Planning / deep consultation | Helpers |
 |---|---|---|---|
 | `claude` | Opus 5.5 (`auto`) | Opus 5.5 / Fable 5.1 (`high`) | Sonnet 5.5; Haiku 5.5 for exploration, tiny work and judgments |
+| `claude-gemini` | Opus 5.5 (`auto`) | Opus 5.5 / Fable 5.1 (`high`) | Sonnet 5.5; Gemini 3.8 Flash (Antigravity) for exploration and tiny work; Haiku 5.5 judges |
 | `codex` | GPT-6.1 Sol (`auto`) | GPT-6.1 Sol / GPT-6 Astra (`high`) | GPT-6 Luna; `high` for tasks, `low` for tiny work and judgments |
 
 Existing installs: update the plugin and run `/starter models` to save the presets. Restart open sessions to load the routing changes, then switch inside omp:
@@ -52,11 +53,18 @@ Existing installs: update the plugin and run `/starter models` to save the prese
 ```text
 /modelpreset switch codex
 /modelpreset switch claude
+/modelpreset switch claude-gemini
 ```
 
 `/modelpreset` opens the picker. Switching replaces the model-role setup, not just the main conversation model; the security agents follow `@slow` rather than staying pinned to Claude. Other agent overrides and explicitly requested models are not part of a preset.
 
-Both presets save `defaultThinkingLevel: auto`; the advisor uses Luna or Sonnet at `medium`. Presets do not change authentication, enable the advisor, or bypass subscription quotas. Use `/login openai-codex` for the Codex subscription and `/login anthropic` for Claude. No API key is installed by this step. The escalation router selects Fable only in Anthropic sessions and Astra only in OpenAI Codex sessions; other providers are untouched. Setup saves both subscriptions' fallback chains, so switching presets does not require rerunning setup.
+All presets save `defaultThinkingLevel: auto`; the advisor uses Luna or Sonnet at `medium`. Presets do not change authentication, enable the advisor, or bypass subscription quotas. Use `/login openai-codex` for the Codex subscription, `/login anthropic` for Claude and `/login google-antigravity` for Gemini. No API key is installed by this step. The escalation router selects Fable only in Anthropic sessions and Astra only in OpenAI Codex sessions; other providers are untouched. Setup saves every subscription's fallback chains, so switching presets does not require rerunning setup.
+
+`claude-gemini` moves only the `tiny` role (`scout`, `sonic`, `state-investigator`) onto the Antigravity quota. Coding, review, commits and judgments stay on Claude. On Terminal-Bench 4.0 (Vals, 2026-11-09), Gemini 3.8 Flash scores 19.7% against Haiku 5.5's 36.4% and Sonnet 5.5's 64.1%, and it is slower (about 81 vs 164 tok/s). The Antigravity subscription offers only Flash-tier Gemini models.
+
+**Do:** switch to `claude-gemini` when Claude quota is tight and the work is exploration-heavy.
+
+**Don't:** use it on repositories whose data rules forbid sending code to Google (for example NHS/patient-data code without IG approval). Scouts read whatever the parent points them at.
 
 
 ### Fable / Astra escalation
@@ -227,6 +235,10 @@ It prints one markdown table per metric, for main sessions and subagents separat
 Limits: M3 and M1's scope check use today's vault, so notes moved later are judged at their new place. A session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names, tool names and note slugs; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder or the vault; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.31.0 — 2026-11-11
+
+- **Added:** a `claude-gemini` preset: the `claude` setup with the `tiny` role (`scout`, `sonic`, `state-investigator`) on Gemini 3.8 Flash through the Antigravity subscription. Coding, review, commits and judgments stay on Claude. Setup also saves an Antigravity fallback chain (`google-antigravity/*` → Haiku 5.5). Existing installs: update, then rerun `/starter models`. Don't use it where your data rules forbid sending code to Google.
 
 ### 0.30.0 — 2026-11-02
 

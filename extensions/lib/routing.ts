@@ -15,6 +15,24 @@ export const CODEX_MODELS = {
 	astra: "openai-codex/gpt-6-astra",
 } as const;
 
+/** Antigravity subscription; the `claude-gemini` preset uses it for `tiny` work only. */
+export const GEMINI_MODELS = {
+	flash: "google-antigravity/gemini-3.8-flash",
+} as const;
+
+const CLAUDE_ROLES = {
+	default: `${MODELS.opus}:auto`,
+	slow: `${MODELS.opus}:high`,
+	plan: "@slow",
+	deep: `${MODELS.fable}:high`,
+	task: `${MODELS.sonnet}:high`,
+	smol: MODELS.sonnet,
+	tiny: MODELS.haiku,
+	judge: MODELS.haiku,
+	commit: "@smol",
+	advisor: `${MODELS.sonnet}:medium`,
+} as const;
+
 export const MODEL_PRESETS = {
 	codex: {
 		modelRoles: {
@@ -32,18 +50,13 @@ export const MODEL_PRESETS = {
 		defaultThinkingLevel: "auto",
 	},
 	claude: {
-		modelRoles: {
-			default: `${MODELS.opus}:auto`,
-			slow: `${MODELS.opus}:high`,
-			plan: "@slow",
-			deep: `${MODELS.fable}:high`,
-			task: `${MODELS.sonnet}:high`,
-			smol: MODELS.sonnet,
-			tiny: MODELS.haiku,
-			judge: MODELS.haiku,
-			commit: "@smol",
-			advisor: `${MODELS.sonnet}:medium`,
-		},
+		modelRoles: CLAUDE_ROLES,
+		defaultThinkingLevel: "auto",
+	},
+	// Claude, with read-only/mechanical `tiny` work (scout, sonic, state-investigator) on the
+	// Antigravity quota. Coding, review and judgments stay on Claude.
+	"claude-gemini": {
+		modelRoles: { ...CLAUDE_ROLES, tiny: GEMINI_MODELS.flash },
 		defaultThinkingLevel: "auto",
 	},
 } as const;
@@ -68,6 +81,7 @@ export const COMMON: Setting[] = [
 			[MODELS.fable]: [MODELS.opus],
 			[MODELS.opus]: [MODELS.sonnet],
 			[CODEX_MODELS.astra]: [CODEX_MODELS.sol],
+			"google-antigravity/*": [MODELS.haiku],
 		},
 	},
 	{ key: "cycleOrder", value: ["smol", "default", "slow", "deep"] },
@@ -78,7 +92,7 @@ export const COMMON: Setting[] = [
 		merge: true,
 		value: {
 			sonic: "@tiny",
-			// Read-only, short runs: Haiku 5.5 in the claude preset, Luna in codex.
+			// Read-only, short runs: Haiku 5.5 in the claude preset, Gemini 3.8 Flash in claude-gemini, Luna in codex.
 			scout: "@tiny",
 			// agent-skills agents carry Claude Code model names that omp does not resolve.
 			"state-investigator": "@tiny",
@@ -110,7 +124,7 @@ const ROUTING = {
 		models: Object.values(CODEX_MODELS),
 		settings: [{ key: "modelRoles", merge: true, value: MODEL_PRESETS.codex.modelRoles }],
 	},
-} satisfies Record<keyof typeof MODEL_PRESETS, { models: string[]; settings: Setting[] }>;
+} satisfies Record<"claude" | "codex", { models: string[]; settings: Setting[] }>;
 
 async function omp(exec: Exec, args: string[]): Promise<string> {
 	const result = await exec("omp", args, { timeout: 60_000 });
@@ -152,7 +166,7 @@ function withJudge(settings: readonly Setting[], judge: string | undefined): Set
 export async function setupModels(ui: WizardUi, exec: Exec, judge?: string): Promise<"done" | "skipped"> {
 	const ok = await ui.confirm(
 		"Subscription presets and model routing",
-		"Save `claude` and `codex` subscription presets for /modelpreset switch, plus effort, agent overrides, " +
+		"Save `claude`, `claude-gemini` and `codex` presets for /modelpreset switch, plus effort, agent overrides, " +
 			"LSP diagnostics after every edit and repeating LSP/debugger reminders, on any subscription. " +
 			"Then apply routing for the subscription whose models are available: Claude first (Opus for the main session " +
 			"and planning, Sonnet for coding and review, Haiku 5.5 for exploration and mechanical work, Fable for deep consultation), " +
@@ -172,8 +186,8 @@ export async function setupModels(ui: WizardUi, exec: Exec, judge?: string): Pro
 	if (active) await applySettings(exec, withJudge(ROUTING[active].settings, judge));
 	ui.notify(
 		active
-			? `${active === "claude" ? "Claude" : "Codex"} routing applied; claude/codex presets saved. Restart open sessions, then use /modelpreset switch codex or claude.`
-			: "Claude/codex presets and shared settings saved; routing unchanged. Log in before using a preset's models.",
+			? `${active === "claude" ? "Claude" : "Codex"} routing applied; presets saved. Restart open sessions, then use /modelpreset switch claude, claude-gemini or codex.`
+			: "Presets and shared settings saved; routing unchanged. Log in before using a preset's models.",
 		"info",
 	);
 	return "done";

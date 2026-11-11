@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Exec, WizardUi } from "../setup";
-import { CODEX_MODELS, MODELS, setupModels } from "./routing";
+import { CODEX_MODELS, GEMINI_MODELS, MODELS, setupModels } from "./routing";
 
 const homes: string[] = [];
 afterEach(() => {
@@ -55,9 +55,12 @@ test("an unauthenticated client saves presets and shared settings without changi
 	const before = await config("get", "modelRoles");
 
 	expect(await setupModels(ui, exec)).toBe("done");
-	const presets = await config("get", "modelPresets") as Record<string, { modelRoles: { default: string } }>;
+	const presets = await config("get", "modelPresets") as Record<string, { modelRoles: Record<string, string> }>;
 	expect(presets.codex.modelRoles.default).toBe("openai-codex/gpt-6.1-sol");
 	expect(presets.claude.modelRoles.default).toBe("anthropic/claude-opus-5-5:auto");
+	// Only exploration/mechanical work moves to Gemini; coding, review and judgments stay on Claude.
+	expect(presets["claude-gemini"].modelRoles).toEqual({ ...presets.claude.modelRoles, tiny: GEMINI_MODELS.flash });
+	expect(await config("get", "retry.fallbackChains")).toMatchObject({ "google-antigravity/*": [MODELS.haiku] });
 	expect(await config("get", "modelRoles")).toEqual(before);
 	expect(await config("get", "defaultThinkingLevel")).toBe("auto");
 	expect(await config("get", "lsp.diagnosticsOnEdit")).toBe(true);
@@ -100,7 +103,7 @@ test("available Claude models still activate Claude routing without deleting cus
 		default: "anthropic/claude-opus-5-5:auto", custom: "@default", deep: "anthropic/claude-fable-5-1:high",
 	});
 	const presets = await config("get", "modelPresets") as Record<string, unknown>;
-	expect(Object.keys(presets).sort()).toEqual(["claude", "codex"]);
+	expect(Object.keys(presets).sort()).toEqual(["claude", "claude-gemini", "codex"]);
 }, 60_000);
 
 test("cancelling setup leaves saved presets and routing untouched", async () => {
