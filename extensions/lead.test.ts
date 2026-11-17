@@ -241,3 +241,36 @@ describe("status", () => {
 		expect(readStoryState(s.storyDir).status).toBeNull();
 	});
 });
+
+describe("builders", () => {
+	const spawn = (fake: FakePi, agent: string, ctx: object) =>
+		fake.emit("before_subagent_spawn", { type: "before_subagent_spawn", agent, invocationKind: "task", patterns: [] }, ctx) as Verdict | undefined;
+
+	test("are capped at limits.builders while a story is active; scouts are not counted or capped", () => {
+		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE.replace("builders: 2", "builders: 1"), "system-map.md": SYSTEM_MAP_TEMPLATE, "stories/S1/brief.md": BRIEF });
+		const { ctx } = s.main();
+		const builder = fakeContext({ cwd: s.shop, hasUI: false, agent: { kind: "sub", id: "a1", name: "task-builder" } });
+		s.fake.emit("agent_start", { type: "agent_start" }, builder);
+		expect(spawn(s.fake, "task-builder", ctx)).toBeUndefined();
+
+		s.input("/story S1", ctx);
+		expect(spawn(s.fake, "task-builder", ctx)).toEqual({ block: true, reason: "lead: 1 builders already running (limits.builders = 1 in hard-gates.md); wait for one to finish." });
+		expect(spawn(s.fake, "scout", ctx)).toBeUndefined();
+
+		s.fake.emit("agent_end", { type: "agent_end", messages: [] }, builder);
+		expect(spawn(s.fake, "task-builder", ctx)).toBeUndefined();
+	});
+});
+
+describe("async mode", () => {
+	test("tells the lead when the main session stops, not when a subagent or a continuing turn ends", () => {
+		const s = setup({ "system-map.md": SYSTEM_MAP_TEMPLATE, "stories/S1/brief.md": BRIEF.replace("mode: sync", "mode: async") });
+		const { ui, ctx } = s.main();
+		s.input("/story S1", ctx);
+		s.fake.emit("agent_end", { type: "agent_end", messages: [] }, s.sub("task-builder"));
+		s.fake.emit("agent_end", { type: "agent_end", messages: [], willContinue: true }, ctx);
+		expect(ui.notifications).toEqual([]);
+		s.fake.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
+		expect(ui.notifications).toEqual([{ type: "warning", message: "omp lead · S1 · agent stopped: review or approve" }]);
+	});
+});

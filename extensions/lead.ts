@@ -11,8 +11,9 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { atomicWrite } from "./lib/file-lock";
 import { inside } from "./lib/kb-sources";
-import { leadDirFor, leadReady, readBrief, readPlan, readSystemMap, type StoryState, updateStoryState } from "./lib/lead/artifacts";
+import { leadDirFor, leadReady, readBrief, readHardGates, readPlan, readSystemMap, type StoryState, updateStoryState } from "./lib/lead/artifacts";
 import { gateTitle, recordGate } from "./lib/lead/gates";
+import { leadNotify } from "./lib/lead/notify";
 import { type ActiveStory, lead, resetLead } from "./lib/lead/registry";
 import { planApproved, STORY_BLOCK_HEADER, storyBlock } from "./lib/lead/story";
 import { repoRoot } from "./lib/repo";
@@ -24,6 +25,8 @@ const STORY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WRITE_TOOLS: Record<string, true> = { write: true, edit: true };
 // Subagents that build or review get the story block; scouts and the like do not need the brief.
 const LEAD_SUBAGENTS: Record<string, true> = { task: true, "task-builder": true, "test-engineer": true, "code-reviewer": true, "security-auditor": true, reviewer: true };
+// Subagents that write code count against `limits.builders` of hard-gates.md while a story is active.
+const BUILDERS: Record<string, true> = { task: true, "task-builder": true, "test-engineer": true };
 
 interface LeadParams {
 	op: "approve" | "gate" | "status" | "retro";
@@ -202,6 +205,31 @@ export default function leadExtension(pi: ExtensionAPI): void {
 				};
 			}
 		}
+	});
+
+	const builderId = (ctx: ExtensionContext): string | undefined =>
+		ctx.agent?.kind === "sub" && BUILDERS[ctx.agent.name.toLowerCase()] ? (ctx.agent.id ?? ctx.sessionManager.getSessionId()) : undefined;
+
+	pi.on("agent_start", (_event, ctx) => {
+		const id = builderId(ctx);
+		if (id) lead().runningBuilders.add(id);
+	});
+
+	pi.on("agent_end", (event, ctx) => {
+		const id = builderId(ctx);
+		if (id) lead().runningBuilders.delete(id);
+		const story = lead().story;
+		// In async mode the lead is away: tell them when the main session comes to rest.
+		if (story?.mode === "async" && ctx.agent?.kind !== "sub" && !event.willContinue) leadNotify(ctx, `omp lead · ${story.id} · agent stopped: review or approve`);
+	});
+
+	pi.on("before_subagent_spawn", event => {
+		const story = lead().story;
+		if (!story || !BUILDERS[event.agent.toLowerCase()]) return;
+		const limit = readHardGates(story.leadDir).gates?.limits.builders ?? 2;
+		const running = lead().runningBuilders.size;
+		if (running < limit) return;
+		return { block: true, reason: `lead: ${running} builders already running (limits.builders = ${limit} in hard-gates.md); wait for one to finish.` };
 	});
 
 	pi.registerTool({
