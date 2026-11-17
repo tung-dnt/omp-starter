@@ -6,6 +6,7 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { leadDirFor, protectedLeadPath, readHardGates } from "./lib/lead/artifacts";
 import { matchGates, matchRepoFiles, resolveGate } from "./lib/lead/gates";
+import { checkStructure } from "./lib/lead/structure";
 import { changedFiles, repoRoot, stagedFiles } from "./lib/repo";
 import { tildify } from "./lib/state";
 import { bashDir, GH_PR, GIT_COMMIT, gitCommandDir, resolveFrom, targetPaths } from "./lib/tool-input";
@@ -19,6 +20,8 @@ interface Published {
 	repo: string;
 	/** Repo-root relative. */
 	files: string[];
+	/** The call is a commit of this repository, not only a push or a PR. */
+	commit?: true;
 }
 
 /** What a commit, push or PR call would publish, per repository; undefined when the call is none of those. */
@@ -36,7 +39,7 @@ function published(toolName: string, input: Record<string, unknown>, sessionCwd:
 	if (!commit && !push && !pr) return undefined;
 	const out: Published[] = [];
 	const commitRepo = commit && repoRoot(gitCommandDir(command, commit, input.cwd, sessionCwd));
-	if (commitRepo) out.push({ repo: commitRepo, files: stagedFiles(commitRepo, COMMIT_ALL.test(command)) });
+	if (commitRepo) out.push({ repo: commitRepo, files: stagedFiles(commitRepo, COMMIT_ALL.test(command)), commit: true });
 	const branchRepo = push ? repoRoot(gitCommandDir(command, push, input.cwd, sessionCwd)) : pr ? repoRoot(bashDir(command, input.cwd, sessionCwd)) : undefined;
 	if (branchRepo) out.push({ repo: branchRepo, files: changedFiles(branchRepo) });
 	return out;
@@ -70,9 +73,13 @@ export default function leadGates(pi: ExtensionAPI): void {
 			warned = error;
 			ctx.ui.notify(`lead: ${error}`, "warning");
 		}
+		const structure = await Promise.all((publishing ?? []).filter(p => p.commit).map(p => checkStructure(p.repo, leadDir)));
+		const stale = structure.find(s => s.block);
+		if (stale) return { block: true, reason: stale.block };
 		const hits = [
 			...writes.flatMap(p => matchGates(p, gates.gates)),
 			...(publishing ?? []).flatMap(({ repo, files }) => matchRepoFiles(repo, files, gates.gates)),
+			...structure.flatMap(s => s.hits),
 		];
 		return resolveGate(ctx, hits);
 	});
