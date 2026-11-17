@@ -2,12 +2,11 @@
 // Repeated unexpected failures suggest `deep`; risky reviews escalate automatically.
 // Ladder: a run's first `deep` consult runs on Opus/Sol at high effort, uncounted; later ones go to Fable/Astra.
 // Each subscription has its own daily cap and persistent counter.
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { withFileLock } from "./lib/file-lock";
-import { repoRoot } from "./lib/repo";
+import { changedFiles, repoRoot } from "./lib/repo";
 import { CODEX_MODELS, MODELS } from "./lib/routing";
 import { HOME } from "./lib/state";
 import { resolveFrom, simpleCommands, targetPaths } from "./lib/tool-input";
@@ -45,7 +44,6 @@ const HIGH_STAKES = [
 	/(^|\/)serverless\.(ya?ml|ts)$/i,
 	/^\.github\/workflows\//,
 ];
-const BASE_REFS = ["origin/HEAD", "origin/main", "origin/master", "origin/develop", "origin/development"];
 // Probe commands whose non-zero exit means "no match", not "stuck".
 const PROBE = /^(grep|rg|egrep|fgrep|diff|test|\[|which|command -v|ls|cat|head|tail|find|git (diff|status|log|show|grep))\b/;
 
@@ -87,32 +85,6 @@ const WRITE_TOOLS: Record<string, true> = { write: true, edit: true };
 function reviewRepos(cwd: string): string[] {
 	const own = repoRoot(cwd);
 	return [...new Set([...(own ? [own] : []), ...editedRepos])];
-}
-
-function git(cwd: string, args: string[]): string | null {
-	try {
-		return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim();
-	} catch {
-		return null;
-	}
-}
-
-/** Uncommitted, untracked, and branch-vs-base changed paths, repo-root relative. */
-function changedFiles(cwd: string): string[] {
-	const files = new Set<string>();
-	const add = (out: string | null) => {
-		for (const f of out ? out.split("\n") : []) if (f) files.add(f);
-	};
-	add(git(cwd, ["diff", "--name-only", "HEAD"]));
-	add(git(cwd, ["ls-files", "--others", "--exclude-standard"]));
-	for (const ref of BASE_REFS) {
-		const base = git(cwd, ["merge-base", "HEAD", ref]);
-		if (base) {
-			add(git(cwd, ["diff", "--name-only", `${base}...HEAD`]));
-			break;
-		}
-	}
-	return [...files];
 }
 
 export default function fableRouter(pi: ExtensionAPI): void {

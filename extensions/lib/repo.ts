@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { HOME } from "./state";
 
 function git(cwd: string, args: string[]): string | undefined {
-	const result = Bun.spawnSync({ cmd: ["git", "-C", cwd, ...args], stdout: "pipe", stderr: "ignore", timeout: 2000 });
+	const result = Bun.spawnSync({ cmd: ["git", "-C", cwd, ...args], stdout: "pipe", stderr: "ignore", timeout: 5000 });
 	return result.exitCode === 0 ? result.stdout.toString().trim() || undefined : undefined;
 }
 
@@ -24,4 +24,41 @@ export function repoRoot(p: string): string | undefined {
 		if (fs.existsSync(path.join(dir, ".git"))) return dir;
 	}
 	return undefined;
+}
+
+const BASE_REFS = ["origin/HEAD", "origin/main", "origin/master", "origin/develop", "origin/development"];
+
+/** The commit the branch at `cwd` forked from: its merge base with the first base ref that exists. */
+export function mergeBase(cwd: string): string | undefined {
+	for (const ref of BASE_REFS) {
+		const base = git(cwd, ["merge-base", "HEAD", ref]);
+		if (base) return base;
+	}
+	return undefined;
+}
+
+/** Uncommitted, untracked, and branch-vs-base changed paths, repo-root relative. */
+export function changedFiles(cwd: string): string[] {
+	const files = new Set<string>();
+	const add = (out: string | undefined) => {
+		for (const f of out ? out.split("\n") : []) if (f) files.add(f);
+	};
+	add(git(cwd, ["diff", "--name-only", "HEAD"]));
+	add(git(cwd, ["ls-files", "--others", "--exclude-standard"]));
+	const base = mergeBase(cwd);
+	if (base) add(git(cwd, ["diff", "--name-only", `${base}...HEAD`]));
+	return [...files];
+}
+
+/** Lines the branch and the working tree add over the merge base, without the leading `+`; empty without a base. */
+export function addedLines(cwd: string): string[] {
+	const base = mergeBase(cwd);
+	if (!base) return [];
+	const out: string[] = [];
+	for (const diff of [git(cwd, ["diff", "-U0", `${base}...HEAD`]), git(cwd, ["diff", "-U0", "HEAD"])]) {
+		for (const line of diff ? diff.split("\n") : []) {
+			if (line.startsWith("+") && !line.startsWith("+++")) out.push(line.slice(1));
+		}
+	}
+	return out;
 }

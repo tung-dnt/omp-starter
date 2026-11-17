@@ -6,10 +6,8 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { doneSources, inside, resolveKb, sourceOwning } from "./lib/kb-sources";
 import { kbWritten, markKbWritten, resetKbWritten } from "./lib/kb-write-flag";
 import { expandHome, readState } from "./lib/state";
-import { bashDir, resolveFrom, targetPaths, unquote } from "./lib/tool-input";
+import { bashDir, GIT_COMMIT, resolveFrom, targetPaths, unquote } from "./lib/tool-input";
 
-// `git [global opts] commit`, not commit-tree or "commit" as an argument of another subcommand.
-const GIT_COMMIT = /\bgit(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+commit(?=[\s;&|)]|$)/;
 const GIT_DASH_C = /\s-C\s+("[^"]*"|'[^']*'|\S+)/g;
 const WRITE_TOOLS: Record<string, true> = { write: true, edit: true };
 

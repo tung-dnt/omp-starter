@@ -1,9 +1,22 @@
 // A lock file that serializes a read-modify-write across omp sessions on this machine.
 import * as fs from "node:fs";
+import * as path from "node:path";
 
 const WAIT_MS = 5_000;
 /** A lock older than this is from a crashed holder and is taken over. */
 const STALE_MS = 30_000;
+
+/** Writes through a temp file in the same folder and renames it, so readers never see half a file. */
+export function atomicWrite(file: string, content: string): void {
+	const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+	try {
+		fs.writeFileSync(temporary, content, { flag: "wx" });
+		fs.renameSync(temporary, file);
+	} catch (error) {
+		fs.rmSync(temporary, { force: true });
+		throw error;
+	}
+}
 
 /** Runs `fn` while holding `lock` (created exclusively, removed after); throws `busy` when another holder keeps it past WAIT_MS. */
 export async function withFileLock<T>(lock: string, busy: string, fn: () => T): Promise<T> {

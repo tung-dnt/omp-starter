@@ -3,7 +3,7 @@
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { repoRoot } from "./lib/repo";
-import { bashDir, resolveFrom, searchPaths, simpleCommands } from "./lib/tool-input";
+import { bashDir, PRINTERS, resolveFrom, searchPaths, SELECTOR, simpleCommands } from "./lib/tool-input";
 
 const SOURCE = /\.(?:tsx?|jsx?|mjs|cjs|go|sql|py|rs|java|kt|cs|php|rb|c|cc|cpp|h|hpp)$/;
 /**
@@ -12,10 +12,6 @@ const SOURCE = /\.(?:tsx?|jsx?|mjs|cjs|go|sql|py|rs|java|kt|cs|php|rb|c|cc|cpp|h
  * macOS (`/private/tmp`) disagree about repos cloned there.
  */
 const NOT_SOURCE = /^\/(?:dev|proc|usr|etc|opt\/homebrew)\/|\/node_modules\/|\/\.[^/]/;
-/** Commands that print a file's text; the source files they name count as reads. */
-const PRINTERS: Record<string, true> = { cat: true, head: true, tail: true, sed: true, nl: true, less: true, bat: true };
-/** A read selector after the path: `:50-80`, `:raw`, `:-5`. */
-const SELECTOR = /:(?:raw\b|-?\d).*$/;
 
 /** Absolute paths of the source a `read` or `bash` call reads or searches. */
 export function sourceReads(toolName: string, input: Record<string, unknown>, sessionCwd: string): string[] {

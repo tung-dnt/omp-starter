@@ -6,7 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { withFileLock } from "./lib/file-lock";
+import { atomicWrite, withFileLock } from "./lib/file-lock";
 import { doneSources, forms } from "./lib/kb-sources";
 import { memoryDir, recall, type RecallParams } from "./lib/kb-store";
 import { markKbWritten } from "./lib/kb-write-flag";
@@ -24,18 +24,6 @@ import {
 } from "./lib/memory-notes";
 import { resolveRepoName } from "./lib/repo";
 import { readState, tildify, type KbSource } from "./lib/state";
-
-/** Writes through a temp file in the same folder and renames it, so readers never see half a file. */
-function atomicWrite(file: string, content: string): void {
-	const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
-	try {
-		fs.writeFileSync(temporary, content, { flag: "wx" });
-		fs.renameSync(temporary, file);
-	} catch (error) {
-		fs.rmSync(temporary, { force: true });
-		throw error;
-	}
-}
 
 /** Serializes index edits across sessions. The lock lives in the temp dir, not the vault, so it never syncs. */
 function withIndexLock<T>(indexPath: string, fn: () => T): Promise<T> {

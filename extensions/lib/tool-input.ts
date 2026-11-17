@@ -81,6 +81,9 @@ export function bashDir(command: string, cwd: unknown, sessionCwd: string): stri
 	return dir;
 }
 
+// `git [global opts] commit`, not commit-tree or "commit" as an argument of another subcommand.
+export const GIT_COMMIT = /\bgit(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+commit(?=[\s;&|)]|$)/;
+
 // Target paths named inside an `edit` payload: hashline `[PATH#TAG]` / `MV DEST`, apply_patch and sloppy headers.
 const EDIT_TARGET =
 	/^\[([^\]\n]+?)#[0-9A-Fa-f]{4}\]|^MV\s+("[^"]*"|'[^']*'|\S+)|^\*\*\* (?:Add|Update|Edit) File:\s*(.+?)(?:\s+all)?\s*$|^\*\*\* Move to:\s*(.+?)\s*$/gm;
@@ -91,6 +94,32 @@ export function targetPaths(toolName: string, input: Record<string, unknown>): s
 	if (typeof input.path === "string") out.push(input.path);
 	if (toolName === "edit" && typeof input.input === "string") {
 		for (const m of input.input.matchAll(EDIT_TARGET)) out.push(m[1] ?? m[2] ?? m[3] ?? m[4]);
+	}
+	return out;
+}
+
+/** Commands that print a file's text; the files they name count as reads. */
+export const PRINTERS: Record<string, true> = { cat: true, head: true, tail: true, sed: true, nl: true, less: true, bat: true };
+/** A read selector after the path: `:50-80`, `:raw`, `:-5`. */
+export const SELECTOR = /:(?:raw\b|-?\d).*$/;
+
+/**
+ * Absolute paths a tool call reads, searches or writes: the `read`/`glob` path, `write`/`edit` targets, and for
+ * `bash` its start folder plus what its unpiped `rg`/`grep` and file-printing commands name. Internal URLs are skipped.
+ */
+export function touchedPaths(toolName: string, input: Record<string, unknown>, sessionCwd: string): string[] {
+	const local = (paths: string[]) => paths.filter(p => p && !p.includes("://")).map(p => resolveFrom(sessionCwd, p));
+	if (toolName === "read") return local(typeof input.path === "string" ? [input.path.replace(SELECTOR, "")] : []);
+	if (toolName === "glob") return local(typeof input.path === "string" ? input.path.split(";") : ["."]);
+	if (toolName === "write" || toolName === "edit") return local(targetPaths(toolName, input));
+	if (toolName !== "bash" || typeof input.command !== "string") return [];
+	const dir = bashDir(input.command, input.cwd, sessionCwd);
+	const out = [dir];
+	for (const { words, piped } of simpleCommands(input.command)) {
+		if (piped) continue;
+		const searched = searchPaths(words);
+		if (searched) out.push(...(searched.length ? searched : ["."]).map(p => resolveFrom(dir, p)));
+		else if (PRINTERS[words[0]]) out.push(...words.slice(1).filter(w => !w.startsWith("-")).map(w => resolveFrom(dir, w)));
 	}
 	return out;
 }
