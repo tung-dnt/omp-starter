@@ -6,8 +6,12 @@ import { repoRoot } from "./lib/repo";
 import { bashDir, resolveFrom, searchPaths, simpleCommands } from "./lib/tool-input";
 
 const SOURCE = /\.(?:tsx?|jsx?|mjs|cjs|go|sql|py|rs|java|kt|cs|php|rb|c|cc|cpp|h|hpp)$/;
-/** Paths that are never a repository's own source: system folders, dependencies, dot folders. */
-const NOT_SOURCE = /^\/(?:tmp|dev|proc|usr|etc|opt\/homebrew)\/|\/node_modules\/|\/\.[^/]/;
+/**
+ * Paths that are never a repository's own source: system folders, dependencies, dot folders. `/tmp` is not listed:
+ * scratch files outside a git repo are already dropped by `repoRoot`, and listing it made Linux (`/tmp`) and
+ * macOS (`/private/tmp`) disagree about repos cloned there.
+ */
+const NOT_SOURCE = /^\/(?:dev|proc|usr|etc|opt\/homebrew)\/|\/node_modules\/|\/\.[^/]/;
 /** Commands that print a file's text; the source files they name count as reads. */
 const PRINTERS: Record<string, true> = { cat: true, head: true, tail: true, sed: true, nl: true, less: true, bat: true };
 /** A read selector after the path: `:50-80`, `:raw`, `:-5`. */

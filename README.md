@@ -209,7 +209,7 @@ An eighth always-on rule (`rules/subagent-absolute-paths.md`) loads in every sub
 
 Two tool-use rules (`rules/lsp-symbol-search.md`, `rules/dap-over-print.md`) are omp TTSR rules: the harness checks each tool call as it streams and adds a reminder after the result, so they work however long the session gets and survive compaction. When the agent greps for a code symbol (camelCase/PascalCase anywhere; snake_case when the command targets Rust or C/C++), it is pointed to `xd://lsp` `definition`/`references`/`symbols`/`rename`. When it adds `console.log`, `fmt.Print*`, `println!`/`dbg!`, `printf` or `std::cerr` to TS/JS, Go, Rust or C/C++ code, it is pointed to `xd://debug`. Both only remind and never block or interrupt; string, SQL-column and config-key searches don't trigger the LSP rule. They load in the main session and `task-builder`.
 
-`extensions/cross-repo-reads.ts` reminds the main session of the cross-repo scout fan-out once it has read source from a second repository: a `read` of a source file, `rg`/`grep` over a repo folder, or `cat`/`head`/`sed`… of a source file, with relative paths resolved from the session's folder or the command's `cd`. It reminds again only when a further repo appears. A session working in one repo never sees it. Docs, `node_modules`, hidden folders (`~/.omp`, a vault), `/tmp` and system folders don't count, nor do subagents' reads.
+`extensions/cross-repo-reads.ts` reminds the main session of the cross-repo scout fan-out once it has read source from a second repository: a `read` of a source file, `rg`/`grep` over a repo folder, or `cat`/`head`/`sed`… of a source file, with relative paths resolved from the session's folder or the command's `cd`. It reminds again only when a further repo appears. A session working in one repo never sees it. Docs, `node_modules`, hidden folders (`~/.omp`, a vault), files outside any git repo (such as `/tmp` scratch files) and system folders don't count, nor do subagents' reads.
 
 With the Jev step on, `rules/lsp-symbol-judged.md` replaces the regex LSP rule (which goes into `ttsr.disabledRules`) in the main session: it prefilters every non-piped `rg`/`grep` and asks Jev whether the command looks up a code symbol, so forms the regex misses (`export function X`, `^func Test`, `a|b|X`, `X(`) also get the reminder. Coding subagents get `lsp-guard` (below) instead, so each grep is judged once. Without a TypeSafe judge (`ttsr.judge: auto`) the judged rule never runs and costs nothing.
 
@@ -248,6 +248,10 @@ It prints one markdown table per metric, for main sessions and subagents separat
 Limits: M3 and M1's scope check use today's vault, so notes moved later are judged at their new place. A session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names, tool names and note slugs; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder or the vault; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.32.1 — 2026-11-17
+
+- **Fixed:** `cross-repo-reads` no longer ignores every path under `/tmp`. On Linux that hid git repos cloned there (and failed CI, whose test homes live in `/tmp`), while macOS resolves `/tmp` to `/private/tmp` and counted them. Files outside any git repo still don't count.
 
 ### 0.32.0 — 2026-11-17
 
