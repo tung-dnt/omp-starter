@@ -115,8 +115,8 @@ describe("a subagent hitting a gate", () => {
 		const out = path.join(HOME, "n.txt");
 		process.env.OMP_STARTER_NOTIFY_CMD = `printf "%s" "$OMP_STARTER_NOTIFY_TEXT" > ${out}`;
 		await s.call("write", { path: MIGRATION, content: "SECRET" }, s.sub);
-		// The notification is a detached shell command with no handle to await; poll for its file for up to 2 s.
-		for (let i = 0; i < 40 && !(fs.existsSync(out) && fs.statSync(out).size); i++) await Bun.sleep(50);
+		// The notification is a detached shell command with no handle to await; poll for its file for up to 10 s (a loaded full-suite run needs more than 2 s).
+		for (let i = 0; i < 200 && !(fs.existsSync(out) && fs.statSync(out).size); i++) await Bun.sleep(50);
 		expect(fs.readFileSync(out, "utf8")).toBe("omp lead · session · gate migrations (schema) · shop/db/migrations/002.sql");
 	});
 
