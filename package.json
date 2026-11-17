@@ -22,7 +22,8 @@
       "./extensions/cross-repo-reads.ts",
       "./extensions/blast-radius.ts",
       "./extensions/lead-gates.ts",
-      "./extensions/lead.ts"
+      "./extensions/lead.ts",
+      "./extensions/lead-pr-check.ts"
     ]
   },
   "devDependencies": {

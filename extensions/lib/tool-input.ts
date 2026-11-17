@@ -84,6 +84,8 @@ export function bashDir(command: string, cwd: unknown, sessionCwd: string): stri
 // `git [global opts] commit`, not commit-tree or "commit" as an argument of another subcommand.
 export const GIT_COMMIT = /\bgit(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+commit(?=[\s;&|)]|$)/;
 const GIT_DASH_C = /\s-C\s+("[^"]*"|'[^']*'|\S+)/g;
+/** `gh pr create` or `gh pr edit`: the commands that set a pull request's body. */
+export const GH_PR = /\bgh\s+pr\s+(create|edit)\b/;
 
 /** Directory a matched `git …` command runs in: bash `cwd`, a leading `cd <p> &&`, then each `git -C <p>` of the match. */
 export function gitCommandDir(command: string, match: RegExpExecArray, cwd: unknown, sessionCwd: string): string {

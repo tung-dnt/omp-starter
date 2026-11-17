@@ -8,11 +8,10 @@ import { leadDirFor, protectedLeadPath, readHardGates } from "./lib/lead/artifac
 import { matchGates, matchRepoFiles, resolveGate } from "./lib/lead/gates";
 import { changedFiles, repoRoot, stagedFiles } from "./lib/repo";
 import { tildify } from "./lib/state";
-import { bashDir, GIT_COMMIT, gitCommandDir, resolveFrom, targetPaths } from "./lib/tool-input";
+import { bashDir, GH_PR, GIT_COMMIT, gitCommandDir, resolveFrom, targetPaths } from "./lib/tool-input";
 
 const WRITE_TOOLS: Record<string, true> = { write: true, edit: true };
 const GIT_PUSH = /\bgit(?:\s+-C\s+\S+)*\s+push\b/;
-const GH_PR = /\bgh\s+pr\s+(create|edit)\b/;
 /** `git commit -a`: tracked edits are committed without being staged first. */
 const COMMIT_ALL = /\s(?:-a|-am|--all)(?=\s|$)/;
 
