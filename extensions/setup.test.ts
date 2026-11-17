@@ -4,7 +4,7 @@ import * as path from "node:path";
 import ompStarter, { discoverVaults, renderContextFile, setupKnowledgeBase, startupSteps, type WizardUi } from "./setup";
 import { resolveKb } from "./lib/kb-sources";
 import { HOME, readState, STATE_FILE, type KbSource } from "./lib/state";
-import { fakeContext, fakePi, resetHome, scriptedUi, seedState, writeFiles, type FakeExec, type FakePi, type Prompt, type ScriptedUi, type UiScript } from "./test-harness";
+import { fakeContext, fakePi, resetHome, scriptedUi, seedKb, seedState, writeFiles, type FakeExec, type FakePi, type Prompt, type ScriptedUi, type UiScript } from "./test-harness";
 
 beforeEach(resetHome);
 
@@ -366,6 +366,30 @@ describe("/starter skills", () => {
 		seedState({ models: "done", kb: { status: "skipped" } });
 		await starterCommand(starter(), "skills", { confirm: [false] });
 		expect(readState()).toEqual({ models: "done", kb: { status: "skipped" }, agentSkills: "skipped" });
+	});
+});
+
+describe("/starter lead", () => {
+	test("creates the lead files once: the lead's edits survive a rerun, pr-format.md is regenerated", async () => {
+		const kb = seedKb({ name: "kb", folder: home("repo") });
+		seedState({ kb: { status: "done", sources: [kb.source] } });
+		const lead = (name: string) => path.join(kb.root, "lead", name);
+
+		const first = await starterCommand(starter(), "lead", {});
+		for (const name of ["hard-gates.md", "system-map.md", "brief-template.md", "pr-format.md"]) expect(fs.existsSync(lead(name))).toBe(true);
+		expect(first.notifications.at(-1)?.message).toContain("hard-gates.md");
+		const format = fs.readFileSync(lead("pr-format.md"), "utf8");
+
+		fs.writeFileSync(lead("hard-gates.md"), "edited by the lead\n");
+		fs.writeFileSync(lead("pr-format.md"), "edited\n");
+		await starterCommand(starter(), "lead", {});
+		expect(fs.readFileSync(lead("hard-gates.md"), "utf8")).toBe("edited by the lead\n");
+		expect(fs.readFileSync(lead("pr-format.md"), "utf8")).toBe(format);
+	});
+
+	test("refuses without a knowledge base for the folder", async () => {
+		const ui = await starterCommand(starter(), "lead", {});
+		expect(ui.notifications).toEqual([{ message: "lead: no knowledge base serves this folder; run /starter kb first", type: "error" }]);
 	});
 });
 
