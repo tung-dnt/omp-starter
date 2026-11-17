@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Exec, WizardUi } from "../setup";
-import { JEV_MODEL, setupJev } from "./jev";
+import { FIND_OFF, JEV_MODEL, setupJev } from "./jev";
 import { MODELS, setupModels } from "./routing";
 
 const homes: string[] = [];
@@ -80,6 +80,16 @@ test("a key already in the environment is verified but never written to disk", a
 	expect(existsSync(envFile)).toBe(false);
 	expect((await config("get", "modelRoles") as Record<string, string>).judge).toBe(JEV_MODEL);
 }, 60_000);
+
+test("the find question turns find off only when chosen", async () => {
+	const off = client({ select: FIND_OFF });
+	await setupJev(off.ui, off.exec, { verify: accept, envFile: off.envFile, env: { TYPESAFE_API_KEY: "ts-env" } });
+	expect(await off.config("get", "find.enabled")).toBe("off");
+
+	const kept = client({ select: "Keep find on its current setting" });
+	await setupJev(kept.ui, kept.exec, { verify: accept, envFile: kept.envFile, env: { TYPESAFE_API_KEY: "ts-env" } });
+	expect(await kept.config("get", "find.enabled")).toBe("auto");
+}, 90_000);
 
 test("turning Jev off restores the presets' judges and the regex LSP rule", async () => {
 	const { exec, config, ui, envFile } = client({ input: "ts-key", select: "Turn Jev off" });

@@ -2,59 +2,14 @@
 // Code drops what it can rule out exactly (piped greps, searches of /tmp, docs, SQL, logs, git history);
 // Jev judges the rest with the question of rules/lsp-symbol-judged.md, so the reminder and the block agree.
 
+import { searchPaths, simpleCommands } from "./tool-input";
+
 /** Agents with a language server tool: task-builder has `lsp`, the others the `xd://lsp` device. */
 export const LSP_AGENTS: Record<string, true> = { "task-builder": true, task: true, "code-reviewer": true, "test-engineer": true };
 /** Appended to a command, lets it run: the language has no server, or the search really is for text. */
 export const BYPASS = "# text-search";
-/** Block only when Jev is this sure; between 0.7 and this the judged rule only reminds. Measured on 94 labelled real greps: 27/36 symbol lookups, 3/58 others. */
+/** Block only when Jev is this sure. Measured on 94 labelled real greps: 27/36 symbol lookups, 3/58 others. */
 export const BLOCK_AT = 0.85;
-
-interface SimpleCommand {
-	words: string[];
-	piped: boolean;
-}
-
-/** Splits a shell command into simple commands on unquoted `;`, `&&`, `||`, `|`, `&` and newlines, honouring quotes. */
-export function simpleCommands(command: string): SimpleCommand[] {
-	const out: SimpleCommand[] = [];
-	let words: string[] = [];
-	let word = "";
-	let quote: string | null = null;
-	let piped = false;
-	const push = () => {
-		if (word !== "") words.push(word);
-		word = "";
-	};
-	const end = (nextPiped: boolean) => {
-		push();
-		if (words.length) out.push({ words, piped });
-		words = [];
-		piped = nextPiped;
-	};
-	for (let i = 0; i < command.length; i++) {
-		const c = command[i];
-		if (quote) {
-			if (c === quote) quote = null;
-			else if (c === "\\" && quote === '"' && i + 1 < command.length) word += command[++i];
-			else word += c;
-		} else if (c === '"' || c === "'") quote = c;
-		else if (c === "\\" && i + 1 < command.length) word += command[++i];
-		else if (c === " " || c === "\t") push();
-		else if (c === "\n" || c === ";") end(false);
-		else if ((c === "&" || c === "|") && command[i + 1] === c) {
-			i++;
-			end(false);
-		} else if (c === "|") end(true);
-		else if (c === "&") end(false);
-		else word += c;
-	}
-	end(false);
-	return out;
-}
-
-const VALUE_OPTIONS: Record<string, true> = Object.fromEntries(
-	["-g", "--glob", "-t", "--type", "-T", "--type-not", "-A", "-B", "-C", "-m", "--max-count", "--include", "--exclude", "--exclude-dir"].map(o => [o, true]),
-);
 
 /** Paths no language server covers: scratch files, artifacts, dependencies, docs, SQL, data and logs. */
 function offTree(p: string): boolean {
@@ -70,22 +25,8 @@ export function onTreeSearches(command: string): string[] {
 	const found: string[] = [];
 	for (const { words, piped } of simpleCommands(command)) {
 		if (piped) continue;
-		let k = 0;
-		while (k < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k])) k++;
-		if (words[k] !== "rg" && words[k] !== "grep") continue;
-		const positional: string[] = [];
-		let patternGiven = false;
-		const args = words.slice(k + 1);
-		for (let a = 0; a < args.length; a++) {
-			const arg = args[a];
-			if (arg === "-e" || arg === "--regexp") {
-				patternGiven = true;
-				a++;
-			} else if (VALUE_OPTIONS[arg]) a++;
-			else if (!arg.startsWith("-")) positional.push(arg);
-		}
-		const paths = patternGiven ? positional : positional.slice(1);
-		if (paths.length > 0 && paths.every(offTree)) continue;
+		const paths = searchPaths(words);
+		if (paths === undefined || (paths.length > 0 && paths.every(offTree))) continue;
 		found.push(words.join(" "));
 	}
 	return found;

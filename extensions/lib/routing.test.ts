@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Exec, WizardUi } from "../setup";
-import { CODEX_MODELS, GEMINI_MODELS, MODELS, setupModels } from "./routing";
+import { CODEX_MODELS, FABLE_PREVIOUS, GEMINI_MODELS, MODELS, setupModels } from "./routing";
 
 const homes: string[] = [];
 afterEach(() => {
@@ -60,7 +60,15 @@ test("an unauthenticated client saves presets and shared settings without changi
 	expect(presets.claude.modelRoles.default).toBe("anthropic/claude-opus-5-5:auto");
 	// Only exploration/mechanical work moves to Gemini; coding, review and judgments stay on Claude.
 	expect(presets["claude-gemini"].modelRoles).toEqual({ ...presets.claude.modelRoles, tiny: GEMINI_MODELS.flash });
-	expect(await config("get", "retry.fallbackChains")).toMatchObject({ "google-antigravity/*": [MODELS.haiku] });
+	expect(await config("get", "retry.fallbackChains")).toMatchObject({
+		"google-antigravity/*": [MODELS.haiku],
+		[MODELS.fable]: [FABLE_PREVIOUS, MODELS.opus],
+	});
+	// Fable leads only its own preset, at high effort, and plan mode doesn't switch it back to Opus.
+	expect(presets["claude-fable-lead"].modelRoles).toEqual({
+		...presets.claude.modelRoles, default: "anthropic/claude-fable-5-2:high", plan: "@default",
+	});
+	expect(await config("get", "cycleOrder")).not.toContain("deep");
 	expect(await config("get", "modelRoles")).toEqual(before);
 	expect(await config("get", "defaultThinkingLevel")).toBe("auto");
 	expect(await config("get", "lsp.diagnosticsOnEdit")).toBe(true);
@@ -100,10 +108,10 @@ test("available Claude models still activate Claude routing without deleting cus
 
 	expect(await setupModels(ui, exec)).toBe("done");
 	expect(await config("get", "modelRoles")).toMatchObject({
-		default: "anthropic/claude-opus-5-5:auto", custom: "@default", deep: "anthropic/claude-fable-5-1:high",
+		default: "anthropic/claude-opus-5-5:auto", custom: "@default", deep: "anthropic/claude-fable-5-2:high",
 	});
 	const presets = await config("get", "modelPresets") as Record<string, unknown>;
-	expect(Object.keys(presets).sort()).toEqual(["claude", "claude-gemini", "codex"]);
+	expect(Object.keys(presets).sort()).toEqual(["claude", "claude-fable-lead", "claude-gemini", "codex"]);
 }, 60_000);
 
 test("cancelling setup leaves saved presets and routing untouched", async () => {

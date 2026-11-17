@@ -371,7 +371,7 @@ describe("/starter skills", () => {
 
 describe("/starter models", () => {
 	test("saves the presets and records done, applying Claude routing when its models exist", async () => {
-		const models = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"].map(m => ({ selector: `anthropic/${m}` }));
+		const models = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"].map(m => ({ selector: `anthropic/${m}` }));
 		const fake = starter(omp(NO_PLUGINS, args => (args[0] === "models" && args[1] === "anthropic" ? { stdout: JSON.stringify({ models }), code: 0 } : undefined)));
 		const ui = await starterCommand(fake, "models", { confirm: [true] });
 		expect(readState().models).toBe("done");

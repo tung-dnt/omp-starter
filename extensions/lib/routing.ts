@@ -6,8 +6,11 @@ export const MODELS = {
 	opus: "anthropic/claude-opus-5-5",
 	sonnet: "anthropic/claude-sonnet-5-5",
 	haiku: "anthropic/claude-haiku-5-5",
-	fable: "anthropic/claude-fable-5-1",
+	fable: "anthropic/claude-fable-5-2",
 } as const;
+
+/** Previous Fable release, the first fallback when the current one is unavailable. Not required by setup. */
+export const FABLE_PREVIOUS = "anthropic/claude-fable-5-1";
 
 export const CODEX_MODELS = {
 	sol: "openai-codex/gpt-6.1-sol",
@@ -59,6 +62,13 @@ export const MODEL_PRESETS = {
 		modelRoles: { ...CLAUDE_ROLES, tiny: GEMINI_MODELS.flash },
 		defaultThinkingLevel: "auto",
 	},
+	// Fable leads a fresh session at `high` effort (large rewrites, the hardest problems): it plans
+	// and reviews, while Sonnet and Haiku subagents do the routine work. Plan mode stays on Fable so
+	// entering it doesn't switch models mid-context. The router's daily cap doesn't count this session.
+	"claude-fable-lead": {
+		modelRoles: { ...CLAUDE_ROLES, default: `${MODELS.fable}:high`, plan: "@default" },
+		defaultThinkingLevel: "high",
+	},
 } as const;
 
 interface Setting {
@@ -70,7 +80,8 @@ interface Setting {
 
 // Shared settings and subscription-local fallback chains are saved for both presets.
 // Planning gets the effort (one plan feeds every slice); coders keep a `high` floor and the
-// parent raises risky slices to `max`; Fable/Astra are reserved for `deep` and the router.
+// parent raises risky slices to `max`; Fable/Astra are reserved for `deep`, the router and the
+// opt-in `claude-fable-lead` preset.
 export const COMMON: Setting[] = [
 	{ key: "defaultThinkingLevel", value: "auto" },
 	{ key: "modelPresets", merge: true, value: MODEL_PRESETS },
@@ -78,13 +89,16 @@ export const COMMON: Setting[] = [
 		key: "retry.fallbackChains",
 		merge: true,
 		value: {
-			[MODELS.fable]: [MODELS.opus],
+			[MODELS.fable]: [FABLE_PREVIOUS, MODELS.opus],
+			[FABLE_PREVIOUS]: [MODELS.opus],
 			[MODELS.opus]: [MODELS.sonnet],
 			[CODEX_MODELS.astra]: [CODEX_MODELS.sol],
 			"google-antigravity/*": [MODELS.haiku],
 		},
 	},
-	{ key: "cycleOrder", value: ["smol", "default", "slow", "deep"] },
+	// No `deep` here: switching the main model to Fable mid-session drops the thinking state and the
+	// prompt cache. Reach Fable through the `deep` agent or a `claude-fable-lead` session instead.
+	{ key: "cycleOrder", value: ["smol", "default", "slow"] },
 	{ key: "task.enableEffort", value: true },
 	{ key: "task.maxEffort", value: "max" },
 	{
@@ -166,7 +180,7 @@ function withJudge(settings: readonly Setting[], judge: string | undefined): Set
 export async function setupModels(ui: WizardUi, exec: Exec, judge?: string): Promise<"done" | "skipped"> {
 	const ok = await ui.confirm(
 		"Subscription presets and model routing",
-		"Save `claude`, `claude-gemini` and `codex` presets for /modelpreset switch, plus effort, agent overrides, " +
+		"Save `claude`, `claude-gemini`, `claude-fable-lead` and `codex` presets for /modelpreset switch, plus effort, agent overrides, " +
 			"LSP diagnostics after every edit and repeating LSP/debugger reminders, on any subscription. " +
 			"Then apply routing for the subscription whose models are available: Claude first (Opus for the main session " +
 			"and planning, Sonnet for coding and review, Haiku 5.5 for exploration and mechanical work, Fable for deep consultation), " +
@@ -186,7 +200,7 @@ export async function setupModels(ui: WizardUi, exec: Exec, judge?: string): Pro
 	if (active) await applySettings(exec, withJudge(ROUTING[active].settings, judge));
 	ui.notify(
 		active
-			? `${active === "claude" ? "Claude" : "Codex"} routing applied; presets saved. Restart open sessions, then use /modelpreset switch claude, claude-gemini or codex.`
+			? `${active === "claude" ? "Claude" : "Codex"} routing applied; presets saved. Restart open sessions, then use /modelpreset switch claude, claude-gemini, claude-fable-lead or codex.`
 			: "Presets and shared settings saved; routing unchanged. Log in before using a preset's models.",
 		"info",
 	);

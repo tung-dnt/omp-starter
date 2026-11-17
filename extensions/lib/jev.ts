@@ -13,6 +13,9 @@ const KEY_VAR = "TYPESAFE_API_KEY";
 /** The regex rule `rules/lsp-symbol-judged.md` replaces while Jev judges; both at once would remind twice. */
 const REGEX_LSP_RULE = "lsp-symbol-search";
 const API = "https://api.typesafe.ai/v1/systemone";
+/** Choices of the `find` question: with a native judge, `find.enabled: auto` sends source windows to the judge. */
+export const FIND_OFF = "Turn find off";
+const FIND_KEEP = "Keep find on its current setting";
 
 /** Resolves to undefined when TypeSafe accepts `key`, otherwise to the reason it did not. */
 export type VerifyKey = (key: string) => Promise<string | undefined>;
@@ -94,7 +97,8 @@ export async function setupJev(ui: WizardUi, exec: Exec, options: JevOptions = {
 		"TypeSafe Jev judge (optional)",
 		"Route the `judge` role to TypeSafe Jev (jev-1.14.0): it answers `question` rules such as the LSP-over-grep reminder " +
 			"(24/24 symbol searches caught vs 7/24 by regex) and picks the thinking level for each prompt. " +
-			"Judged tool calls and your prompts are sent to TypeSafe (processed in the US); skip this if your data rules don't allow that. " +
+			"Judged tool calls and your prompts are sent to TypeSafe (processed in the US), and omp's `find` tool turns on with a Jev judge and sends source excerpts too; " +
+			"skip this if your data rules don't allow that. " +
 			`Needs an API key from typesafe.ai, stored in ${envFile} (mode 600).`,
 	);
 	if (!ok) return "skipped";
@@ -118,9 +122,13 @@ export async function setupJev(ui: WizardUi, exec: Exec, options: JevOptions = {
 		{ key: "retry.fallbackChains", merge: true, value: { judge: ["@tiny"] } },
 		{ key: "ttsr.judge", value: "auto" },
 	]);
+	const findOff =
+		(await ui.select("omp's `find` tool turns on with a Jev judge and sends source excerpts to TypeSafe. Turn it off?", [FIND_OFF, FIND_KEEP])) ===
+		FIND_OFF;
+	if (findOff) await applySettings(exec, [{ key: "find.enabled", value: "off" }]);
 	ui.notify(
 		`Jev is the judge (${JEV_MODEL}, falls back to @tiny). ${entered ? `Key saved to ${envFile}. ` : `Using ${KEY_VAR} from the environment. `}` +
-			"Restart open sessions to load it.",
+			`${findOff ? "find is off. " : "find stays on its current setting. "}Restart open sessions to load it.`,
 		"info",
 	);
 	return "done";

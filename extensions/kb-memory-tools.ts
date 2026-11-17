@@ -6,6 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { withFileLock } from "./lib/file-lock";
 import { doneSources, forms } from "./lib/kb-sources";
 import { memoryDir, recall, type RecallParams } from "./lib/kb-store";
 import { markKbWritten } from "./lib/kb-write-flag";
@@ -24,9 +25,6 @@ import {
 import { resolveRepoName } from "./lib/repo";
 import { readState, tildify, type KbSource } from "./lib/state";
 
-const LOCK_WAIT_MS = 5_000;
-const STALE_LOCK_MS = 30_000;
-
 /** Writes through a temp file in the same folder and renames it, so readers never see half a file. */
 function atomicWrite(file: string, content: string): void {
 	const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
@@ -39,34 +37,10 @@ function atomicWrite(file: string, content: string): void {
 	}
 }
 
-/**
- * Serializes index edits across sessions on this machine. The lock lives in the temp dir, not the
- * vault, so it never syncs; a lock older than STALE_LOCK_MS is from a crashed writer and is taken over.
- */
-async function withIndexLock<T>(indexPath: string, fn: () => T): Promise<T> {
+/** Serializes index edits across sessions. The lock lives in the temp dir, not the vault, so it never syncs. */
+function withIndexLock<T>(indexPath: string, fn: () => T): Promise<T> {
 	const key = crypto.createHash("sha1").update(forms(indexPath).at(-1)!).digest("hex").slice(0, 16);
-	const lock = path.join(os.tmpdir(), `omp-starter-kb-${key}.lock`);
-	const deadline = Date.now() + LOCK_WAIT_MS;
-	for (;;) {
-		try {
-			fs.writeFileSync(lock, String(process.pid), { flag: "wx" });
-			break;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			const mtime = fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs;
-			if (mtime === undefined || Date.now() - mtime > STALE_LOCK_MS) {
-				fs.rmSync(lock, { force: true });
-				continue;
-			}
-			if (Date.now() > deadline) throw new Error(`${tildify(indexPath)} is being edited by another session; retry shortly`);
-			await Bun.sleep(50);
-		}
-	}
-	try {
-		return fn();
-	} finally {
-		fs.rmSync(lock, { force: true });
-	}
+	return withFileLock(path.join(os.tmpdir(), `omp-starter-kb-${key}.lock`), `${tildify(indexPath)} is being edited by another session; retry shortly`, fn);
 }
 
 function oneLine(name: string, value: string | undefined): string | undefined {

@@ -24,7 +24,7 @@ Before the knowledge-base step, open Obsidian once so your vault is registered (
 
 ## Model routing
 
-Applied with `omp config set` after you confirm, on any subscription. Setup always saves the three model presets and the settings that name no concrete model: effort, cycle order, per-agent overrides (role aliases such as `@tiny`), LSP diagnostics after every edit (`lsp.diagnosticsOnEdit`), and repeating rule reminders (`ttsr.repeatMode: after-gap`, `ttsr.repeatGap: 10`). It then applies active routing for the first subscription whose models are all available: Claude (table below), otherwise Codex (the `codex` preset's roles). With neither, active routing stays unchanged. Role assignments, named presets and per-agent overrides are merged into your existing settings; same-named entries are replaced.
+Applied with `omp config set` after you confirm, on any subscription. Setup always saves the four model presets and the settings that name no concrete model: effort, cycle order, per-agent overrides (role aliases such as `@tiny`), LSP diagnostics after every edit (`lsp.diagnosticsOnEdit`), and repeating rule reminders (`ttsr.repeatMode: after-gap`, `ttsr.repeatGap: 10`). It then applies active routing for the first subscription whose models are all available: Claude (table below), otherwise Codex (the `codex` preset's roles). With neither, active routing stays unchanged. Role assignments, named presets and per-agent overrides are merged into your existing settings; same-named entries are replaced.
 
 | Work | Model | Effort |
 |---|---|---|
@@ -34,18 +34,21 @@ Applied with `omp config set` after you confirm, on any subscription. Setup alwa
 | Commits, `code-reviewer` | Sonnet 5.5 | default |
 | Exploration (`scout`), mechanical edits (`sonic`), titles, classifiers | Haiku 5.5 | default |
 | Security agents | Opus 5.5 | `high` (never Fable) |
-| `deep` agent, Ctrl+P `deep` role | Fable 5.1 | `high` |
+| `deep` agent | Opus 5.5 for a run's first consult, then Fable 5.2 | `high` |
 
-The idea: spend effort on the plan, since it runs once and feeds every coding slice. Keep coders at a `high` floor and use `max` only for concurrency, migrations and shared contracts. Fallbacks stay within the subscription: Fable → Opus → Sonnet on Claude, Astra → Sol on Codex. The one exception is Antigravity: a failed or exhausted Gemini request falls back to Haiku 5.5. A subscription limit stops the session instead of switching to paid API usage.
+The idea: spend effort on the plan, since it runs once and feeds every coding slice. Keep coders at a `high` floor and use `max` only for concurrency, migrations and shared contracts. Fallbacks stay within the subscription: Fable 5.2 → Fable 5.1 → Opus → Sonnet on Claude, Astra → Sol on Codex. The one exception is Antigravity: a failed or exhausted Gemini request falls back to Haiku 5.5. A subscription limit stops the session instead of switching to paid API usage.
+
+Ctrl+P cycles `smol` → `default` → `slow`. `deep` is left out on purpose: switching the main model mid-session drops the previous model's thinking state and the prompt cache, so a long session would pay for its whole context again. Reach Fable through the `deep` agent, or start a fresh `claude-fable-lead` session.
 
 ### Subscription presets
 
-The model step saves three complete role setups, even when no provider is logged in:
+The model step saves four complete role setups, even when no provider is logged in:
 
 | Preset | Main session | Planning / deep consultation | Helpers |
 |---|---|---|---|
-| `claude` | Opus 5.5 (`auto`) | Opus 5.5 / Fable 5.1 (`high`) | Sonnet 5.5; Haiku 5.5 for exploration, tiny work and judgments |
-| `claude-gemini` | Opus 5.5 (`auto`) | Opus 5.5 / Fable 5.1 (`high`) | Sonnet 5.5; Gemini 3.8 Flash (Antigravity) for exploration and tiny work; Haiku 5.5 judges |
+| `claude` | Opus 5.5 (`auto`) | Opus 5.5 / Fable 5.2 (`high`) | Sonnet 5.5; Haiku 5.5 for exploration, tiny work and judgments |
+| `claude-gemini` | Opus 5.5 (`auto`) | Opus 5.5 / Fable 5.2 (`high`) | Sonnet 5.5; Gemini 3.8 Flash (Antigravity) for exploration and tiny work; Haiku 5.5 judges |
+| `claude-fable-lead` | Fable 5.2 (`high`) | Fable 5.2 (`high`) | Same as `claude` |
 | `codex` | GPT-6.1 Sol (`auto`) | GPT-6.1 Sol / GPT-6 Astra (`high`) | GPT-6 Luna; `high` for tasks, `low` for tiny work and judgments |
 
 Existing installs: update the plugin and run `/starter models` to save the presets. Restart open sessions to load the routing changes, then switch inside omp:
@@ -54,11 +57,12 @@ Existing installs: update the plugin and run `/starter models` to save the prese
 /modelpreset switch codex
 /modelpreset switch claude
 /modelpreset switch claude-gemini
+/modelpreset switch claude-fable-lead
 ```
 
 `/modelpreset` opens the picker. Switching replaces the model-role setup, not just the main conversation model; the security agents follow `@slow` rather than staying pinned to Claude. Other agent overrides and explicitly requested models are not part of a preset.
 
-All presets save `defaultThinkingLevel: auto`; the advisor uses Luna or Sonnet at `medium`. Presets do not change authentication, enable the advisor, or bypass subscription quotas. Use `/login openai-codex` for the Codex subscription, `/login anthropic` for Claude and `/login google-antigravity` for Gemini. No API key is installed by this step. The escalation router selects Fable only in Anthropic sessions and Astra only in OpenAI Codex sessions; other providers are untouched. Setup saves every subscription's fallback chains, so switching presets does not require rerunning setup.
+`claude-fable-lead` saves `defaultThinkingLevel: high`; the other presets save `auto`. The advisor uses Luna or Sonnet at `medium`. Presets do not change authentication, enable the advisor, or bypass subscription quotas. Use `/login openai-codex` for the Codex subscription, `/login anthropic` for Claude and `/login google-antigravity` for Gemini. No API key is installed by this step. The escalation router selects Fable only in Anthropic sessions and Astra only in OpenAI Codex sessions; other providers are untouched. Setup saves every subscription's fallback chains, so switching presets does not require rerunning setup.
 
 `claude-gemini` moves only the `tiny` role (`scout`, `sonic`, `state-investigator`) onto the Antigravity quota. Coding, review, commits and judgments stay on Claude. On Terminal-Bench 4.0 (Vals, 2026-11-09), Gemini 3.8 Flash scores 19.7% against Haiku 5.5's 36.4% and Sonnet 5.5's 64.1%, and it is slower (about 81 vs 164 tok/s). The Antigravity subscription offers only Flash-tier Gemini models.
 
@@ -66,30 +70,37 @@ All presets save `defaultThinkingLevel: auto`; the advisor uses Luna or Sonnet a
 
 **Don't:** use it on repositories whose data rules forbid sending code to Google (for example NHS/patient-data code without IG approval). Scouts read whatever the parent points them at.
 
+`claude-fable-lead` puts Fable 5.2 at `high` effort in the main session for one large job: a big rewrite, a 3D or game build, or a problem Opus at `high` already failed. Fable plans and reviews; Sonnet and Haiku subagents still do the coding and exploration. Plan mode stays on Fable, so entering it doesn't switch models. The `fable-router` daily cap counts only `deep` and review spawns, not the main session, so the router warns once per session when Fable is leading.
+
+**Do:** start a new session, run `/modelpreset switch claude-fable-lead`, state what done looks like and how to check it, then switch back to `claude` when the job ends.
+
+**Don't:** switch to it in the middle of a long session (run `/compact` or start fresh first), or leave it active for routine work: every turn spends Fable quota.
 
 ### Fable / Astra escalation
 
-Neither escalation model is the default. The `fable-router` extension uses Fable for an active Anthropic model and Astra for an active OpenAI Codex model:
+Neither escalation model is the default outside the `claude-fable-lead` preset. The `fable-router` extension uses Fable for an active Anthropic model and Astra for an active OpenAI Codex model:
 
-- **Stuck:** the same command fails twice in one run (searches like `grep` that just find nothing don't count). The agent is told it may delegate to the read-only `deep` agent. The notice is advisory: expected failures, such as a red test, and "don't spawn agents" instructions take precedence.
-- **Risky review:** a `reviewer` or `code-reviewer` starts while the git diff touches migrations, `*.sql`, auth/RBAC, infra or CI workflows.
+- **Stuck:** the same command fails twice in one run (searches like `grep` that just find nothing don't count, also after a leading `cd <dir> &&`). The agent is told it may delegate to the read-only `deep` agent. The notice is advisory: expected failures, such as a red test, and "don't spawn agents" instructions take precedence.
+- **Risky review:** a `reviewer` or `code-reviewer` starts while the git diff touches migrations, `*.sql`, auth/RBAC, infra or CI workflows. The diff checked is that of the session folder's repo plus every repo the session or its subagents edited with `write`/`edit`, so a session started in a parent folder such as `~/projects` still escalates.
+- **Ladder:** a run's first `deep` consult goes to Opus (Sol on Codex) at `high` effort and does not count toward the cap; the next `deep` consult in the same run goes to Fable (Astra). A new user prompt starts a new run. A session already led by Fable skips the Opus step. The stuck notice still fires when the cap is used up, as long as the free Opus step is left.
 
-Every routed escalation spawn counts toward its subscription's daily cap. Claude uses `FABLE_ROUTER_DAILY_CAP` (default 5), tracked in `~/.omp/agent/fable-router.json`, then falls back to Opus. Codex uses `ASTRA_ROUTER_DAILY_CAP` (default 5), tracked separately in `~/.omp/agent/astra-router.json`, then falls back to Sol. The task panel shows the escalation reason or cap fallback. The `deep` agent stays read-only, and security agents stay on `@slow`.
+Every routed escalation spawn counts toward its subscription's daily cap. Claude uses `FABLE_ROUTER_DAILY_CAP` (default 5), tracked in `~/.omp/agent/fable-router.json`, then falls back to Opus. Codex uses `ASTRA_ROUTER_DAILY_CAP` (default 5), tracked separately in `~/.omp/agent/astra-router.json`, then falls back to Sol. A lock file beside each counter keeps concurrent sessions from passing the cap. The task panel shows the escalation reason or cap fallback. The `deep` agent stays read-only, and security agents stay on `@slow`.
 
 **Do:** delegate an unexpectedly stuck investigation to `deep`, with evidence and the commands already tried. Keep routine work on Sol/Luna or Opus/Sonnet.
 
 **Don't:** make Astra/Fable the default, repeatedly escalate expected red tests, or treat the local daily counter as the provider's subscription quota.
 
-**Verify:** run `bun test extensions/fable-router.test.ts extensions/lib/routing.test.ts`. After `/starter models`, the Codex preset's `deep` role is `openai-codex/gpt-6-astra:high`; the main role remains Sol. Restart open sessions after updating the plugin.
+**Verify:** run `bun test extensions/fable-router.test.ts extensions/lib/routing.test.ts`. After `/starter models`, the Claude `deep` role is `anthropic/claude-fable-5-2:high`, `cycleOrder` has no `deep`, and the Codex preset's `deep` role is `openai-codex/gpt-6-astra:high`. Restart open sessions after updating the plugin.
 
 ### TypeSafe Jev judge (`/starter jev`)
 
-Optional. It sends judged tool calls and your prompts to TypeSafe (processed in the US), so skip it if your data rules don't allow that.
+Optional. It sends judged tool calls and your prompts to TypeSafe (processed in the US), so skip it if your data rules don't allow that. With a Jev judge, omp's `find` tool (`find.enabled: auto`) also turns on and sends source excerpts to TypeSafe; the step asks whether to turn `find` off.
 
 1. If `TYPESAFE_API_KEY` is already in the environment it is used and never written to disk. Otherwise the step asks for the key (the input is not masked) and saves it to `~/.omp/agent/.env` with mode 600, replacing an earlier `TYPESAFE_API_KEY` line and keeping the rest. omp loads that file into its process, so bash and eval children (for example agent-skills' `jev.sh`) see the key too.
 2. The key is checked with one tiny Jev request. A rejected or unreachable key stops the step with nothing changed.
 3. `modelRoles.judge` and the `judge` of the saved `claude`/`codex` presets become `typesafe/jev-1.14.0`, with `@tiny` as fallback; `ttsr.judge` stays `auto`. `/starter models` keeps Jev as the judge while this step is on.
 4. `lsp-symbol-search` (regex) goes into `ttsr.disabledRules` and `rules/lsp-symbol-judged.md` takes over: Jev reads every non-piped `rg`/`grep` and decides whether it searches for a code symbol. Over 45 real commands it caught 24/24 symbol searches (the regex caught 7) with 2 of 21 other searches flagged, both containing an identifier.
+5. The step asks whether to set `find.enabled: off`. Choose it for repositories whose data rules don't cover sending source to TypeSafe; any other answer leaves `find` as it is.
 
 Rerunning `/starter jev` offers to turn Jev off: the presets' own judges and the regex rule come back, and the key stays in `~/.omp/agent/.env`. While Jev is on and unreachable, no LSP reminder fires.
 
@@ -180,9 +191,9 @@ Keep plans, acceptance criteria, designs and decisions as static artifacts, and 
 
 ## Asking questions
 
-The plugin ships an always-on rule (`rules/ask-user.md`): the agent puts every real decision to you (gates, grill rounds, design and approach choices, scope) instead of deciding itself, and every question goes through omp's `ask` dialog: one `ask` call per turn, where a grill, interview or approval round is one call holding all the round's independent questions, each with 2–5 multiple-choice answers and a recommended pick. Each dialog carries its own context: what is being decided, why it matters now, and what it hinges on, and every option lists how it works, pros, cons, effort, and reversibility (Proceed/Continue confirmations get one-line descriptions; interview-me rounds use your guess as the recommended pick), with a preview for anything longer. That includes approval gates and setup confirmations; the agent never asks in plain prose.
+The plugin ships an always-on rule (`rules/ask-user.md`): real choices go to you instead of being decided for you. That covers design and approach choices, scope changes, the approval gates of a written workflow, and interview or grill rounds. Facts that tools, code or docs can answer, and mechanical choices with one sensible answer, are settled by the agent, which says what it chose. Every question goes through omp's `ask` tool as one HTML form per turn, never only in prose; a round's independent questions share the form. Each question is a fieldset whose legend names the decision and the concrete thing it concerns, followed by context (what is decided, why now, what it hinges on). Each option gives its main pro and con and whether it is easy to reverse, and the recommended option is preselected. Paths you may want to open also go in chat, since many clients make nothing inside the form clickable.
 
-A second always-on rule (`rules/how-means-plan.md`): a request phrased as "how …" (or in Vietnamese "làm sao …", "như thế nào …", "cách nào …") is treated as planning and discussion. The agent investigates read-only, presents options, trade-offs and a recommendation, and asks before building anything.
+A second always-on rule (`rules/how-means-plan.md`): a request that is itself a how-question ("how do I …", or in Vietnamese "làm sao …", "như thế nào …", "cách nào …") is treated as planning and discussion. The agent investigates read-only, presents options, trade-offs and a recommendation, and asks before building anything. An instruction that merely mentions "how" ("fix X and show me how") is carried out.
 
 A third always-on rule (`rules/lld-before-build.md`): every task from a written plan gets a low-level design artifact and your explicit approval before implementation. The main session keeps mutable progress in native todo; workers receive the approved artifact path. Design changes require fresh approval. Native task completion is not verification.
 
@@ -192,13 +203,15 @@ A fifth always-on rule (`rules/say-it-in-chat.md`): chat views that collapse too
 
 A sixth always-on rule (`rules/agent-sessions.md`): when the agent coordinates other agent sessions (tmux or herdr panes, terminals running omp or Claude), it never answers their `ask` dialogs or sends keystrokes to them; only you answer dialogs. It doesn't wait on a session with no event that will end the wait: it stops and says in chat what is blocked. Progress is reported from verified output, never from a session showing `running`, and building goes to subagents rather than extra top-level sessions.
 
-A seventh always-on rule (`rules/cross-repo-investigation.md`): an investigation that spans two or more repositories follows the `end-to-end-technical-flow-report` skill with one `scout` per repo. Each scout writes `local://<repo>-trace.md` with `path:start-end`, the symbol, a short excerpt and an evidence label; the main session reads those reports and opens only the cited range of a claim it doubts. Its turns carry the whole conversation, so a file read there costs many times a scout's read.
+A seventh always-on rule (`rules/cross-repo-investigation.md`): an investigation that spans two or more repositories settles its scope, then fans out one `scout` per repo. Each scout writes `local://<repo>-trace.md` with `path:start-end`, the symbol, a short excerpt and an evidence label; the main session reads those reports and opens only the cited range of a claim it doubts. Its turns carry the whole conversation, so a file read there costs many times a scout's read.
 
 An eighth always-on rule (`rules/subagent-absolute-paths.md`) loads in every subagent and never in the main session: `read`, `edit`, `write`, `glob` and `lsp` resolve relative paths from the session's directory, not from where `bash` `cd`'ed, so subagents pass them absolute paths. Before it, subagents of a session started in a parent folder of the repo lost a turn on each relative `read`/`lsp` call that came back "not found".
 
-Three tool-use rules (`rules/lsp-symbol-search.md`, `rules/dap-over-print.md`, `rules/delegate-cross-repo-reads.md`) are omp TTSR rules: the harness checks each tool call as it streams and adds a reminder after the result, so they work however long the session gets and survive compaction. When the agent greps for a code symbol (camelCase/PascalCase anywhere; snake_case when the command targets Rust or C/C++), it is pointed to `xd://lsp` `definition`/`references`/`symbols`/`rename`. When it adds `console.log`, `fmt.Print*`, `println!`/`dbg!`, `printf` or `std::cerr` to TS/JS, Go, Rust or C/C++ code, it is pointed to `xd://debug`. When the main session reads a source file, or runs `rg`/`grep`, by absolute path, wherever your repositories live, it is pointed to the cross-repo scout fan-out. `/tmp`, hidden folders (`~/.omp`, a `.obsidian` vault), `node_modules` and system folders don't count, and `fd`/`find` only list files and don't trigger it. Relative paths don't trigger it either; if it fires while the session works in its one repo, the reminder itself says to carry on. All three only remind and never block or interrupt; string, SQL-column and config-key searches don't trigger the LSP rule. The LSP and debugger rules load in the main session and `task-builder`; the cross-repo rule loads in the main session only.
+Two tool-use rules (`rules/lsp-symbol-search.md`, `rules/dap-over-print.md`) are omp TTSR rules: the harness checks each tool call as it streams and adds a reminder after the result, so they work however long the session gets and survive compaction. When the agent greps for a code symbol (camelCase/PascalCase anywhere; snake_case when the command targets Rust or C/C++), it is pointed to `xd://lsp` `definition`/`references`/`symbols`/`rename`. When it adds `console.log`, `fmt.Print*`, `println!`/`dbg!`, `printf` or `std::cerr` to TS/JS, Go, Rust or C/C++ code, it is pointed to `xd://debug`. Both only remind and never block or interrupt; string, SQL-column and config-key searches don't trigger the LSP rule. They load in the main session and `task-builder`.
 
-With the Jev step on, `rules/lsp-symbol-judged.md` replaces the regex LSP rule (which goes into `ttsr.disabledRules`): it prefilters every non-piped `rg`/`grep` and asks Jev whether the command looks up a code symbol, so forms the regex misses (`export function X`, `^func Test`, `a|b|X`, `X(`) also get the reminder. It loads in the main session, `task-builder`, the default `task` agent (also vibe's `good` workers), `code-reviewer` and `test-engineer`; `task-builder` needs agent-skills 0.6.25 or later, the first version that gives it the `lsp` tool. Without a TypeSafe judge (`ttsr.judge: auto`) the judged rule never runs and costs nothing.
+`extensions/cross-repo-reads.ts` reminds the main session of the cross-repo scout fan-out once it has read source from a second repository: a `read` of a source file, `rg`/`grep` over a repo folder, or `cat`/`head`/`sed`… of a source file, with relative paths resolved from the session's folder or the command's `cd`. It reminds again only when a further repo appears. A session working in one repo never sees it. Docs, `node_modules`, hidden folders (`~/.omp`, a vault), `/tmp` and system folders don't count, nor do subagents' reads.
+
+With the Jev step on, `rules/lsp-symbol-judged.md` replaces the regex LSP rule (which goes into `ttsr.disabledRules`) in the main session: it prefilters every non-piped `rg`/`grep` and asks Jev whether the command looks up a code symbol, so forms the regex misses (`export function X`, `^func Test`, `a|b|X`, `X(`) also get the reminder. Coding subagents get `lsp-guard` (below) instead, so each grep is judged once. Without a TypeSafe judge (`ttsr.judge: auto`) the judged rule never runs and costs nothing.
 
 The same Jev step turns on `extensions/lsp-guard.ts`, which blocks instead of reminding, in coding subagents only (`task-builder`, `task`, `code-reviewer`, `test-engineer`). Before an `rg`/`grep` runs, code drops what is text by construction: a grep reading another command's output, and searches whose every path is `/tmp`, an artifact, `node_modules`, docs, SQL/migrations, data or logs. Jev then judges the rest with the judged rule's own question. At p ≥ 0.85 the call is blocked with the exact `lsp`/`xd://lsp` call to make instead. Appending `# text-search` to the command lets it run, for a language with no server or a real text search. No key, a timeout or a bad answer lets the command run. On 94 labelled greps from real subagent sessions it blocked 27 of 36 symbol lookups and 3 of 58 other searches (two of those three also grepped identifiers).
 
@@ -235,6 +248,23 @@ It prints one markdown table per metric, for main sessions and subagents separat
 Limits: M3 and M1's scope check use today's vault, so notes moved later are judged at their new place. A session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names, tool names and note slugs; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder or the vault; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.32.0 — 2026-11-17
+
+- **Changed:** `/starter jev` says that omp's `find` tool turns on with a Jev judge and sends source excerpts to TypeSafe, and asks whether to set `find.enabled: off`.
+- **Changed:** `rules/ask-user.md` matches omp 18.22's HTML-form `ask` tool and asks only on real choices; facts and one-answer mechanics are settled and reported. The rule no longer refers to a Jev delegation rule this plugin doesn't ship.
+- **Changed:** `rules/how-means-plan.md` applies to how-questions only, not to instructions that mention "how".
+- **Changed:** `rules/cross-repo-investigation.md` no longer points at a skill that isn't installed.
+- **Changed:** the cross-repo reminder is now `extensions/cross-repo-reads.ts`. It fires when the main session reads source from a second repository, rather than on any read by absolute path. `rules/delegate-cross-repo-reads.md` is removed.
+- **Changed:** with Jev on, `lsp-symbol-judged` loads in the main session only. Coding subagents keep `lsp-guard`, so each grep is judged once instead of twice.
+- **Fixed:** `fable-router` counts `cd <dir> && rg …` with no match as a probe, not a stuck command. Risky-review escalation also checks repos edited in the session, so it works from a parent folder that isn't a repo. The daily escalation counter is updated under a lock.
+- **Changed:** development pins `@oh-my-pi/pi-coding-agent` 18.22.0.
+- **Changed:** the `deep` role and escalations use Fable 5.2 (`anthropic/claude-fable-5-2`). Fallbacks: Fable 5.2 → Fable 5.1 → Opus.
+- **Added:** a `claude-fable-lead` preset: Fable 5.2 at `high` effort leads a fresh session for one large job, with plan mode on Fable and Sonnet/Haiku subagents unchanged. `fable-router` warns once per session when Fable leads, because the daily cap does not count main-session use.
+- **Changed:** escalation ladder. A run's first `deep` consult runs on Opus (Sol on Codex) at `high` effort and is not counted; later consults in the run go to Fable (Astra) under the daily cap. Stuck notices ask for what done looks like and how to verify it, and `agents/deep.md` restates that finish line first.
+- **Changed:** `cycleOrder` no longer includes `deep`: switching the main model mid-session drops thinking state and the prompt cache.
+- **Changed:** `rules/agent-sessions.md` and `rules/ticket-tracking.md` give the reason behind their remaining absolute instructions.
+- Existing installs: update, then rerun `/starter models`.
 
 ### 0.31.0 — 2026-11-11
 

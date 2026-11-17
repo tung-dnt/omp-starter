@@ -6,34 +6,16 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { doneSources, inside, resolveKb, sourceOwning } from "./lib/kb-sources";
 import { kbWritten, markKbWritten, resetKbWritten } from "./lib/kb-write-flag";
 import { expandHome, readState } from "./lib/state";
+import { bashDir, resolveFrom, targetPaths, unquote } from "./lib/tool-input";
 
 // `git [global opts] commit`, not commit-tree or "commit" as an argument of another subcommand.
 const GIT_COMMIT = /\bgit(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+commit(?=[\s;&|)]|$)/;
-const LEADING_CD = /^\s*cd\s+("[^"]*"|'[^']*'|\S+)\s*&&/;
 const GIT_DASH_C = /\s-C\s+("[^"]*"|'[^']*'|\S+)/g;
 const WRITE_TOOLS: Record<string, true> = { write: true, edit: true };
-// Target paths named inside an `edit` payload: hashline `[PATH#TAG]` / `MV DEST`, apply_patch and sloppy headers.
-const EDIT_TARGET =
-	/^\[([^\]\n]+?)#[0-9A-Fa-f]{4}\]|^MV\s+("[^"]*"|'[^']*'|\S+)|^\*\*\* (?:Add|Update|Edit) File:\s*(.+?)(?:\s+all)?\s*$|^\*\*\* Move to:\s*(.+?)\s*$/gm;
-
-const unquote = (s: string) => (/^(["']).*\1$/.test(s) ? s.slice(1, -1) : s);
-const resolveFrom = (base: string, p: string) => path.resolve(base, expandHome(unquote(p.trim())));
-
-/** Paths a write/edit tool call targets, as written (not yet resolved). */
-function targetPaths(toolName: string, input: Record<string, unknown>): string[] {
-	const out: string[] = [];
-	if (typeof input.path === "string") out.push(input.path);
-	if (toolName === "edit" && typeof input.input === "string") {
-		for (const m of input.input.matchAll(EDIT_TARGET)) out.push(m[1] ?? m[2] ?? m[3] ?? m[4]);
-	}
-	return out;
-}
 
 /** Directory a `git commit` command runs in: bash `cwd`, a leading `cd <p> &&`, then each `git -C <p>`. */
 function commitDir(command: string, match: RegExpExecArray, cwd: unknown, sessionCwd: string): string {
-	let dir = resolveFrom(sessionCwd, typeof cwd === "string" && cwd ? cwd : ".");
-	const cd = LEADING_CD.exec(command);
-	if (cd) dir = resolveFrom(dir, cd[1]);
+	let dir = bashDir(command, cwd, sessionCwd);
 	for (const c of match[0].matchAll(GIT_DASH_C)) dir = resolveFrom(dir, c[1]);
 	return dir;
 }

@@ -42,12 +42,12 @@ function jevJudge(key: string, question: string): Judge {
 }
 
 export default function lspGuard(pi: ExtensionAPI): void {
+	// The rule ships with the plugin and never changes in a session; the Jev state can, via /starter jev.
+	const question = ruleQuestion();
 	pi.on("tool_call", async (event, ctx) => {
-		if (event.toolName !== "bash" || ctx.agent?.kind !== "sub") return;
+		if (!question || event.toolName !== "bash" || ctx.agent?.kind !== "sub") return;
 		const key = process.env.TYPESAFE_API_KEY?.trim();
 		if (!key || readState().jev !== "done") return;
-		const question = ruleQuestion();
-		if (!question) return;
 		const agent = ctx.agent.name;
 		const verdict = await decide(String(event.input.command ?? ""), agent, jevJudge(key, question));
 		if (verdict.block && verdict.p !== undefined && agent) return { block: true, reason: blockReason(agent, verdict.p) };

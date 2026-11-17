@@ -1,5 +1,5 @@
 ---
-description: Keep mutable work progress in one native session checklist; issue trackers are never touched unless the user asks.
+description: Keep mutable work progress in one native session checklist; touch issue trackers only when the user asks.
 alwaysApply: true
 agents: [main, task-builder]
 ---
@@ -10,4 +10,4 @@ Use the active session's native todo as the single mutable progress checklist. U
 
 - Keep plans, acceptance criteria, designs and decisions in static artifacts, and pass workers the relevant paths.
 - Record durable decisions in the appropriate static design or decision artifact. Native task completion records execution outcome only; it is not test or review proof.
-- **Issue trackers (Jira etc.):** never comment on or edit a tracker issue unless the user asks, and ask before any status transition.
+- **Issue trackers (Jira etc.):** comment on or edit a tracker issue only when the user asks, and ask before any status transition. Tracker changes notify the team and are hard to take back.

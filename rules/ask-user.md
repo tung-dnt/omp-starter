@@ -1,28 +1,26 @@
 ---
-description: Every question to the user goes through the ask tool as a dialog that carries its own context and trade-offs.
+description: Real choices go to the user through one self-contained ask form; facts and one-answer mechanics are settled without asking.
 alwaysApply: true
 agents: main
 ---
 
 # Asking the user questions
 
-**Ask, don't decide for the user.** Put every real decision to the user, never pick silently and continue: workflow and approval gates, interview and grill rounds (interview-me, grill-me), design and approach choices, scope changes, setup confirmations, clarifications. Look up facts yourself and bring only the decision, with your recommendation. Decide alone only for trivial mechanics with one sensible answer (naming a temp file, ordering independent reads), and for the mechanical choices the Jev delegation rule lets Jev settle (scope, request type, target repo, delegation); say what you chose.
+**Ask for real choices; settle the rest yourself.** Put a decision to the user when the options carry materially different trade-offs the user owns: design and approach choices, scope changes, approval gates of a written workflow (plan, design, release), and interview or grill rounds. Look up every fact yourself first and bring only the decision, with your recommendation. Don't ask to confirm what tools, code or docs can answer, or a mechanical choice with one sensible answer (a temp file name, the order of independent reads); make it and say what you chose.
 
-Every question goes through the `ask` tool:
+Every question goes through the `ask` tool, never only in prose:
 
-- One `ask` call per turn. A grill, interview or approval round is one call whose `questions[]` holds the round's independent questions; a single decision stays one question. Never a question asked only in prose.
-- **Keep the user's waits short.** Before a phase's first question, look up every fact it needs in one parallel pass. Then ask every question that doesn't depend on an unanswered one in the same dialog: never one question per dialog while others are already askable. Between rounds, only record the answers and do the lookups they made necessary, then ask the next round at once.
-- 2–5 multiple-choice options. Never add "Other": the UI adds one. `multi: true` only when the choices really aren't mutually exclusive.
+- **One `ask` per turn**, one `<form>`. A grill, interview or approval round is one form holding all the round's independent questions; ask a question that depends on an unanswered one in the next round.
+- **Keep the user's waits short.** Before a phase's first question, look up everything it needs in one parallel pass. Between rounds, record the answers, do only the lookups they made necessary, then ask the next round at once.
+- **Shape:** one `<fieldset>` with a `<legend>` per question; radio buttons for one-of, checkboxes for many-of. Two to five options. Never add an "Other" option: the form adds one.
+- **Preselect your recommendation** with `checked`. An unanswered form submits it.
 
-## The dialog must stand on its own
+## The form must stand on its own
 
-The user may see only the dialog, so it carries the whole decision brief. "Which approach?" or "Proceed?" with one-word options is never enough.
+The user may see only the form, so it carries the whole decision brief. "Which approach?" with one-word options is never enough.
 
-- `header`: a short chip naming the decision, e.g. `Q2 · Cache scope`.
-- `question`: 2–4 sentences: what is being decided, why it matters now, and what it hinges on (the fact, requirement, or priority that settles it). Name the concrete thing (file, API, table, ticket), not "this" or "the approach".
-- Each option: a short `label`, and a `description` always shaped `How: <what this option does>. Pros: <…>. Cons: <risks, cost>. Effort: S/M/L. Reversible: easy/hard.` Back each pro and con with evidence; mark guesses "(est.)". Two exceptions: Proceed/Continue confirmations get one-line descriptions, and interview-me rounds ask the question with your guess as the recommended option and need no trade-off description.
-- `preview`: detail an option needs beyond one line (code shape, schema, file list, a before/after).
-- `recommended`: your pick. Its description starts `Recommended: <why it wins on what it hinges on>; choose <other> instead if <condition that would flip it>.`
-- Approval gates name what is being approved and what proceeding does next, with options like "Proceed" / "Revise <what>".
-
-Anything longer than the dialog can hold (the step's output, the decision-brief table a workflow such as grill-me requires, file paths) goes in the message just before the call, in the same turn. That prose supplements the dialog; it never replaces the dialog's own context. Many clients (herdr web, for one) make nothing inside the dialog clickable.
+- **Legend:** names the decision and the concrete thing it is about (file, API, table, ticket), e.g. `Q2 · Cache scope for /api/orders`.
+- **Context `<p>`** before the options: what is being decided, why it matters now, and the fact or priority it hinges on, in two to four sentences.
+- **Each option's label:** what it does, its main pro and con with evidence (mark guesses "(est.)"), and whether it is easy or hard to reverse. Approval gates name what is approved and what proceeding does next ("Proceed: build T03 as designed" / "Revise the error handling").
+- **Recommended option:** says why it wins and what would flip the choice.
+- **Longer detail** (diffs, file lists, a decision table) goes inside the form as `<pre>` or `<table>`. Paths the user may want to open also go in chat prose in the same turn: many clients (herdr web, for one) make nothing inside the form clickable.
