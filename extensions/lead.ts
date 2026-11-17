@@ -9,13 +9,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { atomicWrite } from "./lib/file-lock";
+import { atomicWrite, withFileLock } from "./lib/file-lock";
 import { inside } from "./lib/kb-sources";
-import { leadDirFor, leadReady, readBrief, readHardGates, readPlan, readSystemMap, type StoryState, updateStoryState } from "./lib/lead/artifacts";
+import { leadDirFor, leadLock, leadReady, readBrief, readHardGates, readPlan, readSystemMap, type StoryState, updateStoryState } from "./lib/lead/artifacts";
 import { gateTitle, recordGate } from "./lib/lead/gates";
 import { leadNotify } from "./lib/lead/notify";
 import { type ActiveStory, lead, resetLead } from "./lib/lead/registry";
 import { planApproved, STORY_BLOCK_HEADER, storyBlock } from "./lib/lead/story";
+import { RETRO_HEADER } from "./lib/lead/templates";
 import { repoRoot } from "./lib/repo";
 import { tildify } from "./lib/state";
 import { touchedPaths } from "./lib/tool-input";
@@ -152,6 +153,24 @@ async function recordStatus(pi: ExtensionAPI): Promise<string> {
 	return [`status: ${value}`, ...urls].join("\n");
 }
 
+const RETRO_CAUSES = ["spec gap", "missing invariant", "missing context (system map)", "missing test", "rule/skill gap", "model error"];
+
+/** Appends an escaped bug to retro-log.md with the cause the lead picks. */
+async function recordRetro(p: LeadParams, leadDir: string, ctx: ExtensionContext): Promise<string> {
+	const [story, summary, artifact] = [p.story, p.summary, p.artifact].map(value => value?.replace(/\s+/g, " ").trim());
+	if (!story || !summary || !artifact) throw new Error("lead: retro needs story, summary and artifact");
+	if (!ctx.hasUI) throw new Error("lead: retro needs an interactive session");
+	const cause = await ctx.ui.select(`Escaped bug in ${story}: ${summary}. Cause?`, RETRO_CAUSES);
+	if (cause === undefined) return "retro not recorded";
+	const file = path.join(leadDir, "retro-log.md");
+	const line = `- ${new Date().toLocaleDateString("en-CA")} · ${cause} · ${story} · ${summary} · fixed: ${artifact}\n`;
+	await withFileLock(leadLock(file), `${tildify(file)} is being updated by another session; retry`, () => {
+		fs.mkdirSync(leadDir, { recursive: true });
+		atomicWrite(file, (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : RETRO_HEADER) + line);
+	});
+	return line.trimEnd();
+}
+
 export default function leadExtension(pi: ExtensionAPI): void {
 	if (process.env.OMP_STARTER_LEAD === "off") return;
 	const z = pi.zod;
@@ -248,13 +267,14 @@ export default function leadExtension(pi: ExtensionAPI): void {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (ctx.agent?.kind === "sub") throw new Error("lead: only the main session can call this tool");
-			if (!leadDirFor(ctx.cwd)) throw new Error("lead: no knowledge base serves this folder; run /starter kb, then /starter lead");
+			const leadDir = leadDirFor(ctx.cwd);
+			if (!leadDir) throw new Error("lead: no knowledge base serves this folder; run /starter kb, then /starter lead");
 			const p = params as LeadParams;
 			let text: string;
 			if (p.op === "approve") text = await approvePlan(ctx);
 			else if (p.op === "gate") text = await decideGates(ctx);
 			else if (p.op === "status") text = await recordStatus(pi);
-			else throw new Error(`lead: op ${p.op} is not available`);
+			else text = await recordRetro(p, leadDir, ctx);
 			return { content: [{ type: "text", text }] };
 		},
 	});

@@ -121,7 +121,7 @@ describe("a subagent hitting a gate", () => {
 
 	test("the lead tool refuses subagents, and has nothing to ask when no gate is pending", async () => {
 		const s = setup();
-		expect(s.tool.callTool("lead", { op: "gate" }, s.sub)).rejects.toThrow("only the main session");
+		await expect(s.tool.callTool("lead", { op: "gate" }, s.sub)).rejects.toThrow("only the main session");
 		expect((await s.tool.callTool("lead", { op: "gate" }, s.main().ctx)).text).toBe("no pending gates");
 	});
 });

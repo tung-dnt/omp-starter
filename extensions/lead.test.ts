@@ -182,11 +182,11 @@ describe("the single plan approval", () => {
 	test("is refused for a plan that drops an invariant, for a subagent, and without an active story", async () => {
 		const s = setup();
 		const { ctx } = s.main();
-		expect(s.fake.callTool("lead", { op: "approve" }, ctx)).rejects.toThrow("lead: no active story; the lead starts one with /story <id>");
+		await expect(s.fake.callTool("lead", { op: "approve" }, ctx)).rejects.toThrow("lead: no active story; the lead starts one with /story <id>");
 		s.input("/story S1", ctx);
 		s.writePlan("Goal: add orders");
-		expect(s.fake.callTool("lead", { op: "approve" }, ctx)).rejects.toThrow("lead: plan does not mention invariant(s) I1");
-		expect(s.fake.callTool("lead", { op: "approve" }, s.sub("task-builder"))).rejects.toThrow("only the main session");
+		await expect(s.fake.callTool("lead", { op: "approve" }, ctx)).rejects.toThrow("lead: plan does not mention invariant(s) I1");
+		await expect(s.fake.callTool("lead", { op: "approve" }, s.sub("task-builder"))).rejects.toThrow("only the main session");
 	});
 });
 
@@ -236,7 +236,7 @@ describe("status", () => {
 
 	test("a failing gh reports its first error line and writes nothing", async () => {
 		const s = await approvedStory(github("", 1, "gh: not logged in\nrun gh auth login"));
-		expect(s.fake.callTool("lead", { op: "status" }, s.main().ctx)).rejects.toThrow("lead: gh failed: gh: not logged in");
+		await expect(s.fake.callTool("lead", { op: "status" }, s.main().ctx)).rejects.toThrow("lead: gh failed: gh: not logged in");
 		expect(fs.existsSync(path.join(s.storyDir, "status.md"))).toBe(false);
 		expect(readStoryState(s.storyDir).status).toBeNull();
 	});
@@ -272,5 +272,32 @@ describe("async mode", () => {
 		expect(ui.notifications).toEqual([]);
 		s.fake.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
 		expect(ui.notifications).toEqual([{ type: "warning", message: "omp lead · S1 · agent stopped: review or approve" }]);
+	});
+});
+
+describe("retro", () => {
+	const RETRO = { op: "retro", story: "S1", summary: "duplicate orders on retry", artifact: "lead/stories/S1/brief.md" };
+
+	test("appends one line with the cause the lead picked, creating the log on first use", async () => {
+		const s = setup();
+		const log = path.join(s.leadDir, "retro-log.md");
+		const today = new Date().toLocaleDateString("en-CA");
+		const { ui, ctx } = s.main({ select: ["missing invariant", "missing test"] });
+		const line = `- ${today} · missing invariant · S1 · duplicate orders on retry · fixed: lead/stories/S1/brief.md`;
+		expect((await s.fake.callTool("lead", RETRO, ctx)).text).toBe(line);
+		expect(ui.prompts[0].title).toBe("Escaped bug in S1: duplicate orders on retry. Cause?");
+		expect(fs.readFileSync(log, "utf8")).toBe(`# Retro log\n\n${line}\n`);
+
+		await s.fake.callTool("lead", { ...RETRO, story: "PR 12" }, ctx);
+		expect(fs.readFileSync(log, "utf8")).toBe(`# Retro log\n\n${line}\n- ${today} · missing test · PR 12 · duplicate orders on retry · fixed: lead/stories/S1/brief.md\n`);
+	});
+
+	test("a dismissed dialog records nothing; a blank field is refused before asking", async () => {
+		const s = setup();
+		const { ui, ctx } = s.main({ select: [undefined] });
+		expect((await s.fake.callTool("lead", RETRO, ctx)).text).toBe("retro not recorded");
+		expect(fs.existsSync(path.join(s.leadDir, "retro-log.md"))).toBe(false);
+		await expect(s.fake.callTool("lead", { ...RETRO, summary: "  " }, ctx)).rejects.toThrow("lead: retro needs story, summary and artifact");
+		expect(ui.prompts).toHaveLength(1);
 	});
 });
