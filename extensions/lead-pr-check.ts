@@ -7,7 +7,8 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { leadDirFor, readBrief, readHardGates } from "./lib/lead/artifacts";
 import { checkPrBody } from "./lib/lead/pr-body";
 import { lead } from "./lib/lead/registry";
-import { addedLines, changedFiles, repoRoot } from "./lib/repo";
+import { diffEdges } from "../scripts/arch-graph";
+import { addedLines, changedFiles, mergeBase, repoRoot } from "./lib/repo";
 import { bashDir, GH_PR, resolveFrom, simpleCommands } from "./lib/tool-input";
 
 interface PrCall {
@@ -65,7 +66,7 @@ export default function leadPrCheck(pi: ExtensionAPI): void {
 		if (!repo) return;
 		const active = lead().story;
 		const story = active && { ...active, invariants: readBrief(active.dir).brief?.invariants ?? active.invariants };
-		const problems = checkPrBody({ body: call.body, repo, story, gates, changed: changedFiles(repo), added: addedLines(repo) });
+		const problems = checkPrBody({ body: call.body, repo, story, gates, changed: changedFiles(repo), added: addedLines(repo), edgesDiff: diffEdges(repo, mergeBase(repo)) });
 		if (problems.length) return { block: true, reason: `lead PR check failed (format: ${format}):\n- ${problems.join("\n- ")}` };
 	});
 }

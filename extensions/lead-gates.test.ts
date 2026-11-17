@@ -6,6 +6,7 @@ import leadExtension from "./lead";
 import leadGates from "./lead-gates";
 import { lead } from "./lib/lead/registry";
 import { HARD_GATES_TEMPLATE } from "./lib/lead/templates";
+import { collectEdges, renderFiles } from "../scripts/arch-graph";
 import { HOME } from "./lib/state";
 import { fakeContext, fakePi, initGitRepo, resetHome, runExtensionChild, scriptedUi, seedKb, seedState, type UiScript, writeFiles } from "./test-harness";
 
@@ -198,4 +199,40 @@ describe("OMP_STARTER_LEAD=off", () => {
 			expect(registered).toEqual({ handlers: 0, tools: 0 });
 		}
 	});
+});
+
+describe("docs/arch at commit time", () => {
+	// Real dependency-cruiser run (installed on first use, needs the network once).
+	const OWNER = { name: "api", path: "", calls: [], ownsTables: ["orders"] };
+
+	async function archRepo(source: string, fresh: boolean) {
+		const s = setup();
+		writeFiles(s.leadDir, { "system-map.md": "```yaml\nservices:\n  - { name: api, repo: shop, path: \"\", owns_tables: [orders] }\n```\n" });
+		writeFiles(s.repo, { "src/a.ts": source, "docs/arch/services.json": `${JSON.stringify([OWNER])}\n` });
+		if (fresh) {
+			const edges = await collectEdges(s.repo, [OWNER]);
+			for (const [name, content] of Object.entries(renderFiles(edges, [OWNER]))) writeFiles(path.join(s.repo, "docs/arch"), { [name]: content });
+		}
+		execFileSync("git", ["add", "src/a.ts"], { cwd: s.repo });
+		return s;
+	}
+
+	test("a stale docs/arch blocks the commit with the command that regenerates it", async () => {
+		const s = await archRepo("export const a = 1;\ndb.insertInto('orders');\n", false);
+		const verdict = await s.call("bash", { command: "git commit -m x" }, s.main().ctx);
+		expect(verdict?.reason).toStartWith("lead: docs/arch is stale; run bun ");
+		expect(verdict?.reason).toContain("arch-graph.ts generate");
+	}, 120_000);
+
+	test("a fresh docs/arch passes; a write to a table the service does not own goes to the lead as gate `structure`", async () => {
+		const ok = await archRepo("export const a = 1;\ndb.insertInto('orders');\n", true);
+		expect(await ok.call("bash", { command: "git commit -m x" }, ok.main().ctx)).toBeUndefined();
+
+		resetHome();
+		const bad = await archRepo("export const a = 1;\ndb.insertInto('payments');\n", true);
+		const { ui, ctx } = bad.main({ select: ["Reject"] });
+		const verdict = await bad.call("bash", { command: "git commit -m x" }, ctx);
+		expect(verdict?.reason).toContain("HARD GATE structure (structure): shop/api writes table payments it does not own was rejected by the lead.");
+		expect(ui.prompts[0].title).toBe("HARD GATE · structure · shop/api writes table payments it does not own (gate structure)");
+	}, 120_000);
 });
