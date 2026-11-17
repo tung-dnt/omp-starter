@@ -83,6 +83,14 @@ export function bashDir(command: string, cwd: unknown, sessionCwd: string): stri
 
 // `git [global opts] commit`, not commit-tree or "commit" as an argument of another subcommand.
 export const GIT_COMMIT = /\bgit(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+commit(?=[\s;&|)]|$)/;
+const GIT_DASH_C = /\s-C\s+("[^"]*"|'[^']*'|\S+)/g;
+
+/** Directory a matched `git …` command runs in: bash `cwd`, a leading `cd <p> &&`, then each `git -C <p>` of the match. */
+export function gitCommandDir(command: string, match: RegExpExecArray, cwd: unknown, sessionCwd: string): string {
+	let dir = bashDir(command, cwd, sessionCwd);
+	for (const c of match[0].matchAll(GIT_DASH_C)) dir = resolveFrom(dir, c[1]);
+	return dir;
+}
 
 // Target paths named inside an `edit` payload: hashline `[PATH#TAG]` / `MV DEST`, apply_patch and sloppy headers.
 const EDIT_TARGET =

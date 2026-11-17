@@ -17,6 +17,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { EVERY_SESSION_DIR } from "./lib/kb-sources";
 import { resetKbWritten } from "./lib/kb-write-flag";
 import { memorySnapshots } from "./lib/kb-store";
+import { resetLead } from "./lib/lead/registry";
 import { HOME, tildify, writeState, type KbSource, type SetupState } from "./lib/state";
 
 // ── Private HOME ─────────────────────────────────────────────────────────────
@@ -42,6 +43,7 @@ export function resetHome(): void {
 	for (const entry of fs.readdirSync(home)) fs.rmSync(path.join(home, entry), { recursive: true, force: true });
 	resetKbWritten();
 	memorySnapshots.clear();
+	resetLead("session-1");
 }
 
 /** Writes `files` (paths relative to `root`, parents created). */

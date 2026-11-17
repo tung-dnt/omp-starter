@@ -6,17 +6,9 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { doneSources, inside, resolveKb, sourceOwning } from "./lib/kb-sources";
 import { kbWritten, markKbWritten, resetKbWritten } from "./lib/kb-write-flag";
 import { expandHome, readState } from "./lib/state";
-import { bashDir, GIT_COMMIT, resolveFrom, targetPaths, unquote } from "./lib/tool-input";
+import { GIT_COMMIT, gitCommandDir, resolveFrom, targetPaths, unquote } from "./lib/tool-input";
 
-const GIT_DASH_C = /\s-C\s+("[^"]*"|'[^']*'|\S+)/g;
 const WRITE_TOOLS: Record<string, true> = { write: true, edit: true };
-
-/** Directory a `git commit` command runs in: bash `cwd`, a leading `cd <p> &&`, then each `git -C <p>`. */
-function commitDir(command: string, match: RegExpExecArray, cwd: unknown, sessionCwd: string): string {
-	let dir = bashDir(command, cwd, sessionCwd);
-	for (const c of match[0].matchAll(GIT_DASH_C)) dir = resolveFrom(dir, c[1]);
-	return dir;
-}
 
 export default function kbCommitGate(pi: ExtensionAPI): void {
 	const reset = (ctx: { agent?: { kind: string } }) => {
@@ -41,7 +33,7 @@ export default function kbCommitGate(pi: ExtensionAPI): void {
 		const command = String(event.input.command ?? "");
 		const match = GIT_COMMIT.exec(command);
 		if (!match || command.includes("[skip-mem]")) return;
-		const dir = commitDir(command, match, event.input.cwd, ctx.cwd);
+		const dir = gitCommandDir(command, match, event.input.cwd, ctx.cwd);
 		// The deepest gate folder holding the commit decides which KB must have been written.
 		const source = doneSources(readState().kb)
 			.filter(s => s.gateDir && inside(dir, path.resolve(expandHome(s.gateDir))))

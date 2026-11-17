@@ -37,6 +37,8 @@ process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
 process.env.XDG_CACHE_HOME = path.join(home, ".cache");
 process.env.XDG_STATE_HOME = path.join(home, ".local", "state");
 process.env.OMP_STARTER_TEST_HOME = home;
+// Lead notifications (lib/lead/notify.ts) run this no-op instead of posting to the desktop of whoever runs the tests.
+process.env.OMP_STARTER_NOTIFY_CMD = ":";
 
 // lib/state.ts reads the home through the module namespace; if that still answers with the real
 // home the override did not take, and tests must stop instead of running against it.

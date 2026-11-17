@@ -20,7 +20,9 @@
       "./extensions/fable-router.ts",
       "./extensions/lsp-guard.ts",
       "./extensions/cross-repo-reads.ts",
-      "./extensions/blast-radius.ts"
+      "./extensions/blast-radius.ts",
+      "./extensions/lead-gates.ts",
+      "./extensions/lead.ts"
     ]
   },
   "devDependencies": {

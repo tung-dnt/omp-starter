@@ -50,6 +50,13 @@ export function changedFiles(cwd: string): string[] {
 	return [...files];
 }
 
+/** Paths a `git commit` run at `cwd` would record, repo-root relative: the index, plus tracked edits for `commit -a`. */
+export function stagedFiles(cwd: string, withUnstaged: boolean): string[] {
+	const staged = git(cwd, ["diff", "--cached", "--name-only"])?.split("\n") ?? [];
+	const unstaged = withUnstaged ? (git(cwd, ["diff", "--name-only"])?.split("\n") ?? []) : [];
+	return [...new Set([...staged, ...unstaged])];
+}
+
 /** Lines the branch and the working tree add over the merge base, without the leading `+`; empty without a base. */
 export function addedLines(cwd: string): string[] {
 	const base = mergeBase(cwd);

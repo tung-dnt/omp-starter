@@ -1,0 +1,115 @@
+// Hard gates: which gate a path hits, what the lead decided for it, and how an undecided hit is put to the lead.
+// A decision lasts per gated path for the active story (stored in its state.json), or for the session outside a story.
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { repoRoot, resolveRepoName } from "../repo";
+import { type Gate, readStoryState, updateStoryState } from "./artifacts";
+import { leadNotify, type NotifyContext } from "./notify";
+import { lead, type PendingGate } from "./registry";
+
+export interface GateHit {
+	gate: { id: string; category: string };
+	/** Repository root. */
+	repo: string;
+	repoName: string;
+	/** What was hit, as shown to the lead: a repository-relative path. */
+	rel: string;
+	/** What a decision is stored under. */
+	key: string;
+}
+
+export const gateKey = (repo: string, rel: string): string => `${repo}::${rel}`;
+
+/** Gate hits for repository-relative paths (`/` separators) of the repository at `repo`. */
+export function matchRepoFiles(repo: string, rels: string[], gates: Gate[]): GateHit[] {
+	const repoName = resolveRepoName(repo) ?? path.basename(repo);
+	const applicable = gates
+		.filter(gate => gate.repos.includes("*") || gate.repos.includes(repoName))
+		.map(gate => ({ gate, globs: gate.paths.map(p => new Bun.Glob(p)) }));
+	return rels.flatMap(rel =>
+		applicable.filter(({ globs }) => globs.some(glob => glob.match(rel))).map(({ gate }) => ({ gate, repo, repoName, rel, key: gateKey(repo, rel) })),
+	);
+}
+
+/** Gate hits for one absolute path; none outside a repository. */
+export function matchGates(absPath: string, gates: Gate[]): GateHit[] {
+	const repo = repoRoot(absPath);
+	return repo ? matchRepoFiles(repo, [path.relative(repo, absPath).split(path.sep).join("/")], gates) : [];
+}
+
+export function gateDecision(key: string): "approved" | "rejected" | undefined {
+	const story = lead().story;
+	return story ? readStoryState(story.dir).gates[key]?.decision : lead().sessionApprovals.get(key);
+}
+
+export async function recordGate(key: string, decision: "approved" | "rejected", gateId: string, category: string): Promise<void> {
+	const story = lead().story;
+	if (!story) {
+		lead().sessionApprovals.set(key, decision);
+		return;
+	}
+	await updateStoryState(story.dir, state => {
+		state.gates[key] = { decision, gateId, category, at: new Date().toISOString() };
+	});
+}
+
+export interface GateContext extends NotifyContext {
+	agent?: { kind: string; name: string };
+	ui: NotifyContext["ui"] & { select(title: string, options: string[]): Promise<string | undefined> };
+}
+
+/** Title shared by the gate dialogs. */
+export const gateTitle = (hit: { gateId: string; category: string; repoName: string; rel: string }, suffix = ""): string =>
+	`HARD GATE · ${hit.category} · ${hit.repoName}/${hit.rel} (gate ${hit.gateId}${suffix})`;
+
+/**
+ * Settles each hit with the lead's decision. An undecided hit opens a dialog in an interactive main session; anywhere
+ * else it is queued for the `lead` tool (op "gate") and blocks. Undefined means every hit is approved.
+ */
+export async function resolveGate(ctx: GateContext, hits: GateHit[]): Promise<{ block: true; reason: string } | undefined> {
+	for (const hit of hits) {
+		const { id, category } = hit.gate;
+		const where = `${hit.repoName}/${hit.rel}`;
+		const rejected = { block: true as const, reason: `HARD GATE ${id} (${category}): ${where} was rejected by the lead.` };
+		const decided = gateDecision(hit.key);
+		if (decided === "approved") continue;
+		if (decided === "rejected") return rejected;
+
+		const story = lead().story;
+		const notice = `omp lead · ${story?.id ?? "session"} · gate ${id} (${category}) · ${where}`;
+		if (ctx.agent?.kind !== "sub" && ctx.hasUI) {
+			leadNotify(ctx, notice);
+			const scope = story ? `for story ${story.id}` : "for this session";
+			const approve = category === "lead-owned" ? `Approve implementing lead-owned code ${scope}` : `Approve ${scope}`;
+			const answer = await ctx.ui.select(gateTitle({ gateId: id, category, repoName: hit.repoName, rel: hit.rel }), [approve, "Reject"]);
+			if (answer === approve) {
+				await recordGate(hit.key, "approved", id, category);
+				continue;
+			}
+			if (answer === "Reject") {
+				await recordGate(hit.key, "rejected", id, category);
+				return rejected;
+			}
+			return { block: true, reason: `HARD GATE ${id}: not approved (dialog dismissed); retry to ask again.` };
+		}
+
+		// The replay script (scripts/lead-replay.ts) counts gate stops instead of waiting for a lead.
+		const replayLog = process.env.OMP_STARTER_LEAD_REPLAY_LOG;
+		if (replayLog && !ctx.hasUI) {
+			fs.appendFileSync(replayLog, `${JSON.stringify({ event: "gate", key: hit.key, category, at: new Date().toISOString() })}\n`);
+			await recordGate(hit.key, "approved", id, category);
+			continue;
+		}
+
+		const pending: PendingGate = { key: hit.key, gateId: id, category, repoName: hit.repoName, rel: hit.rel, agent: ctx.agent?.name ?? "main" };
+		lead().pending.set(hit.key, pending);
+		leadNotify(ctx, notice);
+		return {
+			block: true,
+			reason:
+				`HARD GATE ${id} (${category}): ${where} needs the lead's approval. Stop this task and report ` +
+				`"blocked: hard gate ${id} ${where}" to your parent. The main session then calls the lead tool with op "gate".`,
+		};
+	}
+	return undefined;
+}
