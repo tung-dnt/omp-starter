@@ -1,16 +1,103 @@
-// The lead-driven workflow's model-facing side: the `lead` tool, through which the agent reaches the lead (the user).
-// No tool argument approves anything; every decision is a dialog only the user can answer, and only the main
-// session can open one (subagents have no UI). Off with OMP_STARTER_LEAD=off.
+// The lead-driven workflow. The lead (the user) writes a brief per story under `<kb>/lead/stories/<id>/`; the agent
+// plans from it, the lead approves the plan once, and code keeps the build inside what was approved:
+//  - `/story <id>` and `/build [id]` are checked before they expand: no brief or system map, no planning; no approved plan, no build.
+//  - The active story's brief, system map and hard gates are added to the system prompt of the main session and of the subagents that build or review.
+//  - Repository edits are blocked until the plan is approved; afterwards reads and writes outside the plan's repositories are blocked.
+//  - The `lead` tool is how the agent reaches the lead. No tool argument approves anything: every decision is a dialog
+//    only the user can answer, and only the main session can open one (subagents have no UI).
+// Active once `/starter lead` created the folder; off with OMP_STARTER_LEAD=off.
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { leadDirFor } from "./lib/lead/artifacts";
+import { atomicWrite } from "./lib/file-lock";
+import { inside } from "./lib/kb-sources";
+import { leadDirFor, leadReady, readBrief, readPlan, readSystemMap, type StoryState, updateStoryState } from "./lib/lead/artifacts";
 import { gateTitle, recordGate } from "./lib/lead/gates";
-import { lead, resetLead } from "./lib/lead/registry";
+import { type ActiveStory, lead, resetLead } from "./lib/lead/registry";
+import { planApproved, STORY_BLOCK_HEADER, storyBlock } from "./lib/lead/story";
+import { repoRoot } from "./lib/repo";
+import { tildify } from "./lib/state";
+import { touchedPaths } from "./lib/tool-input";
+
+const COMMAND = /^\/(?:[\w-]+:)?(story|build)(?=\s|$)(?:\s+(\S+))?/;
+const STORY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const WRITE_TOOLS: Record<string, true> = { write: true, edit: true };
+// Subagents that build or review get the story block; scouts and the like do not need the brief.
+const LEAD_SUBAGENTS: Record<string, true> = { task: true, "task-builder": true, "test-engineer": true, "code-reviewer": true, "security-auditor": true, reviewer: true };
 
 interface LeadParams {
 	op: "approve" | "gate" | "status" | "retro";
 	story?: string;
 	summary?: string;
 	artifact?: string;
+}
+
+/** Makes story `id` the active one, or returns why it cannot start. */
+function activate(leadDir: string, id: string, missingBrief: (storyDir: string) => string): string | undefined {
+	const storyDir = path.join(leadDir, "stories", id);
+	if (!STORY_ID.test(id) || !fs.existsSync(path.join(storyDir, "brief.md"))) return missingBrief(storyDir);
+	const { brief, errors } = readBrief(storyDir);
+	if (!brief) return `lead: ${errors.join("; ")}`;
+	const map = readSystemMap(leadDir);
+	if (map.error) return `lead: ${map.error}. The system map comes before any repo work; fill it in and rerun /story ${id}.`;
+	lead().story = { id, dir: storyDir, leadDir, mode: brief.mode, invariants: brief.invariants };
+	lead().notifiedPlanChange = false;
+	return undefined;
+}
+
+function activeStory(): ActiveStory {
+	const story = lead().story;
+	if (!story) throw new Error("lead: no active story; the lead starts one with /story <id>");
+	return story;
+}
+
+/** Whether the story's plan is approved; tells the lead once when an approved plan's repos or summary changed. */
+function approval(story: ActiveStory, ctx: ExtensionContext) {
+	const state = planApproved(story);
+	if (state.changed && !lead().notifiedPlanChange && ctx.hasUI) {
+		lead().notifiedPlanChange = true;
+		ctx.ui.notify("lead: the plan's repos or summary changed after approval; edits are blocked until the lead approves again.", "warning");
+	}
+	return state;
+}
+
+/** Why `/story <id>` or `/build [id]` must not run, or undefined after making the story active. */
+function refusal(command: string, id: string | undefined, leadDir: string, ctx: ExtensionContext): string | undefined {
+	if (command === "story") {
+		if (id === undefined || !STORY_ID.test(id)) return "lead: usage: /story <id>, where lead/stories/<id>/brief.md is your brief";
+		return activate(
+			leadDir,
+			id,
+			storyDir =>
+				`lead: no lead brief at ${tildify(storyDir)}/brief.md. Copy ${tildify(leadDir)}/brief-template.md there and fill it in; planning does not start without it.`,
+		);
+	}
+	if (id !== undefined) {
+		const problem = activate(leadDir, id, () => `lead: no story ${id}; write its brief and run /story ${id}, or use /task for a small change.`);
+		if (problem) return problem;
+	}
+	const story = lead().story;
+	if (!story) return "lead: /build needs a story id";
+	if (!approval(story, ctx).approved) return `lead: the plan for ${story.id} is not approved; run /story ${story.id}.`;
+	return undefined;
+}
+
+/** The single plan approval: shows the plan's summary and repositories to the lead and records a yes. */
+async function approvePlan(ctx: ExtensionContext): Promise<string> {
+	const story = activeStory();
+	const { plan, errors } = readPlan(story.dir);
+	if (!plan) throw new Error(`lead: ${errors.join("; ")}`);
+	const invariants = readBrief(story.dir).brief?.invariants ?? story.invariants;
+	const missing = invariants.filter(inv => !new RegExp(`\\b${inv.id}\\b`).test(plan.text)).map(inv => inv.id);
+	if (missing.length) throw new Error(`lead: plan does not mention invariant(s) ${missing.join(", ")}`);
+	if (!ctx.hasUI) throw new Error("lead: approval needs an interactive session");
+	const yes = await ctx.ui.confirm(`Approve plan for ${story.id}?`, `${plan.summary.join("\n")}\n\nRepos: ${plan.repos.join(", ")}`);
+	if (!yes) return "plan NOT approved; revise it with the lead and call approve again";
+	await updateStoryState(story.dir, state => {
+		state.plan = { digest: plan.digest, approvedAt: new Date().toISOString() };
+	});
+	lead().notifiedPlanChange = false;
+	return `plan approved; building may start (/build ${story.id})`;
 }
 
 /** Puts every gate a subagent was blocked on to the lead; undecided ones stay queued. */
@@ -31,12 +118,90 @@ async function decideGates(ctx: ExtensionContext): Promise<string> {
 	return lines.join("\n");
 }
 
+type Status = NonNullable<StoryState["status"]>;
+
+/** Computes the story's status from the pull request of each plan repository's current branch and records it. */
+async function recordStatus(pi: ExtensionAPI): Promise<string> {
+	const story = activeStory();
+	const { plan, errors } = readPlan(story.dir);
+	if (!plan) throw new Error(`lead: ${errors.join("; ")}`);
+	const prs: Status["prs"] = [];
+	const lines: string[] = [];
+	for (const repo of plan.repos) {
+		const branch = (await pi.exec("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
+		const listed = await pi.exec("gh", ["pr", "list", "--head", branch, "--state", "all", "--json", "url,state", "--limit", "1"], { cwd: repo });
+		if (listed.code !== 0) throw new Error(`lead: gh failed: ${listed.stderr.trim().split("\n")[0]}`);
+		const pr = (JSON.parse(listed.stdout || "[]") as { url: string; state: string }[])[0];
+		if (pr) prs.push({ repo, url: pr.url, state: pr.state });
+		lines.push(`- ${path.basename(repo)} (${branch}): ${pr ? `${pr.state} ${pr.url}` : "no pull request"}`);
+	}
+	const value: Status["value"] =
+		prs.length === plan.repos.length && prs.every(pr => pr.state === "MERGED") ? "done" : prs.some(pr => pr.state === "OPEN") ? "in-review" : "in-progress";
+	await updateStoryState(story.dir, state => {
+		state.status = { value, prs, at: new Date().toISOString() };
+	});
+	const urls = prs.map(pr => pr.url);
+	atomicWrite(
+		path.join(story.dir, "status.md"),
+		`---\nstatus: ${value}\nprs:${urls.length ? urls.map(url => `\n  - ${url}`).join("") : " []"}\n---\n\n# ${story.id} status\n\n${lines.join("\n")}\n`,
+	);
+	if (value === "done") lead().story = undefined;
+	return [`status: ${value}`, ...urls].join("\n");
+}
+
 export default function leadExtension(pi: ExtensionAPI): void {
 	if (process.env.OMP_STARTER_LEAD === "off") return;
 	const z = pi.zod;
 
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.agent?.kind !== "sub") resetLead(ctx.sessionManager.getSessionId());
+	});
+
+	pi.on("input", (event, ctx) => {
+		if (ctx.agent?.kind === "sub" || !leadReady(ctx.cwd)) return;
+		const command = COMMAND.exec(event.text);
+		if (!command) return;
+		const problem = refusal(command[1], command[2], leadDirFor(ctx.cwd)!, ctx);
+		if (!problem) return;
+		ctx.ui.notify(problem, "error");
+		return { handled: true };
+	});
+
+	pi.on("before_agent_start", (event, ctx) => {
+		const story = lead().story;
+		if (!story) return;
+		const agent = ctx.agent;
+		if (agent && agent.kind !== "main" && !LEAD_SUBAGENTS[agent.name.toLowerCase()]) return;
+		if (event.systemPrompt.some(s => s.includes(STORY_BLOCK_HEADER))) return;
+		return { systemPrompt: [...event.systemPrompt, storyBlock(story)] };
+	});
+
+	// The fence: no repository edits before the plan is approved; afterwards nothing outside the plan's repositories.
+	pi.on("tool_call", (event, ctx) => {
+		const story = lead().story;
+		if (!story) return;
+		const paths = touchedPaths(event.toolName, (event.input ?? {}) as Record<string, unknown>, ctx.cwd).filter(p => !inside(p, story.leadDir));
+		if (!paths.length) return;
+		const { approved, repos } = approval(story, ctx);
+		for (const p of paths) {
+			const repo = repoRoot(p);
+			if (!repo) continue;
+			if (!approved) {
+				if (!WRITE_TOOLS[event.toolName]) continue;
+				return {
+					block: true,
+					reason: `lead: the plan for ${story.id} is not approved yet; write ${path.join(story.dir, "plan.md")} and call the lead tool with op "approve".`,
+				};
+			}
+			if (!repos.includes(fs.realpathSync(repo)) && !/\/node_modules\//.test(p)) {
+				return {
+					block: true,
+					reason:
+						`lead fence: ${path.basename(repo)} is not in the plan's repos (${repos.map(r => path.basename(r)).join(", ")}). ` +
+						"If the work needs it, stop and report the gap to the lead.",
+				};
+			}
+		}
 	});
 
 	pi.registerTool({
@@ -57,8 +222,12 @@ export default function leadExtension(pi: ExtensionAPI): void {
 			if (ctx.agent?.kind === "sub") throw new Error("lead: only the main session can call this tool");
 			if (!leadDirFor(ctx.cwd)) throw new Error("lead: no knowledge base serves this folder; run /starter kb, then /starter lead");
 			const p = params as LeadParams;
-			if (p.op !== "gate") throw new Error(`lead: op ${p.op} is not available`);
-			return { content: [{ type: "text", text: await decideGates(ctx) }] };
+			let text: string;
+			if (p.op === "approve") text = await approvePlan(ctx);
+			else if (p.op === "gate") text = await decideGates(ctx);
+			else if (p.op === "status") text = await recordStatus(pi);
+			else throw new Error(`lead: op ${p.op} is not available`);
+			return { content: [{ type: "text", text }] };
 		},
 	});
 }
