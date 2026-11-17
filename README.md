@@ -164,6 +164,7 @@ It needs no provider login, never installs or changes an SDK, and never changes 
 ## Commands
 
 - `/starter`: rerun every step.
+- `/starter lead`: create `lead/` in the knowledge base serving this folder (see [Lead-driven workflow](#lead-driven-workflow)).
 - `/starter skills`, `/starter models`, `/starter jev`, `/starter kb`, `/starter tools`: rerun one step (`/starter skills` offers to update an installed agent-skills and reports the old and new version; `/starter kb` manages several knowledge bases once one exists; `/starter jev` turns Jev off when it is on).
 - `/starter updates`: check installed/published versions of both `agent-skills@tung-agent-skills` and `starter@omp-starter`; confirm each plugin/scope before updating.
 
@@ -191,11 +192,11 @@ Keep plans, acceptance criteria, designs and decisions as static artifacts, and 
 
 ## Asking questions
 
-The plugin ships an always-on rule (`rules/ask-user.md`): real choices go to you instead of being decided for you. That covers design and approach choices, scope changes, the approval gates of a written workflow, and interview or grill rounds. Facts that tools, code or docs can answer, and mechanical choices with one sensible answer, are settled by the agent, which says what it chose. Every question goes through omp's `ask` tool as one HTML form per turn, never only in prose; a round's independent questions share the form. Each question is a fieldset whose legend names the decision and the concrete thing it concerns, followed by context (what is decided, why now, what it hinges on). Each option gives its main pro and con and whether it is easy to reverse, and the recommended option is preselected. Paths you may want to open also go in chat, since many clients make nothing inside the form clickable.
+The plugin ships an always-on rule (`rules/ask-user.md`): the lead's decisions go to you instead of being decided for you. You own framing, high-level design (architecture, data model, API contracts, cross-system boundaries), invariants, risk and acceptance, so gaps in those, scope, and anything a hard gate stops are asked. The agent owns low-level design, code structure, test design and mechanics, and records each non-trivial choice with the rejected alternative in the PR's decision log. Facts that tools, code or docs can answer are settled by the agent. Every question goes through omp's `ask` tool as one HTML form per turn, never only in prose; a round's independent questions share the form. Each question is a fieldset whose legend names the decision and the concrete thing it concerns, followed by context (what is decided, why now, what it hinges on). Each option gives its main pro and con and whether it is easy to reverse, and the recommended option is preselected. Paths you may want to open also go in chat, since many clients make nothing inside the form clickable.
 
 A second always-on rule (`rules/how-means-plan.md`): a request that is itself a how-question ("how do I …", or in Vietnamese "làm sao …", "như thế nào …", "cách nào …") is treated as planning and discussion. The agent investigates read-only, presents options, trade-offs and a recommendation, and asks before building anything. An instruction that merely mentions "how" ("fix X and show me how") is carried out.
 
-A third always-on rule (`rules/lld-before-build.md`): every task from a written plan gets a low-level design artifact and your explicit approval before implementation. The main session keeps mutable progress in native todo; workers receive the approved artifact path. Design changes require fresh approval. Native task completion is not verification.
+There is no per-task design approval: the agent owns low-level design and records its choices in the PR's decision log; you approve one plan per story and the harness stops work at hard gates (see [Lead-driven workflow](#lead-driven-workflow)).
 
 A fourth always-on rule (`rules/ticket-tracking.md`): native todo is the sole mutable progress checklist for the active session. Plans and decisions remain in static artifacts; native execution is not test proof. Issue trackers such as Jira are never commented on unless you ask, and any status transition is asked first.
 
@@ -217,7 +218,34 @@ The same Jev step turns on `extensions/lsp-guard.ts`, which blocks instead of re
 
 `extensions/blast-radius.ts` appends a short **Blast radius** block to an `edit` or `write` result when the change alters an exported symbol in a TS/JS or Go file. A symbol counts as changed when its signature does: the parameters and return type of a function or method (including an exported arrow-function `const`), or the whole declaration of an `interface`/`type`/`enum`/Go `type`. The block lists that symbol's references in other files, from the language server the `lsp` tool already runs, so no second server starts. A removed or renamed export can no longer be asked about, so its uses come from `git grep -w` over tracked files and are labelled `text matches`. Body-only edits, reformatting and new exports add nothing. Limits: 3 changed and 3 removed symbols per call, 8 locations per symbol, 700 characters, 6 s. A slow or missing server, or any error, adds nothing and never changes the edit's own result. The block holds paths and line numbers only, never code. It runs in every agent. Turn it off with omp's extension toggle.
 
-The `ask`-based rules load in the main session only, except `lld-before-build` and `ticket-tracking`, which also load in agent-skills' `task-builder`. Other subagents can't use the `ask` tool, so they don't carry these rules.
+The `ask`-based rules load in the main session only, except `ticket-tracking`, which also loads in agent-skills' `task-builder`. Other subagents can't use the `ask` tool, so they don't carry these rules.
+
+## Lead-driven workflow
+
+You are the tech lead; agents are contractors with no context beyond what you give them. Work flows brief → one batch of questions → one plan approval → build inside fences → PR outputs you read before any code. The commands (`/story`, `/build`, `/task`, `/ship`) come from agent-skills; this plugin makes the rules binding in code. Everything lives in the `lead/` folder of the knowledge base serving the session's folder; `/starter lead` creates it. Nothing is enforced until that folder exists, and `OMP_STARTER_LEAD=off` turns every part off.
+
+| File in `<kb>/lead/` | Owner | Purpose |
+|---|---|---|
+| `hard-gates.md` | you | Paths that stop for you, concurrency triggers, `limits.builders` (default 2) |
+| `system-map.md` | you | Services, owned tables, calls; also read by the structural gate |
+| `stories/<id>/brief.md` | you | Goal, success criteria, boundaries, invariants (`- I1: …`), must-never-break, out of scope; `mode: sync\|async` |
+| `stories/<id>/plan.md` | the agent | `repos:` and a `## Summary` of at most 15 lines; the rest (`## Tasks`, decision log) is the agent's |
+| `stories/<id>/state.json`, `status.md`, `retro-log.md` | the harness | Approval digest, gate decisions, PR status, escaped bugs |
+| `brief-template.md`, `pr-format.md` | `/starter lead` | Brief skeleton; the PR body format (regenerated on every run) |
+
+What is enforced:
+
+- **Input check.** `/story <id>` is refused without a complete brief and a system map; `/build` is refused without an approved plan.
+- **Context.** The brief, system map and hard gates are added to the system prompt of the main session and of building and reviewing subagents.
+- **One approval.** The agent calls the `lead` tool (`op: "approve"`); you answer a confirm dialog. Subagents cannot call it and no argument approves anything. Only `repos:` and `## Summary` are approved: changing either revokes the approval.
+- **Fence.** No repository edits before approval; afterwards reads and writes outside the plan's repositories are blocked.
+- **Hard gates.** A write, commit, push or PR touching a gated path asks you in the main session (`Approve for story` / `Reject`). A blocked subagent reports it, and the main session calls `lead` with `op: "gate"`. An unreadable `hard-gates.md` fails closed. Agents cannot edit the lead's files.
+- **PR check.** `gh pr create|edit` and the github tool's `pr_create` are blocked unless the body has the decision log, an invariant checklist whose proving tests exist, and a risk summary with `file:line` pointers, plus the concurrency note, DDIA checklist, system-map diff and structural changes the diff calls for (`pr-format.md`).
+- **Structure.** `scripts/arch-graph.ts generate|check|diff` writes `docs/arch/` (code, cross-service, Serverless infra and table-write edges). A commit in a repo with `docs/arch/services.json` is blocked while it is stale, and undeclared cross-service calls or writes to tables another service owns become a `structure` gate. `templates/arch-graph.yml` is the matching CI check.
+- **Builders and notifications.** At most `limits.builders` task/task-builder/test-engineer agents run at once while a story is active. Gate stops, and in `async` mode every stop of the main session, notify you through the UI, `OMP_STARTER_NOTIFY_CMD` (`sh -c`, text in `OMP_STARTER_NOTIFY_TEXT`) or a macOS notification; texts carry metadata only.
+- **Status and retro.** `lead` with `op: "status"` computes the story's state from `gh pr list`; `op: "retro"` logs an escaped bug with the cause you pick.
+
+`bun scripts/lead-replay.ts <tasks.yml> [--runs 3] [--out file.md] --yes` replays real tasks in fresh worktrees with the harness on and off and tabulates pass rate, wall time and gate stops; without `--yes` it only prints how many runs it would spend.
 
 ## Usage report
 
@@ -250,6 +278,11 @@ It prints one markdown table per metric, for main sessions and subagents separat
 Limits: M3 and M1's scope check use today's vault, so notes moved later are judged at their new place. A session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names, tool names and note slugs; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder or the vault; its only write is the `--json` file.
 
 ## Release notes
+
+### Unreleased
+
+- **Added:** the lead-driven workflow: `/starter lead`, the `lead` tool, `/story` and `/build` input checks, story context injection, the single plan approval and repository fence, deterministic hard gates, the PR output check, the builder cap, notifications, the retro log, `scripts/arch-graph.ts` with a CI template, and `scripts/lead-replay.ts` (see [Lead-driven workflow](#lead-driven-workflow)).
+- **Removed:** `rules/lld-before-build.md`; `rules/ask-user.md` now splits the lead's decisions from the agent's.
 
 ### 0.33.0 — 2026-11-17
 
