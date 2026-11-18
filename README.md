@@ -222,28 +222,33 @@ The `ask`-based rules load in the main session only, except `ticket-tracking`, w
 
 ## Lead-driven workflow
 
-You are the tech lead; agents are contractors with no context beyond what you give them. Work flows brief → one batch of questions → one plan approval → build inside fences → PR outputs you read before any code. The commands (`/story`, `/build`, `/task`, `/ship`) come from agent-skills; this plugin makes the rules binding in code. Everything lives in the `lead/` folder of the knowledge base serving the session's folder; `/starter lead` creates it. Nothing is enforced until that folder exists, and `OMP_STARTER_LEAD=off` turns every part off.
+You are the tech lead; agents are contractors with no context beyond what you give them. Work flows brief → one batch of questions → one plan approval → build inside fences → PR outputs you read before any code. After the approval you are out of the loop: the agent keeps the plan and the system map current, gates wait in a queue, and you are notified instead of asked. The commands (`/story`, `/build`, `/task`, `/ship`) come from agent-skills; this plugin makes the rules binding in code. Everything lives in the `lead/` folder of the knowledge base serving the session's folder; `/starter lead` creates it. Nothing is enforced until that folder exists, and `OMP_STARTER_LEAD=off` turns every part off.
 
-| File in `<kb>/lead/` | Owner | Purpose |
+| File in `<kb>/lead/` | Written by | Kept current by |
 |---|---|---|
-| `hard-gates.md` | you | Paths that stop for you, concurrency triggers, `limits.builders` (default 2) |
-| `system-map.md` | you | Services, owned tables, calls; also read by the structural gate |
-| `stories/<id>/brief.md` | you | Goal, success criteria, boundaries, invariants (`- I1: …`), must-never-break, out of scope; `mode: sync\|async` |
-| `stories/<id>/plan.md` | the agent | `repos:` and a `## Summary` of at most 15 lines; the rest (`## Tasks`, decision log) is the agent's |
-| `stories/<id>/state.json`, `status.md`, `retro-log.md` | the harness | Approval digest, gate decisions, PR status, escaped bugs |
-| `brief-template.md`, `pr-format.md` | `/starter lead` | Brief skeleton; the PR body format (regenerated on every run) |
+| `hard-gates.md` | you | You. Read on every tool call; an invalid edit falls back to the last good copy and tells you once. |
+| `system-map.md` | you, then agents | Agents edit it when the structure changes. Each edit notifies you and must be described in the PR's `## System-map diff`. |
+| `stories/<id>/brief.md` | you | You. Goal, success criteria, boundaries, invariants (`- I1: …`), must-never-break, out of scope; `mode: async\|sync`. |
+| `stories/<id>/plan.md` | the agent | The agent replaces it as the approach changes: it states the current plan only, never a history. `repos:` plus a `## Summary` of at most 15 lines, then `## Tasks` and `## Decision log`. |
+| `stories/<id>/state.json` | the harness | On approval, each gate decision, each map edit, each status. |
+| `stories/<id>/status.md` | the harness | On `lead` with `op: "status"`, and whenever `/story` or `/build` returns to a story with an approved plan. |
+| `retro-log.md` | the harness | On `lead` with `op: "retro"`. |
+| `pr-format.md` | `/starter lead` | Rewritten at session start when it differs from this plugin version's text. |
+| `brief-template.md` | `/starter lead` | Never overwritten; a difference from the shipped template is reported once per plugin version. |
 
 What is enforced:
 
 - **Input check.** `/story <id>` is refused without a complete brief and a system map; `/build` is refused without an approved plan.
 - **Context.** The brief, system map and hard gates are added to the system prompt of the main session and of building and reviewing subagents.
-- **One approval.** The agent calls the `lead` tool (`op: "approve"`); you answer a confirm dialog. Subagents cannot call it and no argument approves anything. Only `repos:` and `## Summary` are approved: changing either revokes the approval.
+- **One approval.** The agent calls the `lead` tool (`op: "approve"`); you answer a confirm dialog showing the plan's summary and repositories. Subagents cannot call it and no argument approves anything. The approval covers the plan's `repos:` and the brief's invariants and boundaries: a new repository, or your edit to those brief sections, needs approval again. The plan's summary and tasks are the agent's to replace.
 - **Fence.** No repository edits before approval; afterwards reads and writes outside the plan's repositories are blocked.
-- **Hard gates.** A write, commit, push or PR touching a gated path asks you in the main session (`Approve for story` / `Reject`). A blocked subagent reports it, and the main session calls `lead` with `op: "gate"`. An unreadable `hard-gates.md` fails closed. Agents cannot edit the lead's files.
+- **Hard gates.** A write, commit, push or PR touching a gated path needs your decision. In `mode: sync` the main session asks you in a dialog (`Approve for story` / `Reject`). In `mode: async` (the template's default) nothing is asked mid-work: that one write is refused and queued, you are notified, and the agent carries on with other work; you decide the queue in one sitting when the agent calls `lead` with `op: "gate"`. A blocked subagent reports the gate to its parent in both modes. An unreadable `hard-gates.md` fails closed. Agents cannot edit `hard-gates.md`, briefs, or the harness's files.
 - **PR check.** `gh pr create|edit` and the github tool's `pr_create` are blocked unless the body has the decision log, an invariant checklist whose proving tests exist, and a risk summary with `file:line` pointers, plus the concurrency note, DDIA checklist, system-map diff and structural changes the diff calls for (`pr-format.md`).
-- **Structure.** `scripts/arch-graph.ts generate|check|diff` writes `docs/arch/` (code, cross-service, Serverless infra and table-write edges). A commit in a repo with `docs/arch/services.json` is blocked while it is stale, and undeclared cross-service calls or writes to tables another service owns become a `structure` gate. `templates/arch-graph.yml` is the matching CI check.
-- **Builders and notifications.** At most `limits.builders` task/task-builder/test-engineer agents run at once while a story is active. Gate stops, and in `async` mode every stop of the main session, notify you through the UI, `OMP_STARTER_NOTIFY_CMD` (`sh -c`, text in `OMP_STARTER_NOTIFY_TEXT`) or a macOS notification; texts carry metadata only.
+- **Structure.** `scripts/arch-graph.ts generate|check|diff` writes `docs/arch/` (code, cross-service, Serverless infra and table-write edges). A commit in a repo with `docs/arch/services.json` is blocked while it is stale against the code or against the system map's services for that repo. Undeclared cross-service calls or writes to tables another service owns become a `structure` gate. `templates/arch-graph.yml` is the matching CI check.
+- **Builders and notifications.** At most `limits.builders` task/task-builder/test-engineer agents run at once while a story is active. Gate stops, map edits, and in `async` mode every stop of the main session (with the number of queued gates) notify you through the UI, `OMP_STARTER_NOTIFY_CMD` (`sh -c`, text in `OMP_STARTER_NOTIFY_TEXT`) or a macOS notification; texts carry metadata only.
 - **Status and retro.** `lead` with `op: "status"` computes the story's state from `gh pr list`; `op: "retro"` logs an escaped bug with the cause you pick.
+
+Because agents may edit `system-map.md`, the structural gate checks code against a map the agent can change. What tells you is the notification on each edit and the required `## System-map diff` in the PR.
 
 `bun scripts/lead-replay.ts <tasks.yml> [--runs 3] [--out file.md] --yes` replays real tasks in fresh worktrees with the harness on and off and tabulates pass rate, wall time and gate stops; without `--yes` it only prints how many runs it would spend.
 
