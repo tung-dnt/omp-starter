@@ -284,10 +284,16 @@ Limits: M3 and M1's scope check use today's vault, so notes moved later are judg
 
 ## Release notes
 
-### Unreleased
+### 0.34.0 — 2026-11-18
 
-- **Added:** the lead-driven workflow: `/starter lead`, the `lead` tool, `/story` and `/build` input checks, story context injection, the single plan approval and repository fence, deterministic hard gates, the PR output check, the builder cap, notifications, the retro log, `scripts/arch-graph.ts` with a CI template, and `scripts/lead-replay.ts` (see [Lead-driven workflow](#lead-driven-workflow)).
-- **Removed:** `rules/lld-before-build.md`; `rules/ask-user.md` now splits the lead's decisions from the agent's.
+- **Added:** the lead-driven workflow (see [Lead-driven workflow](#lead-driven-workflow)). `/starter lead` creates `lead/` in the knowledge base; nothing is enforced before that, and `OMP_STARTER_LEAD=off` turns it off. It needs agent-skills 0.8.0 for the matching `/story`, `/build`, `/task` and `/ship` commands.
+  - `/story <id>` and `/build [id]` are checked before they run: brief and system map first, approved plan before building.
+  - The `lead` tool: one plan approval (`approve`), queued hard gates (`gate`), PR status (`status`), escaped bugs (`retro`). Every decision is a dialog only you can answer.
+  - Hard gates on writes, commits, pushes and PRs; a repository fence; a PR body check; a builder cap; notifications (`OMP_STARTER_NOTIFY_CMD` or macOS).
+  - After the approval you are out of the loop: stories default to `mode: async` (gates queue instead of asking), and agents keep `plan.md` and `system-map.md` current.
+  - `scripts/arch-graph.ts` with `templates/arch-graph.yml` (structural graph in `docs/arch/`, checked at commit and in CI) and `scripts/lead-replay.ts` (the same tasks with the harness on and off).
+- **Removed:** `rules/lld-before-build.md`: there is no design approval per task.
+- **Changed:** `rules/ask-user.md` asks you only about your decisions (framing, high-level design, invariants, risk, acceptance); low-level design is the agent's.
 
 ### 0.33.0 — 2026-11-17
 
