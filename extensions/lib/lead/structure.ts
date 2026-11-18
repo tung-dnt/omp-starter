@@ -12,20 +12,23 @@ const SCRIPT = path.join(import.meta.dir, "..", "..", "..", "scripts", "arch-gra
 /**
  * `block` is why the commit cannot go ahead (stale or unreadable docs/arch); `hits` are structure violations to put
  * to the lead like any gate. Nothing happens in a repository without docs/arch/services.json.
+ * The graph is rendered from the system map's services for this repository, so a map change (a service's path, calls
+ * or tables) makes docs/arch stale too; services.json stands in only when the map lists none for the repository.
  */
 export async function checkStructure(repo: string, leadDir: string): Promise<{ block?: string; hits: GateHit[] }> {
 	if (!fs.existsSync(path.join(repo, "docs", "arch", "services.json"))) return { hits: [] };
 	const regenerate = `run bun ${SCRIPT} generate ${repo} --map ${path.join(leadDir, "system-map.md")} and commit docs/arch.`;
+	const repoName = resolveRepoName(repo) ?? path.basename(repo);
+	const mapped = readSystemMap(leadDir).services?.filter(s => s.repo === repoName) ?? [];
 	let edges: string[];
 	try {
-		const services = readServices(repo);
+		const services = mapped.length ? mapped : readServices(repo);
 		edges = await collectEdges(repo, services);
-		if (staleFiles(repo, renderFiles(edges, services)).length) return { block: `lead: docs/arch is stale; ${regenerate}`, hits: [] };
+		const stale = staleFiles(repo, renderFiles(edges, services));
+		if (stale.length) return { block: `lead: docs/arch is stale (${stale.join(", ")}); ${regenerate}`, hits: [] };
 	} catch (error) {
 		return { block: `lead: docs/arch cannot be checked (${(error as Error).message}); ${regenerate}`, hits: [] };
 	}
-	const repoName = resolveRepoName(repo) ?? path.basename(repo);
-	const mapped = readSystemMap(leadDir).services?.filter(s => s.repo === repoName) ?? [];
 	const hits = structureViolations(edges, mapped).map(violation => ({
 		gate: { id: "structure", category: "structure" },
 		repo,

@@ -235,13 +235,17 @@ describe("docs/arch at commit time", () => {
 	test("a stale docs/arch blocks the commit with the command that regenerates it", async () => {
 		const s = await archRepo("export const a = 1;\ndb.insertInto('orders');\n", false);
 		const verdict = await s.call("bash", { command: "git commit -m x" }, s.main().ctx);
-		expect(verdict?.reason).toStartWith("lead: docs/arch is stale; run bun ");
+		expect(verdict?.reason).toStartWith("lead: docs/arch is stale (api.mmd, edges.json, services.json); run bun ");
 		expect(verdict?.reason).toContain("arch-graph.ts generate");
 	}, 120_000);
 
 	test("a fresh docs/arch passes; a write to a table the service does not own goes to the lead as gate `structure`", async () => {
 		const ok = await archRepo("export const a = 1;\ndb.insertInto('orders');\n", true);
 		expect(await ok.call("bash", { command: "git commit -m x" }, ok.main().ctx)).toBeUndefined();
+
+		// The lead's map now lets api call worker: services.json no longer matches it.
+		writeFiles(ok.leadDir, { "system-map.md": "```yaml\nservices:\n  - { name: api, repo: shop, path: \"\", owns_tables: [orders], calls: [worker] }\n```\n" });
+		expect((await ok.call("bash", { command: "git commit -m x" }, ok.main().ctx))?.reason).toStartWith("lead: docs/arch is stale (services.json); run bun ");
 
 		resetHome();
 		const bad = await archRepo("export const a = 1;\ndb.insertInto('payments');\n", true);
