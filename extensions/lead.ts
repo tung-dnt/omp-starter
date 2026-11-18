@@ -11,7 +11,20 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { atomicWrite, withFileLock } from "./lib/file-lock";
 import { inside } from "./lib/kb-sources";
-import { approvalDigest, leadDirFor, leadLock, leadReady, readBrief, readHardGates, readPlan, readSystemMap, type StoryState, updateStoryState } from "./lib/lead/artifacts";
+import {
+	approvalDigest,
+	leadDirFor,
+	leadLock,
+	leadReady,
+	readBrief,
+	readHardGates,
+	readPlan,
+	readStoryState,
+	readSystemMap,
+	type StoryState,
+	syncGenerated,
+	updateStoryState,
+} from "./lib/lead/artifacts";
 import { gateTitle, recordGate } from "./lib/lead/gates";
 import { leadNotify } from "./lib/lead/notify";
 import { type ActiveStory, lead, resetLead } from "./lib/lead/registry";
@@ -28,6 +41,8 @@ const WRITE_TOOLS: Record<string, true> = { write: true, edit: true };
 const LEAD_SUBAGENTS: Record<string, true> = { task: true, "task-builder": true, "test-engineer": true, "code-reviewer": true, "security-auditor": true, reviewer: true };
 // Subagents that write code count against `limits.builders` of hard-gates.md while a story is active.
 const BUILDERS: Record<string, true> = { task: true, "task-builder": true, "test-engineer": true };
+/** Budget of each git/gh call behind a status: a hung gh must not hold `/build`. */
+const STATUS_TIMEOUT_MS = 10_000;
 
 interface LeadParams {
 	op: "approve" | "gate" | "status" | "retro";
@@ -125,16 +140,18 @@ async function decideGates(ctx: ExtensionContext): Promise<string> {
 
 type Status = NonNullable<StoryState["status"]>;
 
-/** Computes the story's status from the pull request of each plan repository's current branch and records it. */
-async function recordStatus(pi: ExtensionAPI): Promise<string> {
-	const story = activeStory();
+/**
+ * Computes the story's status from the pull request of each plan repository's current branch and records it.
+ * `endWhenDone` clears the active story once every pull request is merged (the explicit op); the refresh on activation keeps it.
+ */
+async function recordStatus(pi: ExtensionAPI, story: ActiveStory, endWhenDone: boolean): Promise<string> {
 	const { plan, errors } = readPlan(story.dir);
 	if (!plan) throw new Error(`lead: ${errors.join("; ")}`);
 	const prs: Status["prs"] = [];
 	const lines: string[] = [];
 	for (const repo of plan.repos) {
-		const branch = (await pi.exec("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
-		const listed = await pi.exec("gh", ["pr", "list", "--head", branch, "--state", "all", "--json", "url,state", "--limit", "1"], { cwd: repo });
+		const branch = (await pi.exec("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"], { timeout: STATUS_TIMEOUT_MS })).stdout.trim();
+		const listed = await pi.exec("gh", ["pr", "list", "--head", branch, "--state", "all", "--json", "url,state", "--limit", "1"], { cwd: repo, timeout: STATUS_TIMEOUT_MS });
 		if (listed.code !== 0) throw new Error(`lead: gh failed: ${listed.stderr.trim().split("\n")[0]}`);
 		const pr = (JSON.parse(listed.stdout || "[]") as { url: string; state: string }[])[0];
 		if (pr) prs.push({ repo, url: pr.url, state: pr.state });
@@ -150,7 +167,7 @@ async function recordStatus(pi: ExtensionAPI): Promise<string> {
 		path.join(story.dir, "status.md"),
 		`---\nstatus: ${value}\nprs:${urls.length ? urls.map(url => `\n  - ${url}`).join("") : " []"}\n---\n\n# ${story.id} status\n\n${lines.join("\n")}\n`,
 	);
-	if (value === "done") lead().story = undefined;
+	if (value === "done" && endWhenDone) lead().story = undefined;
 	return [`status: ${value}`, ...urls].join("\n");
 }
 
@@ -177,17 +194,32 @@ export default function leadExtension(pi: ExtensionAPI): void {
 	const z = pi.zod;
 
 	pi.on("session_start", (_event, ctx) => {
-		if (ctx.agent?.kind !== "sub") resetLead(ctx.sessionManager.getSessionId());
+		if (ctx.agent?.kind === "sub") return;
+		resetLead(ctx.sessionManager.getSessionId());
+		const leadDir = leadDirFor(ctx.cwd);
+		if (!leadDir || !leadReady(ctx.cwd)) return;
+		try {
+			// pr-format.md describes checks that live in this plugin's code, so it follows the plugin version.
+			if (syncGenerated(leadDir).briefTemplateDiffers && ctx.hasUI) {
+				ctx.ui.notify(`lead: ${tildify(leadDir)}/brief-template.md differs from the template this plugin version ships; delete it and run /starter lead to take the new one, or keep yours.`, "info");
+			}
+		} catch {
+			// A vault that cannot be read right now (iCloud) must not break the session start.
+		}
 	});
 
-	pi.on("input", (event, ctx) => {
+	pi.on("input", async (event, ctx) => {
 		if (ctx.agent?.kind === "sub" || !leadReady(ctx.cwd)) return;
 		const command = COMMAND.exec(event.text);
 		if (!command) return;
 		const problem = refusal(command[1], command[2], leadDirFor(ctx.cwd)!, ctx);
-		if (!problem) return;
-		ctx.ui.notify(problem, "error");
-		return { handled: true };
+		if (problem) {
+			ctx.ui.notify(problem, "error");
+			return { handled: true };
+		}
+		// Returning to a story with an approved plan: bring status.md up to date; a failing gh must not hold the command.
+		const story = lead().story;
+		if (story && readStoryState(story.dir).plan) await recordStatus(pi, story, false).catch(() => undefined);
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
@@ -300,7 +332,7 @@ export default function leadExtension(pi: ExtensionAPI): void {
 			let text: string;
 			if (p.op === "approve") text = await approvePlan(ctx);
 			else if (p.op === "gate") text = await decideGates(ctx);
-			else if (p.op === "status") text = await recordStatus(pi);
+			else if (p.op === "status") text = await recordStatus(pi, activeStory(), true);
 			else text = await recordRetro(p, leadDir, ctx);
 			return { content: [{ type: "text", text }] };
 		},

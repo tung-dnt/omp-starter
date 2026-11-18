@@ -4,7 +4,7 @@ import * as path from "node:path";
 import leadExtension from "./lead";
 import { readStoryState } from "./lib/lead/artifacts";
 import { lead } from "./lib/lead/registry";
-import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE, SYSTEM_MAP_TEMPLATE } from "./lib/lead/templates";
+import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE, PR_FORMAT, SYSTEM_MAP_TEMPLATE } from "./lib/lead/templates";
 import { HOME } from "./lib/state";
 import { type FakeExec, type FakePi, fakeContext, fakePi, initGitRepo, resetHome, scriptedUi, seedKb, seedState, type UiScript, writeFiles } from "./test-harness";
 
@@ -38,7 +38,7 @@ function setup(files: Record<string, string> | null = { "hard-gates.md": HARD_GA
 		return { ui, ctx: fakeContext({ cwd: shop, ui }) };
 	};
 	const sub = (name: string) => fakeContext({ cwd: shop, hasUI: false, agent: { kind: "sub", name } });
-	const input = (text: string, ctx: object) => fake.emit("input", { type: "input", text, source: "interactive" }, ctx) as { handled: boolean } | undefined;
+	const input = (text: string, ctx: object) => fake.emit("input", { type: "input", text, source: "interactive" }, ctx) as Promise<{ handled: boolean } | undefined>;
 	const call = (toolName: string, toolInput: Record<string, unknown>, ctx: object) => fake.emit("tool_call", { toolName, input: toolInput }, ctx) as Verdict | undefined;
 	const writePlan = (summary = "Goal: add orders\nI1: unique index on id", tasks = "- T1: add the table") =>
 		writeFiles(storyDir, { "plan.md": `---\nrepos:\n  - ${shop}\n---\n\n## Summary\n${summary}\n\n## Tasks\n${tasks}\n` });
@@ -48,17 +48,17 @@ function setup(files: Record<string, string> | null = { "hard-gates.md": HARD_GA
 /** `/story S1`, a plan, and the lead's yes. */
 async function approvedStory(exec?: FakeExec) {
 	const s = setup(undefined, exec);
-	s.input("/story S1", s.main().ctx);
+	await s.input("/story S1", s.main().ctx);
 	s.writePlan();
 	await s.fake.callTool("lead", { op: "approve" }, s.main({ confirm: [true] }).ctx);
 	return s;
 }
 
 describe("/story", () => {
-	test("is refused without a brief, naming the template; nothing is checked before /starter lead", () => {
+	test("is refused without a brief, naming the template; nothing is checked before /starter lead", async () => {
 		const s = setup({ "system-map.md": SYSTEM_MAP_TEMPLATE });
 		const { ui, ctx } = s.main();
-		expect(s.input("/story S1", ctx)).toEqual({ handled: true });
+		expect(await s.input("/story S1", ctx)).toEqual({ handled: true });
 		expect(ui.notifications).toEqual([
 			{
 				type: "error",
@@ -69,15 +69,15 @@ describe("/story", () => {
 
 		resetHome();
 		const bare = setup(null);
-		expect(bare.input("/story S1", bare.main().ctx)).toBeUndefined();
+		expect(await bare.input("/story S1", bare.main().ctx)).toBeUndefined();
 	});
 
-	test("is refused without an id, with an incomplete brief, or without a system map", () => {
+	test("is refused without an id, with an incomplete brief, or without a system map", async () => {
 		const s = setup({ "stories/S1/brief.md": BRIEF_TEMPLATE, "stories/S2/brief.md": BRIEF });
 		const { ui, ctx } = s.main();
-		expect(s.input("/story", ctx)).toEqual({ handled: true });
-		expect(s.input("/story S1", ctx)).toEqual({ handled: true });
-		expect(s.input("/story S2", ctx)).toEqual({ handled: true });
+		expect(await s.input("/story", ctx)).toEqual({ handled: true });
+		expect(await s.input("/story S1", ctx)).toEqual({ handled: true });
+		expect(await s.input("/story S2", ctx)).toEqual({ handled: true });
 		expect(ui.notifications.map(n => n.message)).toEqual([
 			"lead: usage: /story <id>, where lead/stories/<id>/brief.md is your brief",
 			expect.stringContaining('brief: missing or empty section "## Goal"; brief: missing or empty section "## Success criteria"'),
@@ -85,21 +85,21 @@ describe("/story", () => {
 		]);
 	});
 
-	test("with a brief and a map makes the story active, also when invoked through the plugin namespace", () => {
+	test("with a brief and a map makes the story active, also when invoked through the plugin namespace", async () => {
 		const s = setup();
-		expect(s.input("/story S1", s.main().ctx)).toBeUndefined();
+		expect(await s.input("/story S1", s.main().ctx)).toBeUndefined();
 		expect(lead().story).toMatchObject({ id: "S1", mode: "sync", invariants: [{ id: "I1", text: "inserts are idempotent on id" }] });
 
 		lead().story = undefined;
-		expect(s.input("/agent-skills:story S1", s.main().ctx)).toBeUndefined();
+		expect(await s.input("/agent-skills:story S1", s.main().ctx)).toBeUndefined();
 		expect(lead().story?.id).toBe("S1");
 	});
 
-	test("other commands and subagent input are left alone", () => {
+	test("other commands and subagent input are left alone", async () => {
 		const s = setup({});
-		expect(s.input("/storybook S1", s.main().ctx)).toBeUndefined();
-		expect(s.input("fix the /story command", s.main().ctx)).toBeUndefined();
-		expect(s.input("/story", s.sub("task"))).toBeUndefined();
+		expect(await s.input("/storybook S1", s.main().ctx)).toBeUndefined();
+		expect(await s.input("fix the /story command", s.main().ctx)).toBeUndefined();
+		expect(await s.input("/story", s.sub("task"))).toBeUndefined();
 	});
 });
 
@@ -107,10 +107,10 @@ describe("context injection", () => {
 	const start = (fake: FakePi, ctx: object, systemPrompt = ["base"]) =>
 		fake.emit("before_agent_start", { type: "before_agent_start", reason: "prompt", prompt: "", systemPrompt }, ctx) as { systemPrompt: string[] } | undefined;
 
-	test("the main session and building subagents get the story block; scouts do not; it is added once", () => {
+	test("the main session and building subagents get the story block; scouts do not; it is added once", async () => {
 		const s = setup();
 		expect(start(s.fake, s.main().ctx)).toBeUndefined();
-		s.input("/story S1", s.main().ctx);
+		await s.input("/story S1", s.main().ctx);
 
 		const block = start(s.fake, s.main().ctx)!.systemPrompt[1];
 		expect(block).toStartWith("# Lead story S1 (sync mode)\n\nPlan: NOT approved: repository edits are blocked");
@@ -127,23 +127,23 @@ describe("context injection", () => {
 });
 
 describe("the single plan approval", () => {
-	test("before it, repository edits and /build are refused; the plan file can be written", () => {
+	test("before it, repository edits and /build are refused; the plan file can be written", async () => {
 		const s = setup();
 		const { ui, ctx } = s.main();
-		s.input("/story S1", ctx);
+		await s.input("/story S1", ctx);
 		expect(s.call("write", { path: "src/a.ts" }, ctx)).toEqual({
 			block: true,
 			reason: `lead: the plan for S1 is not approved yet; write ${s.storyDir}/plan.md and call the lead tool with op "approve".`,
 		});
 		expect(s.call("read", { path: "src/a.ts" }, ctx)).toBeUndefined();
 		expect(s.call("write", { path: path.join(s.storyDir, "plan.md") }, ctx)).toBeUndefined();
-		expect(s.input("/build S1", ctx)).toEqual({ handled: true });
+		expect(await s.input("/build S1", ctx)).toEqual({ handled: true });
 		expect(ui.notifications.at(-1)?.message).toBe("lead: the plan for S1 is not approved; run /story S1.");
 	});
 
 	test("shows the summary and repos to the lead; a yes unblocks edits and /build, and fences other repositories", async () => {
 		const s = setup();
-		s.input("/story S1", s.main().ctx);
+		await s.input("/story S1", s.main().ctx);
 		s.writePlan();
 		const { ui, ctx } = s.main({ confirm: [true] });
 		expect((await s.fake.callTool("lead", { op: "approve" }, ctx)).text).toBe("plan approved; building may start (/build S1)");
@@ -151,7 +151,7 @@ describe("the single plan approval", () => {
 		expect(readStoryState(s.storyDir).plan?.digest).toMatch(/^[0-9a-f]{64}$/);
 
 		expect(s.call("write", { path: "src/a.ts" }, ctx)).toBeUndefined();
-		expect(s.input("/build", ctx)).toBeUndefined();
+		expect(await s.input("/build", ctx)).toBeUndefined();
 		expect(s.call("read", { path: path.join(s.other, "src/b.ts") }, ctx)).toEqual({
 			block: true,
 			reason: "lead fence: other is not in the plan's repos (shop). If the work needs it, stop and report the gap to the lead.",
@@ -163,7 +163,7 @@ describe("the single plan approval", () => {
 
 	test("a no records nothing", async () => {
 		const s = setup();
-		s.input("/story S1", s.main().ctx);
+		await s.input("/story S1", s.main().ctx);
 		s.writePlan();
 		expect((await s.fake.callTool("lead", { op: "approve" }, s.main({ confirm: [false] }).ctx)).text).toBe("plan NOT approved; revise it with the lead and call approve again");
 		expect(readStoryState(s.storyDir).plan).toBeNull();
@@ -198,7 +198,7 @@ describe("the single plan approval", () => {
 		const s = setup();
 		const { ctx } = s.main();
 		await expect(s.fake.callTool("lead", { op: "approve" }, ctx)).rejects.toThrow("lead: no active story; the lead starts one with /story <id>");
-		s.input("/story S1", ctx);
+		await s.input("/story S1", ctx);
 		s.writePlan("Goal: add orders");
 		await expect(s.fake.callTool("lead", { op: "approve" }, ctx)).rejects.toThrow("lead: plan does not mention invariant(s) I1");
 		await expect(s.fake.callTool("lead", { op: "approve" }, s.sub("task-builder"))).rejects.toThrow("only the main session");
@@ -210,13 +210,13 @@ describe("/build", () => {
 		const s = await approvedStory();
 		lead().story = undefined;
 		const { ui, ctx } = s.main();
-		expect(s.input("/build", ctx)).toEqual({ handled: true });
-		expect(s.input("/build S9", ctx)).toEqual({ handled: true });
+		expect(await s.input("/build", ctx)).toEqual({ handled: true });
+		expect(await s.input("/build S9", ctx)).toEqual({ handled: true });
 		expect(ui.notifications.map(n => n.message)).toEqual([
 			"lead: /build needs a story id",
 			"lead: no story S9; write its brief and run /story S9, or use /task for a small change.",
 		]);
-		expect(s.input("/build S1", ctx)).toBeUndefined();
+		expect(await s.input("/build S1", ctx)).toBeUndefined();
 		expect(lead().story?.id).toBe("S1");
 	});
 });
@@ -255,20 +255,34 @@ describe("status", () => {
 		expect(fs.existsSync(path.join(s.storyDir, "status.md"))).toBe(false);
 		expect(readStoryState(s.storyDir).status).toBeNull();
 	});
+
+	test("returning to an approved story with /build refreshes status.md and keeps the story active, even when merged", async () => {
+		const s = await approvedStory(github('[{"url":"u","state":"MERGED"}]'));
+		expect(fs.existsSync(path.join(s.storyDir, "status.md"))).toBe(false);
+		expect(await s.input("/build S1", s.main().ctx)).toBeUndefined();
+		expect(fs.readFileSync(path.join(s.storyDir, "status.md"), "utf8")).toStartWith("---\nstatus: done\n");
+		expect(lead().story?.id).toBe("S1");
+	});
+
+	test("a failing gh does not hold /build back", async () => {
+		const s = await approvedStory(github("", 1, "gh: not logged in"));
+		expect(await s.input("/build S1", s.main().ctx)).toBeUndefined();
+		expect(fs.existsSync(path.join(s.storyDir, "status.md"))).toBe(false);
+	});
 });
 
 describe("builders", () => {
 	const spawn = (fake: FakePi, agent: string, ctx: object) =>
 		fake.emit("before_subagent_spawn", { type: "before_subagent_spawn", agent, invocationKind: "task", patterns: [] }, ctx) as Verdict | undefined;
 
-	test("are capped at limits.builders while a story is active; scouts are not counted or capped", () => {
+	test("are capped at limits.builders while a story is active; scouts are not counted or capped", async () => {
 		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE.replace("builders: 2", "builders: 1"), "system-map.md": SYSTEM_MAP_TEMPLATE, "stories/S1/brief.md": BRIEF });
 		const { ctx } = s.main();
 		const builder = fakeContext({ cwd: s.shop, hasUI: false, agent: { kind: "sub", id: "a1", name: "task-builder" } });
 		s.fake.emit("agent_start", { type: "agent_start" }, builder);
 		expect(spawn(s.fake, "task-builder", ctx)).toBeUndefined();
 
-		s.input("/story S1", ctx);
+		await s.input("/story S1", ctx);
 		expect(spawn(s.fake, "task-builder", ctx)).toEqual({ block: true, reason: "lead: 1 builders already running (limits.builders = 1 in hard-gates.md); wait for one to finish." });
 		expect(spawn(s.fake, "scout", ctx)).toBeUndefined();
 
@@ -278,10 +292,10 @@ describe("builders", () => {
 });
 
 describe("async mode", () => {
-	test("tells the lead when the main session stops, not when a subagent or a continuing turn ends", () => {
+	test("tells the lead when the main session stops, not when a subagent or a continuing turn ends", async () => {
 		const s = setup({ "system-map.md": SYSTEM_MAP_TEMPLATE, "stories/S1/brief.md": BRIEF.replace("mode: sync", "mode: async") });
 		const { ui, ctx } = s.main();
-		s.input("/story S1", ctx);
+		await s.input("/story S1", ctx);
 		s.fake.emit("agent_end", { type: "agent_end", messages: [] }, s.sub("task-builder"));
 		s.fake.emit("agent_end", { type: "agent_end", messages: [], willContinue: true }, ctx);
 		expect(ui.notifications).toEqual([]);
@@ -324,7 +338,7 @@ describe("the system map", () => {
 	test("an agent's edit is announced to the lead and recorded on the story, so the PR has to describe it", async () => {
 		const s = setup();
 		const { ui, ctx } = s.main();
-		s.input("/story S1", ctx);
+		await s.input("/story S1", ctx);
 		const map = path.join(s.leadDir, "system-map.md");
 		await edited(s.fake, map, ctx, true);
 		await edited(s.fake, path.join(s.storyDir, "plan.md"), ctx);
@@ -341,5 +355,33 @@ describe("the system map", () => {
 		fs.writeFileSync(path.join(s.leadDir, "system-map.md"), "```yaml\nservices: nope\n```\n");
 		const result = await edited(s.fake, path.join(s.leadDir, "system-map.md"), s.main().ctx);
 		expect(result?.additionalContext).toBe("[lead] system map ~/kb/lead/system-map.md: services: expected a list. Fix system-map.md now: /story and the structural gate read it.");
+	});
+});
+
+describe("session start", () => {
+	test("rewrites a pr-format.md that lags the plugin; a brief template that differs is reported once and left alone", () => {
+		const s = setup({ "hard-gates.md": "the lead's gates\n", "pr-format.md": "an older format\n", "brief-template.md": "the lead's own template\n" });
+		const start = () => {
+			const { ui, ctx } = s.main();
+			s.fake.emit("session_start", { type: "session_start" }, ctx);
+			return ui.notifications.map(n => n.message);
+		};
+		expect(start()).toEqual(["lead: ~/kb/lead/brief-template.md differs from the template this plugin version ships; delete it and run /starter lead to take the new one, or keep yours."]);
+		expect(fs.readFileSync(path.join(s.leadDir, "pr-format.md"), "utf8")).toBe(PR_FORMAT);
+		expect(fs.readFileSync(path.join(s.leadDir, "brief-template.md"), "utf8")).toBe("the lead's own template\n");
+		expect(fs.readFileSync(path.join(s.leadDir, "hard-gates.md"), "utf8")).toBe("the lead's gates\n");
+		expect(start()).toEqual([]);
+	});
+
+	test("does nothing before /starter lead, and resets the story of the previous session", async () => {
+		const s = setup();
+		await s.input("/story S1", s.main().ctx);
+		s.fake.emit("session_start", { type: "session_start" }, s.main().ctx);
+		expect(lead().story).toBeUndefined();
+
+		resetHome();
+		const bare = setup(null);
+		bare.fake.emit("session_start", { type: "session_start" }, bare.main().ctx);
+		expect(fs.existsSync(bare.leadDir)).toBe(false);
 	});
 });

@@ -393,3 +393,30 @@ export function initLead(leadDir: string): { created: string[]; kept: string[] }
 	}
 	return { created, kept };
 }
+
+/**
+ * Brings the generated files in step with this plugin version at session start. pr-format.md describes checks that
+ * live in code, so it is rewritten when it differs. brief-template.md may be the lead's own: it is never overwritten,
+ * and a difference is reported once per shipped template (a marker outside the vault remembers which one was reported).
+ */
+export function syncGenerated(leadDir: string): { prFormatRewritten: boolean; briefTemplateDiffers: boolean } {
+	const read = (file: string): string | undefined => {
+		try {
+			return fs.readFileSync(file, "utf8");
+		} catch {
+			return undefined;
+		}
+	};
+	const prFormat = path.join(leadDir, "pr-format.md");
+	const prFormatRewritten = read(prFormat) !== PR_FORMAT;
+	if (prFormatRewritten) atomicWrite(prFormat, PR_FORMAT);
+
+	const template = read(path.join(leadDir, "brief-template.md"));
+	if (template === undefined || template === BRIEF_TEMPLATE) return { prFormatRewritten, briefTemplateDiffers: false };
+	const marker = path.join(HOME, ".omp", "agent", "lead-cache", `brief-template-${hash("sha1", leadDir).slice(0, 16)}.seen`);
+	const shipped = hash("sha1", BRIEF_TEMPLATE);
+	if (read(marker) === shipped) return { prFormatRewritten, briefTemplateDiffers: false };
+	fs.mkdirSync(path.dirname(marker), { recursive: true });
+	atomicWrite(marker, shipped);
+	return { prFormatRewritten, briefTemplateDiffers: true };
+}
