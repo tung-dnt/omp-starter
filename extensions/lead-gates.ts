@@ -73,7 +73,7 @@ export default function leadGates(pi: ExtensionAPI): void {
 			warned = error;
 			ctx.ui.notify(`lead: ${error}`, "warning");
 		}
-		const structure = await Promise.all((publishing ?? []).filter(p => p.commit).map(p => checkStructure(p.repo, layout.policy)));
+		const structure = await Promise.all((publishing ?? []).filter(p => p.commit).map(p => checkStructure(p.repo, layout.notes)));
 		const stale = structure.find(s => s.block);
 		if (stale) return { block: true, reason: stale.block };
 		const hits = [

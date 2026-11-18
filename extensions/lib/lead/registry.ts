@@ -32,6 +32,10 @@ export interface LeadRegistry {
 	runningBuilders: Set<string>;
 	/** Whether the "plan changed after approval" notice was already shown. */
 	notifiedPlanChange: boolean;
+	/** The machine part of each project note a running write/edit call targets, by note name, as it was before the call. */
+	noteBefore: Map<string, string>;
+	/** Names of the project notes whose services block an agent changed in this session. */
+	editedNotes: Set<string>;
 }
 
 const KEY = Symbol.for("omp-starter.lead");
@@ -43,6 +47,8 @@ const empty = (sessionId?: string): LeadRegistry => ({
 	pending: new Map(),
 	runningBuilders: new Set(),
 	notifiedPlanChange: false,
+	noteBefore: new Map(),
+	editedNotes: new Set(),
 });
 
 export function lead(): LeadRegistry {

@@ -22,7 +22,7 @@ beforeEach(() => {
 const story: ActiveStory = {
 	id: "S1",
 	dir: path.join(leadDir, "stories", "S1"),
-	layout: { policy: leadDir, stories: path.join(leadDir, "stories"), templates: leadDir },
+	layout: { policy: leadDir, stories: path.join(leadDir, "stories"), templates: leadDir, notes: path.join(leadDir, "..", "projects") },
 	mode: "sync",
 	invariants: [{ id: "I1", text: "inserts are idempotent on id" }],
 };
@@ -104,11 +104,11 @@ describe("sections the diff calls for", () => {
 		expect(check(BASE + ddia({ 2: proven.replace("stock never", "stock sometimes") }), { changed })).toEqual(["test reference src/orders.test.ts::stock sometimes goes negative not found"]);
 	});
 
-	test("a contract change, a changed edge list or an agent's edit of the system map needs the system-map diff", () => {
+	test("a contract change, a changed edge list or an agent's change to a project note's services needs the system-map diff", () => {
 		expect(check(BASE + ddia(), { changed: ["api/openapi.yml"] })).toEqual(["Missing section: ## System-map diff"]);
 		expect(check(BASE, { changed: ["docs/arch/edges.json"] })).toEqual(["Missing section: ## System-map diff"]);
 		expect(check(BASE, { mapEdited: true })).toEqual(["Missing section: ## System-map diff"]);
-		expect(check(`${BASE}\n\n## System-map diff\n`, { mapEdited: true })).toEqual(["System-map diff: say what changed in system-map.md, one line per service"]);
+		expect(check(`${BASE}\n\n## System-map diff\n`, { mapEdited: true })).toEqual(["System-map diff: say what changed in the project note's services, one line per service"]);
 		expect(check(`${BASE}\n\n## System-map diff\n- api: now calls worker`, { mapEdited: true })).toEqual([]);
 	});
 

@@ -85,7 +85,7 @@ describe("collectEdges", () => {
 
 describe("structureViolations", () => {
 	test("names an undeclared cross-service call and a write to a table the service does not own", () => {
-		expect(structureViolations(EDGES, SERVICES)).toEqual(["cross-service edge api -> worker not in system map", "api writes table payments it does not own"]);
+		expect(structureViolations(EDGES, SERVICES)).toEqual(["cross-service edge api -> worker not in the project note", "api writes table payments it does not own"]);
 		expect(structureViolations(EDGES, [{ ...SERVICES[0], calls: ["worker"], ownsTables: ["Orders", "Payments"] }, SERVICES[1]])).toEqual([]);
 	});
 });
@@ -103,7 +103,7 @@ describe("renderFiles", () => {
 });
 
 describe("the command line", () => {
-	test("generate writes docs/arch from the system map, check passes right after and fails after a new import, diff shows the new edge", () => {
+	test("generate writes docs/arch from the project note, check passes right after and fails after a new import, diff shows the new edge", () => {
 		const generated = cli("generate", repo, "--map", map);
 		expect(generated.err).toBe("");
 		expect(generated.code).toBe(0);
@@ -128,7 +128,7 @@ describe("the command line", () => {
 		expect(cli("generate", repo)).toMatchObject({ code: 2, err: "arch-graph: --map is required for generate\n" });
 		const lonely = fs.mkdtempSync(path.join(os.tmpdir(), "arch-graph-lonely-"));
 		initGitRepo(lonely, "git@github.com:acme/lonely.git");
-		expect(Bun.spawnSync(["bun", SCRIPT, "generate", lonely, "--map", map]).stderr.toString()).toBe("arch-graph: repo lonely has no service in the system map\n");
+		expect(Bun.spawnSync(["bun", SCRIPT, "generate", lonely, "--map", map]).stderr.toString()).toBe(`arch-graph: ${map} lists no service for repo lonely\n`);
 		expect(cli("frobnicate", repo).code).toBe(2);
 	});
 });

@@ -44,7 +44,7 @@ function setup(gatesText: string | null = GATES) {
 	};
 	const sub = fakeContext({ cwd: repo, hasUI: false, agent: { kind: "sub", name: "task-builder" } });
 	const call = (toolName: string, input: Record<string, unknown>, ctx: object) => gates.emit("tool_call", { toolName, input }, ctx) as Promise<Verdict | undefined>;
-	return { leadDir, repo, tool, main, sub, call };
+	return { leadDir, notesDir: path.join(kb.root, "projects"), repo, tool, main, sub, call };
 }
 
 const MIGRATION = "db/migrations/002.sql";
@@ -104,7 +104,7 @@ describe("a subagent hitting a gate", () => {
 
 	test("in an async story the main session is not asked either: the write is queued, the lead told once, and decided later in one sitting", async () => {
 		const s = setup();
-		const layout = { policy: s.leadDir, stories: path.join(s.leadDir, "stories"), templates: s.leadDir };
+		const layout = { policy: s.leadDir, stories: path.join(s.leadDir, "stories"), templates: s.leadDir, notes: s.notesDir };
 		lead().story = { id: "S1", dir: path.join(layout.stories, "S1"), layout, mode: "async", invariants: [] };
 		const { ui, ctx } = s.main({ select: ["Approve"] });
 		const queued = await s.call("write", { path: MIGRATION }, ctx);
@@ -223,7 +223,7 @@ describe("docs/arch at commit time", () => {
 
 	async function archRepo(source: string, fresh: boolean) {
 		const s = setup();
-		writeFiles(s.leadDir, { "system-map.md": "```yaml\nservices:\n  - { name: api, repo: shop, path: \"\", owns_tables: [orders] }\n```\n" });
+		writeFiles(s.notesDir, { "shop.md": "```yaml\nservices:\n  - { name: api, path: \"\", owns_tables: [orders] }\n```\n" });
 		writeFiles(s.repo, { "src/a.ts": source, "docs/arch/services.json": `${JSON.stringify([OWNER])}\n` });
 		if (fresh) {
 			const edges = await collectEdges(s.repo, [OWNER]);
@@ -244,8 +244,8 @@ describe("docs/arch at commit time", () => {
 		const ok = await archRepo("export const a = 1;\ndb.insertInto('orders');\n", true);
 		expect(await ok.call("bash", { command: "git commit -m x" }, ok.main().ctx)).toBeUndefined();
 
-		// The lead's map now lets api call worker: services.json no longer matches it.
-		writeFiles(ok.leadDir, { "system-map.md": "```yaml\nservices:\n  - { name: api, repo: shop, path: \"\", owns_tables: [orders], calls: [worker] }\n```\n" });
+		// The project note now lets api call worker: services.json no longer matches it.
+		writeFiles(ok.notesDir, { "shop.md": "```yaml\nservices:\n  - { name: api, path: \"\", owns_tables: [orders], calls: [worker] }\n```\n" });
 		expect((await ok.call("bash", { command: "git commit -m x" }, ok.main().ctx))?.reason).toStartWith("lead: docs/arch is stale (services.json); run bun ");
 
 		resetHome();

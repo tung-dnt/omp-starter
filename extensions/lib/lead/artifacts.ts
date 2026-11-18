@@ -1,6 +1,6 @@
-// Lead-driven workflow artifacts in the knowledge base serving a folder: the lead's hard gates, system map and story
-// briefs, the agent's plan, and the state the harness records (approvals, gate decisions, status). They live under
-// `<kb>/lead/` unless the knowledge base's `lead` setting names other folders (LeadLayout).
+// Lead-driven workflow artifacts in the knowledge base serving a folder: the lead's hard gates and story briefs, the
+// agent's plan, each repository's project note, and the state the harness records (approvals, gate decisions, status).
+// They live under `<kb>/lead/` unless the knowledge base's `lead` setting names other folders (LeadLayout).
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -8,21 +8,23 @@ import * as path from "node:path";
 import { atomicWrite, withFileLock } from "../file-lock";
 import { forms, inside, resolveKb, within } from "../kb-sources";
 import { splitNote } from "../memory-notes";
-import { repoRoot } from "../repo";
+import { repoRoot, resolveRepoName } from "../repo";
 import { expandHome, HOME, type KbSource, tildify } from "../state";
-import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE, PR_FORMAT, SYSTEM_MAP_TEMPLATE } from "./templates";
+import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE, PR_FORMAT } from "./templates";
 
 const hash = (algorithm: "sha1" | "sha256", text: string): string => crypto.createHash(algorithm).update(text).digest("hex");
 const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** Absolute folders of the lead files of one knowledge base. */
 export interface LeadLayout {
-	/** hard-gates.md, system-map.md, pr-format.md and retro-log.md. */
+	/** hard-gates.md, pr-format.md and retro-log.md, next to the lead's own policy notes. */
 	policy: string;
 	/** One folder per story: `<stories>/<id>/` holds brief.md, plan.md, state.json and status.md. */
 	stories: string;
 	/** brief-template.md. */
 	templates: string;
+	/** One note per repository, `<notes>/<repo>.md`: always `<kb>/projects`, the place the knowledge base's AGENTS.md names. */
+	notes: string;
 }
 
 /** `lead/`, `lead/stories/` and `lead/` of the knowledge base, each replaced by the folder the source's `lead` setting names. */
@@ -33,6 +35,7 @@ export function leadLayout(source: Pick<KbSource, "kbRef" | "lead">): LeadLayout
 		policy: at(source.lead?.policy, "lead"),
 		stories: at(source.lead?.stories, path.join("lead", "stories")),
 		templates: at(source.lead?.templates, "lead"),
+		notes: path.join(kb, "projects"),
 	};
 }
 
@@ -48,7 +51,8 @@ export function leadReady(layout: LeadLayout): boolean {
 }
 
 /** Whether `p` is in one of the layout's folders. */
-export const inLead = (layout: LeadLayout, p: string): boolean => [layout.policy, layout.stories, layout.templates].some(dir => inside(p, dir));
+export const inLead = (layout: LeadLayout, p: string): boolean =>
+	[layout.policy, layout.stories, layout.templates, layout.notes].some(dir => inside(p, dir));
 
 // ── YAML blocks ──────────────────────────────────────────────────────────────
 
@@ -171,7 +175,7 @@ export function readHardGates(policyDir: string): { gates?: HardGates; error?: s
 	return { gates };
 }
 
-// ── System map ───────────────────────────────────────────────────────────────
+// ── Project notes ────────────────────────────────────────────────────────────
 
 export interface Service {
 	name: string;
@@ -185,23 +189,44 @@ export interface Service {
 	calls: string[];
 }
 
-export function readSystemMap(policyDir: string): { services?: Service[]; text?: string; error?: string } {
-	const file = path.join(policyDir, "system-map.md");
+/** The machine-readable part of a repository's note: its first ```yaml block that has `services:`. */
+export interface ProjectNote {
+	services: Service[];
+	/** Standing "must never break" lines of the project: context for the agent, not checked. */
+	invariants: string[];
+	/** The block as written. */
+	block: string;
+}
+
+/** Name of a repository's project note: the basename of its origin URL, else of its folder. */
+export const noteName = (repo: string): string => resolveRepoName(repo) ?? path.basename(repo);
+
+/** The project-note names of `repos` (roots), each once: worktrees of one repository share a note. */
+export const noteNames = (repos: string[]): string[] => [...new Set(repos.map(noteName))];
+
+const YAML_BLOCKS = /^```ya?ml[^\n]*\n([\s\S]*?)^```[ \t]*$/gm;
+
+/** What `<notesDir>/<repoName>.md` says about the repository's services, or why it cannot be used. */
+export function readProjectNote(notesDir: string, repoName: string): { note?: ProjectNote; error?: string } {
+	const file = path.join(notesDir, `${repoName}.md`);
 	let text: string;
 	try {
 		text = fs.readFileSync(file, "utf8");
 	} catch {
-		return { error: `system map missing: ${tildify(file)} (run /starter lead)` };
+		return { error: `project note missing: ${tildify(file)}` };
 	}
 	try {
-		const doc = yamlBlock(text);
-		if (!Array.isArray(doc.services)) throw new Error("services: expected a list");
+		const block = Array.from(text.matchAll(YAML_BLOCKS), match => match[1]).find(body => /^services\s*:/m.test(body));
+		if (block === undefined) throw new Error("no ```yaml block with services:");
+		const doc: unknown = Bun.YAML.parse(block);
+		if (!isObject(doc) || !Array.isArray(doc.services)) throw new Error("services: expected a list");
 		const services = doc.services.map((raw: unknown, i): Service => {
-			if (!isObject(raw) || typeof raw.name !== "string" || typeof raw.repo !== "string") throw new Error(`services[${i}]: needs name and repo`);
+			if (!isObject(raw) || typeof raw.name !== "string") throw new Error(`services[${i}]: needs a name`);
+			if (raw.repo !== undefined && raw.repo !== repoName) throw new Error(`service ${raw.name}.repo: this note describes ${repoName}; leave repo out`);
 			if (raw.path !== undefined && typeof raw.path !== "string") throw new Error(`service ${raw.name}.path: expected a string`);
 			return {
 				name: raw.name,
-				repo: raw.repo,
+				repo: repoName,
 				path: raw.path ?? "",
 				ownsTables: strings(raw.owns_tables, `service ${raw.name}.owns_tables`, []),
 				publishes: strings(raw.publishes, `service ${raw.name}.publishes`, []),
@@ -209,10 +234,59 @@ export function readSystemMap(policyDir: string): { services?: Service[]; text?:
 				calls: strings(raw.calls, `service ${raw.name}.calls`, []),
 			};
 		});
-		return { services, text };
+		return { note: { services, invariants: strings(doc.invariants, "invariants", []), block: block.trimEnd() } };
 	} catch (error) {
-		return { text, error: `system map ${tildify(file)}: ${message(error)}` };
+		return { error: `project note ${tildify(file)}: ${message(error)}` };
 	}
+}
+
+/** One problem per repository of `repos` (roots) whose project note is missing or has no usable services block. */
+export function undescribedRepos(layout: LeadLayout, repos: string[]): string[] {
+	return noteNames(repos).flatMap(name => readProjectNote(layout.notes, name).error ?? []);
+}
+
+// ── Note freshness ───────────────────────────────────────────────────────────
+
+/** Today as YYYY-MM-DD in local time, the form a note's `updated:` is written in. */
+export const today = (): string => new Date().toLocaleDateString("en-CA");
+
+/** A note's `updated:` date (YYYY-MM-DD) and how many "(inferred — verify)" markers it still carries. */
+export function noteAge(text: string): { updated?: string; unverified: number } {
+	let updated: unknown;
+	try {
+		updated = frontmatter(text).data.updated;
+	} catch {
+		// Frontmatter that is not YAML has no date.
+	}
+	const day = updated instanceof Date ? updated.toISOString() : typeof updated === "string" ? updated : "";
+	return { updated: /^\d{4}-\d{2}-\d{2}/.exec(day)?.[0], unverified: text.match(/\(inferred\b[^)]*\)/gi)?.length ?? 0 };
+}
+
+/** What the lead sees of one note before approving against it: its age and what in it nobody has verified. */
+function freshnessLine(file: string, now: string): string {
+	let text: string;
+	try {
+		text = fs.readFileSync(file, "utf8");
+	} catch {
+		return `${path.basename(file, ".md")}: missing`;
+	}
+	const { updated, unverified } = noteAge(text);
+	const age = updated ? `updated ${updated} (${Math.round((Date.parse(now) - Date.parse(updated)) / 86_400_000)} days ago)` : "no updated: date";
+	return `${path.basename(file, ".md")}: ${age}, ${unverified} unverified`;
+}
+
+/** Freshness of the project notes of `repos` (roots), then of the lead's own notes in the policy folder. Shown, never enforced. */
+export function freshnessLines(layout: LeadLayout, repos: string[], now = today()): string[] {
+	let policyNotes: string[] = [];
+	try {
+		policyNotes = fs
+			.readdirSync(layout.policy)
+			.filter(name => name.endsWith(".md") && !POLICY_OWNED[name] && name !== "brief-template.md")
+			.sort();
+	} catch {
+		// No policy folder yet: nothing to report.
+	}
+	return [...noteNames(repos).map(name => path.join(layout.notes, `${name}.md`)), ...policyNotes.map(name => path.join(layout.policy, name))].map(file => freshnessLine(file, now));
 }
 
 // ── Brief and plan ───────────────────────────────────────────────────────────
@@ -356,7 +430,7 @@ export interface StoryState {
 	/** Gate decisions by gate key (`<repo root>::<repo-relative path>`). */
 	gates: Record<string, GateDecision>;
 	status: { value: "in-progress" | "in-review" | "done"; prs: { repo: string; url: string; state: string }[]; at: string } | null;
-	/** When an agent last edited system-map.md during the story; the PR body must then describe the change. */
+	/** When an agent last changed a project note's services block during the story; the PR body must then describe the change. */
 	mapEditedAt: string | null;
 }
 
@@ -396,7 +470,7 @@ const STORY_OWNED = /^[^/]+\/(?:brief\.md|state\.json|status\.md)$/;
 const relativeTo = (dir: string, absPath: string): string[] =>
 	forms(absPath).flatMap(p => forms(dir).filter(d => within(p, d)).map(d => path.relative(d, p).split(path.sep).join("/")));
 
-/** Whether `absPath` is a lead file agents must not write with write/edit (the plan and the system map are theirs to keep current). */
+/** Whether `absPath` is a lead file agents must not write with write/edit (the plan and the project notes are theirs to keep current). */
 export function protectedLeadPath(layout: LeadLayout, absPath: string): boolean {
 	return (
 		relativeTo(layout.policy, absPath).some(rel => POLICY_OWNED[rel]) ||
@@ -412,7 +486,6 @@ export function initLead(layout: LeadLayout): { created: string[]; kept: string[
 	const kept: string[] = [];
 	const files: [dir: string, name: string, content: string, always: boolean][] = [
 		[layout.policy, "hard-gates.md", HARD_GATES_TEMPLATE, false],
-		[layout.policy, "system-map.md", SYSTEM_MAP_TEMPLATE, false],
 		[layout.templates, "brief-template.md", BRIEF_TEMPLATE, false],
 		[layout.policy, "pr-format.md", PR_FORMAT, true],
 	];

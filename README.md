@@ -227,7 +227,7 @@ You are the tech lead; agents are contractors with no context beyond what you gi
 | File (default folder `<kb>/lead/`) | Written by | Kept current by |
 |---|---|---|
 | `hard-gates.md` | you | You. Read on every tool call; an invalid edit falls back to the last good copy and tells you once. |
-| `system-map.md` | you, then agents | Agents edit it when the structure changes. Each edit notifies you and must be described in the PR's `## System-map diff`. |
+| `<kb>/projects/<repo>.md` (always this folder) | you, then agents | Agents keep its `services:` block true as the structure changes. Each change to the block notifies you and must be described in the PR's `## System-map diff`. See [Project notes](#project-notes). |
 | `stories/<id>/brief.md` | you | You. Goal, success criteria, boundaries, invariants (`- I1: …`), must-never-break, out of scope; `mode: async\|sync`. |
 | `stories/<id>/plan.md` | the agent | The agent replaces it as the approach changes: it states the current plan only, never a history. `repos:` plus a `## Summary` of at most 15 lines, then `## Tasks` and `## Decision log`. |
 | `stories/<id>/state.json` | the harness | On approval, each gate decision, each map edit, each status. |
@@ -238,19 +238,47 @@ You are the tech lead; agents are contractors with no context beyond what you gi
 
 What is enforced:
 
-- **Input check.** `/story <id>` is refused without a complete brief and a system map; `/build` is refused without an approved plan.
-- **Context.** The brief, system map and hard gates are added to the system prompt of the main session and of building and reviewing subagents.
-- **One approval.** The agent calls the `lead` tool (`op: "approve"`); you answer a confirm dialog showing the plan's summary and repositories. Subagents cannot call it and no argument approves anything. The approval covers the plan's `repos:` and the brief's invariants and boundaries: a new repository, or your edit to those brief sections, needs approval again. The plan's summary and tasks are the agent's to replace.
+- **Input check.** `/story <id>` is refused without a complete brief; `/build` is refused without an approved plan, or when a repository in the plan has lost its project note.
+- **Context.** The brief, the hard gates and the project notes of the plan's repositories are added to the system prompt of the main session and of building and reviewing subagents.
+- **One approval.** The agent calls the `lead` tool (`op: "approve"`). It is refused until every repository in the plan has a project note with a `services:` block. You then answer a confirm dialog showing the plan's summary, its repositories and how fresh the notes are. Subagents cannot call it and no argument approves anything. The approval covers the plan's `repos:` and the brief's invariants and boundaries: a new repository, or your edit to those brief sections, needs approval again. The plan's summary and tasks are the agent's to replace.
 - **Fence.** No repository edits before approval; afterwards reads and writes outside the plan's repositories are blocked.
 - **Hard gates.** A write, commit, push or PR touching a gated path needs your decision. In `mode: sync` the main session asks you in a dialog (`Approve for story` / `Reject`). In `mode: async` (the template's default) nothing is asked mid-work: that one write is refused and queued, you are notified, and the agent carries on with other work; you decide the queue in one sitting when the agent calls `lead` with `op: "gate"`. A blocked subagent reports the gate to its parent in both modes. An unreadable `hard-gates.md` fails closed. Agents cannot edit `hard-gates.md`, briefs, or the harness's files.
 - **PR check.** `gh pr create|edit` and the github tool's `pr_create` are blocked unless the body has the decision log, an invariant checklist whose proving tests exist, and a risk summary with `file:line` pointers, plus the concurrency note, DDIA checklist, system-map diff and structural changes the diff calls for (`pr-format.md`).
-- **Structure.** `scripts/arch-graph.ts generate|check|diff` writes `docs/arch/` (code, cross-service, Serverless infra and table-write edges). A commit in a repo with `docs/arch/services.json` is blocked while it is stale against the code or against the system map's services for that repo. Undeclared cross-service calls or writes to tables another service owns become a `structure` gate. `templates/arch-graph.yml` is the matching CI check.
-- **Builders and notifications.** At most `limits.builders` task/task-builder/test-engineer agents run at once while a story is active. Gate stops, map edits, and in `async` mode every stop of the main session (with the number of queued gates) notify you through the UI, `OMP_STARTER_NOTIFY_CMD` (`sh -c`, text in `OMP_STARTER_NOTIFY_TEXT`) or a macOS notification; texts carry metadata only.
+- **Structure.** `scripts/arch-graph.ts generate|check|diff` writes `docs/arch/` (code, cross-service, Serverless infra and table-write edges). A commit in a repo with `docs/arch/services.json` is blocked while it is stale against the code or against the services in the repository's project note. Undeclared cross-service calls or writes to tables another service owns become a `structure` gate. `templates/arch-graph.yml` is the matching CI check.
+- **Builders and notifications.** At most `limits.builders` task/task-builder/test-engineer agents run at once while a story is active. Gate stops, changes to a project note's services, and in `async` mode every stop of the main session (with the number of queued gates) notify you through the UI, `OMP_STARTER_NOTIFY_CMD` (`sh -c`, text in `OMP_STARTER_NOTIFY_TEXT`) or a macOS notification; texts carry metadata only.
 - **Status and retro.** `lead` with `op: "status"` computes the story's state from `gh pr list`; `op: "retro"` logs an escaped bug with the cause you pick.
 
-Because agents may edit `system-map.md`, the structural gate checks code against a map the agent can change. What tells you is the notification on each edit and the required `## System-map diff` in the PR.
+Because agents may edit project notes, the structural gate checks code against services the agent can change. What tells you is the notification on each change, the mark in the approval dialog and the required `## System-map diff` in the PR.
 
 `bun scripts/lead-replay.ts <tasks.yml> [--runs 3] [--out file.md] --yes` replays real tasks in fresh worktrees with the harness on and off and tabulates pass rate, wall time and gate stops; without `--yes` it only prints how many runs it would spend.
+
+### Project notes
+
+The system map is not one file. Each repository has a note, `<kb>/projects/<repo>.md` (`<repo>` is the basename of its origin URL, so worktrees share it), and the harness reads the first `yaml` block in it that has `services:`:
+
+```yaml
+services:
+  - { name: orders-api, path: apps/api, owns_tables: [orders], publishes: [], consumes: [], calls: [billing] }
+invariants:
+  - Orders are never deleted
+```
+
+`path` is the service's folder in the repository (`""` for the root). `invariants` are the project's standing "must never break" lines: the agent sees them in every story that touches the repository, but nothing checks them. Put what must be proven in the brief's `## Invariants`.
+
+| Check | When | Effect |
+|---|---|---|
+| Every repository in the plan has a note with a `services:` block | plan approval, `/build` | Refused; the message names the notes and shows the block |
+| `docs/arch/` matches the code and the note's services | commit, in repositories that keep `docs/arch/` | Blocked while stale |
+| The PR describes a changed `services:` block | `gh pr create\|edit` | Blocked without `## System-map diff` |
+| An agent changed a `services:` block | after its write | You are notified; prose edits are silent |
+| A note's `updated:` date and its `(inferred — verify)` markers | approval dialog, story prompt | Shown, one line per note, for the plan's repositories and for your own notes in the policy folder |
+| An agent edited a note and left an old `updated:` date | after its write | The agent is told to set today's date |
+
+| Do | Don't |
+|---|---|
+| Let the agent draft a missing note while it plans; read it when the approval dialog marks it as changed. | Approve a plan whose note line says "changed in this session" without opening the note. |
+| Bump `updated:` when you have checked a note, and delete `(inferred — verify)` once a line is confirmed. | Treat the date as proof: only `docs/arch/` is compared with the code. |
+| Give a gate that applies to one repository `repos: [name]` in `hard-gates.md`. | Put gates in a project note: agents can edit it. |
 
 ### Lead folders
 
@@ -263,7 +291,7 @@ A knowledge base that already has folders for this material can keep using them.
 | Key | Holds | Default |
 |---|---|---|
 | `stories` | One folder per story: `<id>/brief.md`, `plan.md`, `state.json`, `status.md` | `lead/stories` |
-| `policy` | `hard-gates.md`, `system-map.md`, `pr-format.md`, `retro-log.md` | `lead` |
+| `policy` | `hard-gates.md`, `pr-format.md`, `retro-log.md` | `lead` |
 | `templates` | `brief-template.md` | `lead` |
 
 Folders are relative to the knowledge base, and a key you leave out keeps its default. In a folder shared with other notes, agents are kept from writing only the lead's files (`hard-gates.md`, `pr-format.md`, `retro-log.md`, `brief-template.md`, and a story's `brief.md`, `state.json` and `status.md`); the other notes stay writable. `/starter kb` keeps the setting when you set the same knowledge base up again.
@@ -305,6 +333,13 @@ It prints one markdown table per metric, for main sessions and subagents separat
 Limits: M3 and M1's scope check use today's vault, so notes moved later are judged at their new place. A session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names, tool names and note slugs; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder or the vault; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.36.0 — 2026-11-18
+
+- **Changed:** the system map moved from one `system-map.md` into each repository's project note, `<kb>/projects/<repo>.md` (see [Project notes](#project-notes)). `/starter lead` no longer creates `system-map.md`, and `/story` no longer needs one. Existing installs: move each service into its repository's note, drop the `repo:` field, and delete `system-map.md`. Use agent-skills 0.8.2.
+- **Added:** a plan is approved, and built, only when every repository in it has a project note with a `services:` block.
+- **Added:** the approval dialog and the story prompt show how fresh the notes are: the `updated:` date and the count of `(inferred — verify)` markers, for the plan's project notes and for your own notes in the policy folder.
+- **Changed:** you are notified when an agent changes a note's `services:` block, not on every edit of the file; an agent that leaves an old `updated:` date is told to set it.
 
 ### 0.35.0 — 2026-11-18
 

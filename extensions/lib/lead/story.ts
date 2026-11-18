@@ -1,7 +1,7 @@
 // The active story as the agent sees it: whether the lead approved its plan, and the system-prompt block carrying
-// the lead's brief, the system map and the hard gates.
+// the lead's brief, the project notes of the plan's repositories and the hard gates.
 import * as path from "node:path";
-import { approvalDigest, readBrief, readHardGates, readPlan, readStoryState, readSystemMap } from "./artifacts";
+import { approvalDigest, freshnessLines, noteNames, readBrief, readHardGates, readPlan, readProjectNote, readStoryState } from "./artifacts";
 import type { ActiveStory } from "./registry";
 
 export interface PlanApproval {
@@ -32,8 +32,12 @@ const capped = (text: string): string => (text.length > TEXT_MAX ? `${text.slice
 export function storyBlock(story: ActiveStory): string {
 	const { approved, repos } = planApproved(story);
 	const brief = readBrief(story.dir);
-	const policyDir = story.layout.policy;
-	const map = readSystemMap(policyDir);
+	const { policy: policyDir, notes: notesDir } = story.layout;
+	const notes = noteNames(repos).flatMap(name => {
+		const { note, error } = readProjectNote(notesDir, name);
+		return [`### ${name} (${path.join(notesDir, `${name}.md`)})`, note ? capped(note.block) : `(${error}; the plan cannot be approved without it)`];
+	});
+	const freshness = freshnessLines(story.layout, repos);
 	const { gates, error } = readHardGates(policyDir);
 	const gateLines = gates
 		? gates.gates.map(gate => `${gate.id} · ${gate.category} · ${gate.paths.join(", ") || "(no paths)"}`)
@@ -49,8 +53,10 @@ export function storyBlock(story: ActiveStory): string {
 		`## Lead brief (${path.join(story.dir, "brief.md")})`,
 		capped(brief.brief?.text ?? brief.errors.join("; ")),
 		"",
-		`## System map (${path.join(policyDir, "system-map.md")})`,
-		capped((map.text ?? map.error ?? "").trim()),
+		"## Project notes: the services and standing invariants of the plan's repositories",
+		`Each repository in the plan needs ${path.join(notesDir, "<repo>.md")} with a \`\`\`yaml block of its services before the lead can approve. Keep the block true as the structure changes; the lead is told of each change.`,
+		...notes,
+		...(freshness.length ? ["", "## Note freshness (the lead sees these lines when approving)", ...freshness] : []),
 		"",
 		`## Hard gates (${path.join(policyDir, "hard-gates.md")})`,
 		...gateLines,

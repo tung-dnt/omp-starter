@@ -2,9 +2,9 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import leadExtension from "./lead";
-import { readStoryState } from "./lib/lead/artifacts";
+import { readStoryState, today } from "./lib/lead/artifacts";
 import { lead } from "./lib/lead/registry";
-import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE, PR_FORMAT, SYSTEM_MAP_TEMPLATE } from "./lib/lead/templates";
+import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE, PR_FORMAT, PROJECT_NOTE_BLOCK } from "./lib/lead/templates";
 import { HOME } from "./lib/state";
 import { type FakeExec, type FakePi, fakeContext, fakePi, initGitRepo, resetHome, scriptedUi, seedKb, seedState, type UiScript, writeFiles } from "./test-harness";
 
@@ -22,20 +22,22 @@ interface Verdict {
 /** The knowledge base's `lead` setting that reuses folders shared with other notes. */
 const SHARED = { stories: "projects", policy: "company", templates: "_templates" };
 
+/** The project note of the shop repository: updated today, with the services block the plugin shows as its example. */
+const NOTE = `---\nupdated: ${today()}\n---\n\n# shop\n\n${PROJECT_NOTE_BLOCK}\n`;
+
 /**
- * A knowledge base serving ~/work with `files` under its lead folder (null: no lead folder), and repos ~/work/shop and ~/work/other.
+ * A knowledge base serving ~/work with `files` under its lead folder (null: no lead folder) and the project note of
+ * shop, and repos ~/work/shop and ~/work/other.
  * With `shared`, the knowledge base has the SHARED setting and `files` are relative to the knowledge base.
  */
-function setup(
-	files: Record<string, string> | null = { "hard-gates.md": HARD_GATES_TEMPLATE, "system-map.md": SYSTEM_MAP_TEMPLATE, "stories/S1/brief.md": BRIEF },
-	exec?: FakeExec,
-	shared = false,
-) {
+function setup(files: Record<string, string> | null = { "hard-gates.md": HARD_GATES_TEMPLATE, "stories/S1/brief.md": BRIEF }, exec?: FakeExec, shared = false) {
 	const folder = path.join(HOME, "work");
 	const kb = seedKb({ name: "kb", folder });
 	seedState({ kb: { status: "done", sources: [shared ? { ...kb.source, lead: SHARED } : kb.source] } });
 	const leadDir = shared ? kb.root : path.join(kb.root, "lead");
 	if (files) writeFiles(leadDir, files);
+	const note = path.join(kb.root, "projects", "shop.md");
+	writeFiles(kb.root, { "projects/shop.md": NOTE });
 	const storyDir = shared ? path.join(kb.root, "projects", "S1") : path.join(leadDir, "stories", "S1");
 	const shop = path.join(folder, "shop");
 	const other = path.join(folder, "other");
@@ -52,7 +54,14 @@ function setup(
 	const call = (toolName: string, toolInput: Record<string, unknown>, ctx: object) => fake.emit("tool_call", { toolName, input: toolInput }, ctx) as Verdict | undefined;
 	const writePlan = (summary = "Goal: add orders\nI1: unique index on id", tasks = "- T1: add the table") =>
 		writeFiles(storyDir, { "plan.md": `---\nrepos:\n  - ${shop}\n---\n\n## Summary\n${summary}\n\n## Tasks\n${tasks}\n` });
-	return { fake, kbRoot: kb.root, leadDir, storyDir, shop, other, main, sub, input, call, writePlan };
+	/** An edit of `file` as the host runs it: the call, `change` standing in for what the tool does, then the result. */
+	const edit = (file: string, ctx: object, change: () => void, isError = false) => {
+		const toolInput = { input: `[${file}#AB12]\nPUT 1.=1:\n+x` };
+		call("edit", toolInput, ctx);
+		change();
+		return fake.emit("tool_result", { type: "tool_result", toolName: "edit", isError, input: toolInput }, ctx) as Promise<{ additionalContext: string } | undefined>;
+	};
+	return { fake, kbRoot: kb.root, leadDir, storyDir, note, shop, other, main, sub, input, call, edit, writePlan };
 }
 
 /** `/story S1`, a plan, and the lead's yes. */
@@ -66,7 +75,7 @@ async function approvedStory(exec?: FakeExec) {
 
 describe("/story", () => {
 	test("is refused without a brief, naming the template; nothing is checked before /starter lead", async () => {
-		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE, "system-map.md": SYSTEM_MAP_TEMPLATE });
+		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE });
 		const { ui, ctx } = s.main();
 		expect(await s.input("/story S1", ctx)).toEqual({ handled: true });
 		expect(ui.notifications).toEqual([
@@ -82,20 +91,18 @@ describe("/story", () => {
 		expect(await bare.input("/story S1", bare.main().ctx)).toBeUndefined();
 	});
 
-	test("is refused without an id, with an incomplete brief, or without a system map", async () => {
-		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE, "stories/S1/brief.md": BRIEF_TEMPLATE, "stories/S2/brief.md": BRIEF });
+	test("is refused without an id or with an incomplete brief", async () => {
+		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE, "stories/S1/brief.md": BRIEF_TEMPLATE });
 		const { ui, ctx } = s.main();
 		expect(await s.input("/story", ctx)).toEqual({ handled: true });
 		expect(await s.input("/story S1", ctx)).toEqual({ handled: true });
-		expect(await s.input("/story S2", ctx)).toEqual({ handled: true });
 		expect(ui.notifications.map(n => n.message)).toEqual([
 			"lead: usage: /story <id>, where ~/kb/lead/stories/<id>/brief.md is your brief",
 			expect.stringContaining('brief: missing or empty section "## Goal"; brief: missing or empty section "## Success criteria"'),
-			"lead: system map missing: ~/kb/lead/system-map.md (run /starter lead). The system map comes before any repo work; fill it in and rerun /story S2.",
 		]);
 	});
 
-	test("with a brief and a map makes the story active, also when invoked through the plugin namespace", async () => {
+	test("with a brief makes the story active, also when invoked through the plugin namespace", async () => {
 		const s = setup();
 		expect(await s.input("/story S1", s.main().ctx)).toBeUndefined();
 		expect(lead().story).toMatchObject({ id: "S1", mode: "sync", invariants: [{ id: "I1", text: "inserts are idempotent on id" }] });
@@ -126,9 +133,15 @@ describe("context injection", () => {
 		expect(block).toStartWith("# Lead story S1 (sync mode)\n\nPlan: NOT approved: repository edits are blocked");
 		expect(block).toContain(`Plan file: ${s.storyDir}/plan.md\nRepos in plan: none yet\nPR body format: ${s.leadDir}/pr-format.md`);
 		expect(block).toContain("- I1: inserts are idempotent on id");
-		expect(block).toContain("name: example-api");
+		expect(block).toContain(`Each repository in the plan needs ${s.kbRoot}/projects/<repo>.md with a`);
+		expect(block).not.toContain("name: example-api");
 		expect(block).toContain("migrations · schema · **/migrations/**, **/*.sql\n");
 		expect(block).toContain("patient-data · patient-data · (no paths)");
+
+		s.writePlan();
+		const planned = start(s.fake, s.main().ctx)!.systemPrompt[1];
+		expect(planned).toContain(`### shop (${s.note})\nservices:\n  - { name: example-api, path: ""`);
+		expect(planned).toContain(`## Note freshness (the lead sees these lines when approving)\nshop: updated ${today()} (0 days ago), 0 unverified\n`);
 
 		expect(start(s.fake, s.sub("task-builder"))!.systemPrompt[1]).toStartWith("# Lead story S1");
 		expect(start(s.fake, s.sub("scout"))).toBeUndefined();
@@ -157,7 +170,9 @@ describe("the single plan approval", () => {
 		s.writePlan();
 		const { ui, ctx } = s.main({ confirm: [true] });
 		expect((await s.fake.callTool("lead", { op: "approve" }, ctx)).text).toBe("plan approved; building may start (/build S1)");
-		expect(ui.prompts).toEqual([{ kind: "confirm", title: "Approve plan for S1?", detail: `Goal: add orders\nI1: unique index on id\n\nRepos: ${s.shop}` }]);
+		expect(ui.prompts).toEqual([
+			{ kind: "confirm", title: "Approve plan for S1?", detail: `Goal: add orders\nI1: unique index on id\n\nRepos: ${s.shop}\n\nNotes:\n- shop: updated ${today()} (0 days ago), 0 unverified` },
+		]);
 		expect(readStoryState(s.storyDir).plan?.digest).toMatch(/^[0-9a-f]{64}$/);
 
 		expect(s.call("write", { path: "src/a.ts" }, ctx)).toBeUndefined();
@@ -169,6 +184,27 @@ describe("the single plan approval", () => {
 		expect(s.call("bash", { command: `rg -n foo ${s.other}/src` }, s.sub("task-builder"))?.reason).toContain("lead fence: other");
 		expect(s.call("read", { path: path.join(s.other, "node_modules/x/index.js") }, ctx)).toBeUndefined();
 		expect(s.call("read", { path: path.join(HOME, "notes.md") }, ctx)).toBeUndefined();
+	});
+
+	test("is refused until every repository in the plan has a project note with a services block; /build is refused once one is gone", async () => {
+		const s = setup();
+		fs.rmSync(s.note);
+		await s.input("/story S1", s.main().ctx);
+		s.writePlan();
+		const { ui, ctx } = s.main({ confirm: [true] });
+		const approve = () => s.fake.callTool("lead", { op: "approve" }, ctx);
+		await expect(approve()).rejects.toThrow(
+			`lead: every repository in the plan needs a project note with a services block (project note missing: ~/kb/projects/shop.md). Add this to each note, one entry per service, and set the note's \`updated:\` date:\n${PROJECT_NOTE_BLOCK}`,
+		);
+		fs.writeFileSync(s.note, "# shop\n\n```yaml\nstages: [dev]\n```\n");
+		await expect(approve()).rejects.toThrow("project note ~/kb/projects/shop.md: no ```yaml block with services:");
+		expect(ui.prompts).toEqual([]);
+
+		fs.writeFileSync(s.note, NOTE);
+		expect((await approve()).text).toBe("plan approved; building may start (/build S1)");
+		fs.rmSync(s.note);
+		expect(await s.input("/build", ctx)).toEqual({ handled: true });
+		expect(ui.notifications.at(-1)?.message).toBe("lead: /build needs a project note with a services block for every repository in the plan: project note missing: ~/kb/projects/shop.md.");
 	});
 
 	test("a no records nothing", async () => {
@@ -286,7 +322,7 @@ describe("builders", () => {
 		fake.emit("before_subagent_spawn", { type: "before_subagent_spawn", agent, invocationKind: "task", patterns: [] }, ctx) as Verdict | undefined;
 
 	test("are capped at limits.builders while a story is active; scouts are not counted or capped", async () => {
-		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE.replace("builders: 2", "builders: 1"), "system-map.md": SYSTEM_MAP_TEMPLATE, "stories/S1/brief.md": BRIEF });
+		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE.replace("builders: 2", "builders: 1"), "stories/S1/brief.md": BRIEF });
 		const { ctx } = s.main();
 		const builder = fakeContext({ cwd: s.shop, hasUI: false, agent: { kind: "sub", id: "a1", name: "task-builder" } });
 		s.fake.emit("agent_start", { type: "agent_start" }, builder);
@@ -303,7 +339,7 @@ describe("builders", () => {
 
 describe("async mode", () => {
 	test("tells the lead when the main session stops, not when a subagent or a continuing turn ends", async () => {
-		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE, "system-map.md": SYSTEM_MAP_TEMPLATE, "stories/S1/brief.md": BRIEF.replace("mode: sync", "mode: async") });
+		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE, "stories/S1/brief.md": BRIEF.replace("mode: sync", "mode: async") });
 		const { ui, ctx } = s.main();
 		await s.input("/story S1", ctx);
 		s.fake.emit("agent_end", { type: "agent_end", messages: [] }, s.sub("task-builder"));
@@ -341,30 +377,42 @@ describe("retro", () => {
 	});
 });
 
-describe("the system map", () => {
-	const edited = (fake: FakePi, file: string, ctx: object, isError = false) =>
-		fake.emit("tool_result", { type: "tool_result", toolName: "edit", isError, input: { input: `[${file}#AB12]\nPUT 1.=1:\n+x` } }, ctx) as Promise<{ additionalContext: string } | undefined>;
+describe("project notes", () => {
+	const withCalls = (calls: string) => NOTE.replace("calls: []", `calls: [${calls}]`);
 
-	test("an agent's edit is announced to the lead and recorded on the story, so the PR has to describe it", async () => {
+	test("a change to a note's services is announced to the lead, recorded on the story and marked in the approval dialog; prose edits are not", async () => {
 		const s = setup();
-		const { ui, ctx } = s.main();
+		const { ui, ctx } = s.main({ confirm: [true] });
 		await s.input("/story S1", ctx);
-		const map = path.join(s.leadDir, "system-map.md");
-		await edited(s.fake, map, ctx, true);
-		await edited(s.fake, path.join(s.storyDir, "plan.md"), ctx);
+		await s.edit(s.note, ctx, () => fs.appendFileSync(s.note, "\n## Gotchas\n- prose only\n"));
+		await s.edit(path.join(s.storyDir, "plan.md"), ctx, () => s.writePlan());
+		await s.edit(s.note, ctx, () => {}, true);
 		expect(readStoryState(s.storyDir).mapEditedAt).toBeNull();
+		expect(ui.notifications).toEqual([]);
 
-		expect(await edited(s.fake, map, s.sub("task-builder"))).toBeUndefined();
+		expect(await s.edit(s.note, s.sub("task-builder"), () => fs.writeFileSync(s.note, withCalls("worker")))).toBeUndefined();
 		expect(readStoryState(s.storyDir).mapEditedAt).not.toBeNull();
-		await edited(s.fake, map, ctx);
-		expect(ui.notifications).toEqual([{ type: "warning", message: "omp lead · S1 · system-map.md edited by main" }]);
+		await s.edit(s.note, ctx, () => fs.writeFileSync(s.note, withCalls("worker, billing")));
+		expect(ui.notifications).toEqual([{ type: "warning", message: "omp lead · S1 · services block of shop.md changed by main" }]);
+
+		await s.fake.callTool("lead", { op: "approve" }, ctx);
+		expect(ui.prompts[0].detail).toEndWith(`Notes:\n- shop: updated ${today()} (0 days ago), 0 unverified · services block changed in this session`);
 	});
 
-	test("an edit that leaves the map unreadable is reported back to the agent at once", async () => {
+	test("a change that breaks the block is reported back to the agent at once; a note left with an old date gets a reminder", async () => {
 		const s = setup();
-		fs.writeFileSync(path.join(s.leadDir, "system-map.md"), "```yaml\nservices: nope\n```\n");
-		const result = await edited(s.fake, path.join(s.leadDir, "system-map.md"), s.main().ctx);
-		expect(result?.additionalContext).toBe("[lead] system map ~/kb/lead/system-map.md: services: expected a list. Fix system-map.md now: /story and the structural gate read it.");
+		const { ctx } = s.main();
+		const broken = await s.edit(s.note, ctx, () => fs.writeFileSync(s.note, "```yaml\nservices: nope\n```\n"));
+		expect(broken?.additionalContext).toBe("[lead] project note ~/kb/projects/shop.md: services: expected a list. Fix it now: plan approval and the structural gate read it.");
+		const dated = await s.edit(s.note, ctx, () => fs.writeFileSync(s.note, NOTE.replace(`updated: ${today()}`, "updated: 2026-01-01")));
+		expect(dated?.additionalContext).toBe(`[lead] Set \`updated: ${today()}\` in the frontmatter of ~/kb/projects/shop.md: the lead approves plans against this note and sees its date.`);
+	});
+
+	test("nothing is announced or asked of the agent before /starter lead", async () => {
+		const s = setup(null);
+		const { ui, ctx } = s.main();
+		expect(await s.edit(s.note, ctx, () => fs.writeFileSync(s.note, withCalls("worker").replace(today(), "2026-01-01")))).toBeUndefined();
+		expect(ui.notifications).toEqual([]);
 	});
 });
 
@@ -397,7 +445,7 @@ describe("session start", () => {
 });
 
 describe("a knowledge base whose lead setting reuses its own folders", () => {
-	const files = { "company/hard-gates.md": HARD_GATES_TEMPLATE, "company/system-map.md": SYSTEM_MAP_TEMPLATE, "projects/S1/brief.md": BRIEF };
+	const files = { "company/hard-gates.md": HARD_GATES_TEMPLATE, "projects/S1/brief.md": BRIEF };
 
 	test("briefs, the template and the policy files are found in those folders, and the story block names them", async () => {
 		const s = setup(files, undefined, true);
@@ -411,7 +459,7 @@ describe("a knowledge base whose lead setting reuses its own folders", () => {
 		const started = s.fake.emit("before_agent_start", { type: "before_agent_start", reason: "prompt", prompt: "", systemPrompt: ["base"] }, ctx) as { systemPrompt: string[] } | undefined;
 		const block = started!.systemPrompt[1];
 		expect(block).toContain(`Plan file: ${s.kbRoot}/projects/S1/plan.md\nRepos in plan: none yet\nPR body format: ${s.kbRoot}/company/pr-format.md`);
-		expect(block).toContain(`## System map (${s.kbRoot}/company/system-map.md)`);
+		expect(block).toContain(`Each repository in the plan needs ${s.kbRoot}/projects/<repo>.md with a`);
 		expect(block).toContain("migrations · schema · **/migrations/**, **/*.sql\n");
 	});
 
@@ -426,7 +474,7 @@ describe("a knowledge base whose lead setting reuses its own folders", () => {
 		s.writePlan();
 		await s.fake.callTool("lead", { op: "approve" }, ctx);
 		expect(readStoryState(s.storyDir).plan).not.toBeNull();
-		expect(s.call("read", { path: path.join(s.kbRoot, "company", "system-map.md") }, ctx)).toBeUndefined();
+		expect(s.call("read", { path: path.join(s.kbRoot, "company", "hard-gates.md") }, ctx)).toBeUndefined();
 		expect(s.call("write", { path: path.join(s.storyDir, "plan.md") }, ctx)).toBeUndefined();
 		expect(s.call("read", { path: path.join(s.kbRoot, "_memory", "note.md") }, ctx)?.reason).toStartWith("lead fence: kb is not in the plan's repos");
 	});

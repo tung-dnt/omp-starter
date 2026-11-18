@@ -2,18 +2,18 @@
 // into which, what triggers each Lambda, and which tables each service writes. Written to docs/arch/ and checked in
 // CI so that a PR changes the structure only where its edge list changes (the lead reads that diff first).
 //
-//   bun scripts/arch-graph.ts generate <repoDir> --map <system-map.md>   write docs/arch/*
+//   bun scripts/arch-graph.ts generate <repoDir> --map <project-note.md>   write docs/arch/*
 //   bun scripts/arch-graph.ts check <repoDir>                            exit 1 when docs/arch/* is stale
 //   bun scripts/arch-graph.ts diff <repoDir> --base <ref>                print `+ edge` / `- edge` against <ref>
 //
 // Exit codes: 0 ok; 1 stale or differences found; 2 usage or tool error (message on stderr).
 // Self-contained on purpose (node:* and Bun only): CI downloads this one file and runs it. `check` and `diff` read
-// docs/arch/services.json, never the system map, which lives in the lead's vault.
+// docs/arch/services.json, never the project note, which lives in the lead's vault.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-/** What the graph needs of a service in the system map. */
+/** What the graph needs of a service in the repository's project note. */
 export interface Service {
 	name: string;
 	/** Folder of the service inside the repository; "" for the root. */
@@ -41,26 +41,26 @@ function run(cmd: string[], cwd: string): { code: number; stdout: string; stderr
 	return { code: result.exitCode ?? 1, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
 }
 
-/** Basename of the origin URL, else the folder name: what a system-map `repo` field is compared with. */
+/** Basename of the origin URL, else the folder name: what a service's optional `repo` field is compared with. */
 function repoName(repoDir: string): string {
 	const origin = run(["git", "-C", repoDir, "remote", "get-url", "origin"], repoDir);
 	const name = origin.code === 0 ? origin.stdout.trim().replace(/\/+$/, "").replace(/\.git$/, "").split(/[/:]/).pop() : undefined;
 	return name || path.basename(path.resolve(repoDir));
 }
 
-/** Services of `repoDir` from the yaml block of the system map. */
+/** Services of `repoDir` from the note's first yaml block that has `services:`; an entry naming another `repo` is left out. */
 function servicesFromMap(mapFile: string, repoDir: string): Service[] {
 	const text = fs.readFileSync(mapFile, "utf8");
-	const block = /^```ya?ml[^\n]*\n([\s\S]*?)^```[ \t]*$/m.exec(text);
-	if (!block) throw new ToolError(`arch-graph: ${mapFile} has no \`\`\`yaml block`);
-	const doc = Bun.YAML.parse(block[1]) as { services?: Record<string, unknown>[] } | null;
+	const block = Array.from(text.matchAll(/^```ya?ml[^\n]*\n([\s\S]*?)^```[ \t]*$/gm), match => match[1]).find(body => /^services\s*:/m.test(body));
+	if (block === undefined) throw new ToolError(`arch-graph: ${mapFile} has no \`\`\`yaml block with services:`);
+	const doc = Bun.YAML.parse(block) as { services?: Record<string, unknown>[] } | null;
 	const list = (value: unknown): string[] => (Array.isArray(value) ? value.map(String) : []);
 	const name = repoName(repoDir);
 	const services = (doc?.services ?? [])
-		.filter(s => s.repo === name)
+		.filter(s => s.repo === undefined || s.repo === name)
 		.map((s): Service => ({ name: String(s.name), path: typeof s.path === "string" ? s.path : "", calls: list(s.calls), ownsTables: list(s.owns_tables) }))
 		.sort((a, b) => a.name.localeCompare(b.name));
-	if (!services.length) throw new ToolError(`arch-graph: repo ${name} has no service in the system map`);
+	if (!services.length) throw new ToolError(`arch-graph: ${mapFile} lists no service for repo ${name}`);
 	return services;
 }
 
@@ -298,14 +298,14 @@ export function renderFiles(edges: string[], services: Service[]): Record<string
 	return files;
 }
 
-/** Violations of what the system map allows: undeclared cross-service calls and writes to tables another service owns. */
+/** Violations of what the project note allows: undeclared cross-service calls and writes to tables another service owns. */
 export function structureViolations(edges: string[], services: Service[]): string[] {
 	const byName = new Map(services.map(s => [s.name, s]));
 	const out: string[] = [];
 	for (const edge of edges) {
 		const { kind, service, b } = parseEdge(edge);
 		const svc = byName.get(service);
-		if (kind === "cross" && !svc?.calls.includes(b)) out.push(`cross-service edge ${service} -> ${b} not in system map`);
+		if (kind === "cross" && !svc?.calls.includes(b)) out.push(`cross-service edge ${service} -> ${b} not in the project note`);
 		if (kind === "table-write" && !svc?.ownsTables.map(t => t.toLowerCase()).includes(b)) out.push(`${service} writes table ${b} it does not own`);
 	}
 	return out;
@@ -346,7 +346,7 @@ function option(args: string[], name: string): string | undefined {
 async function main(args: string[]): Promise<number> {
 	const [command, dir] = args;
 	if (!dir || !["generate", "check", "diff"].includes(command)) {
-		throw new ToolError("arch-graph: usage: arch-graph.ts generate <repoDir> --map <system-map.md> | check <repoDir> | diff <repoDir> --base <ref>");
+		throw new ToolError("arch-graph: usage: arch-graph.ts generate <repoDir> --map <project-note.md> | check <repoDir> | diff <repoDir> --base <ref>");
 	}
 	const repoDir = path.resolve(dir);
 	const archDir = path.join(repoDir, "docs", "arch");

@@ -3,8 +3,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { HOME } from "../state";
 import { initGitRepo, resetHome, writeFiles } from "../../test-harness";
-import { approvalDigest, initLead, leadLayout, leadReady, protectedLeadPath, readBrief, readHardGates, readPlan, readSystemMap } from "./artifacts";
-import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE, SYSTEM_MAP_TEMPLATE } from "./templates";
+import { approvalDigest, freshnessLines, initLead, leadLayout, leadReady, protectedLeadPath, readBrief, readHardGates, readPlan, readProjectNote } from "./artifacts";
+import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE, PROJECT_NOTE_BLOCK } from "./templates";
 
 beforeEach(resetHome);
 
@@ -43,16 +43,50 @@ describe("readHardGates", () => {
 	});
 });
 
-describe("readSystemMap", () => {
-	test("reads services with snake_case keys and defaults", () => {
-		writeFiles(leadDir(), { "system-map.md": SYSTEM_MAP_TEMPLATE.replace("owns_tables: []", "owns_tables: [orders]") });
-		expect(readSystemMap(leadDir()).services).toEqual([
-			{ name: "example-api", repo: "example-repo", path: "", ownsTables: ["orders"], publishes: [], consumes: [], calls: [] },
-		]);
+describe("readProjectNote", () => {
+	const notesDir = () => path.join(HOME, "kb", "projects");
+	const read = (body: string) => {
+		writeFiles(notesDir(), { "shop.md": body });
+		return readProjectNote(notesDir(), "shop");
+	};
+
+	test("reads the services and standing invariants from the first yaml block that has services, with snake_case keys and defaults", () => {
+		const block = PROJECT_NOTE_BLOCK.replace("owns_tables: []", "owns_tables: [orders]").replace("invariants: []", "invariants:\n  - Orders are never deleted");
+		expect(read(`# shop\n\n\`\`\`yaml\nstages: [dev]\n\`\`\`\n\n${block}\n`).note).toMatchObject({
+			services: [{ name: "example-api", repo: "shop", path: "", ownsTables: ["orders"], publishes: [], consumes: [], calls: [] }],
+			invariants: ["Orders are never deleted"],
+		});
 	});
 
-	test("a missing map names the file and the command that creates it", () => {
-		expect(readSystemMap(leadDir()).error).toBe("system map missing: ~/kb/lead/system-map.md (run /starter lead)");
+	test("a missing note, a note without a services block and a service claiming another repository each say what is wrong", () => {
+		expect(readProjectNote(notesDir(), "shop").error).toBe("project note missing: ~/kb/projects/shop.md");
+		expect(read("# shop\n\n```yaml\nstages: [dev]\n```\n").error).toBe("project note ~/kb/projects/shop.md: no ```yaml block with services:");
+		expect(read(PROJECT_NOTE_BLOCK.replace("name: example-api,", "name: example-api, repo: other,")).error).toBe(
+			"project note ~/kb/projects/shop.md: service example-api.repo: this note describes shop; leave repo out",
+		);
+	});
+});
+
+describe("freshnessLines", () => {
+	test("the notes of the plan's repositories come first, named after the origin, then the lead's own notes in the policy folder", () => {
+		const shop = path.join(HOME, "work", "shop");
+		const other = path.join(HOME, "work", "other");
+		initGitRepo(shop, "git@github.com:acme/shop-api.git");
+		initGitRepo(other);
+		writeFiles(path.join(HOME, "kb"), {
+			"projects/shop-api.md": "---\nupdated: 2026-06-12\n---\n\nRuns on Lambda (inferred — verify).\n",
+			"company/security-policy.md": "---\nupdated: 2026-06-05\n---\n\n- Retention (inferred — verify retention periods)\n- Owner (inferred — verify process owner)\n",
+			"company/review-checklist.md": "# Checklist\n",
+			"company/hard-gates.md": HARD_GATES_TEMPLATE,
+			"company/pr-format.md": "generated\n",
+			"company/retro-log.md": "log\n",
+		});
+		expect(freshnessLines(leadLayout({ kbRef: "~/kb", lead: { policy: "company" } }), [shop, other], "2026-11-18")).toEqual([
+			"shop-api: updated 2026-06-12 (159 days ago), 1 unverified",
+			"other: missing",
+			"review-checklist: no updated: date, 0 unverified",
+			"security-policy: updated 2026-06-05 (166 days ago), 2 unverified",
+		]);
 	});
 });
 
@@ -135,11 +169,13 @@ describe("leadLayout", () => {
 	const kb = () => path.join(HOME, "kb");
 
 	test("everything is under lead/ unless the knowledge base's lead setting names other folders", () => {
-		expect(leadLayout({ kbRef })).toEqual({ policy: path.join(kb(), "lead"), stories: path.join(kb(), "lead", "stories"), templates: path.join(kb(), "lead") });
+		const notes = path.join(kb(), "projects");
+		expect(leadLayout({ kbRef })).toEqual({ policy: path.join(kb(), "lead"), stories: path.join(kb(), "lead", "stories"), templates: path.join(kb(), "lead"), notes });
 		expect(leadLayout({ kbRef, lead: { stories: "projects", policy: "company", templates: "_templates" } })).toEqual({
 			policy: path.join(kb(), "company"),
 			stories: path.join(kb(), "projects"),
 			templates: path.join(kb(), "_templates"),
+			notes,
 		});
 		expect(leadLayout({ kbRef, lead: { stories: "projects" } }).policy).toBe(path.join(kb(), "lead"));
 	});
@@ -153,7 +189,6 @@ describe("leadLayout", () => {
 			"_templates/brief-template.md",
 			"company/hard-gates.md",
 			"company/pr-format.md",
-			"company/system-map.md",
 		]);
 		expect(fs.readdirSync(kb()).sort()).toEqual(["_templates", "company", "projects"]);
 		expect(fs.readFileSync(path.join(kb(), "company", "security-policy.md"), "utf8")).toBe("policy\n");
@@ -164,14 +199,14 @@ describe("leadLayout", () => {
 describe("protectedLeadPath", () => {
 	const layout = () => leadLayout({ kbRef: "~/kb" });
 
-	test("the lead's files are protected; the plan and the system map are the agent's to keep current", () => {
+	test("the lead's files are protected; the plan and the project notes are the agent's to keep current", () => {
 		const at = (rel: string) => protectedLeadPath(layout(), path.join(leadDir(), rel));
 		expect(at("stories/S1/brief.md")).toBe(true);
 		expect(at("stories/S1/state.json")).toBe(true);
 		expect(at("hard-gates.md")).toBe(true);
 		expect(at("brief-template.md")).toBe(true);
 		expect(at("stories/S1/plan.md")).toBe(false);
-		expect(at("system-map.md")).toBe(false);
+		expect(protectedLeadPath(layout(), path.join(HOME, "kb", "projects", "shop.md"))).toBe(false);
 	});
 
 	test("in folders shared with other notes, only the lead's file names are protected, each in its own folder", () => {

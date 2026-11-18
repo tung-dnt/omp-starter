@@ -19,7 +19,7 @@ export interface PrBodyInput {
 	added: string[];
 	/** `+ edge` / `- edge` lines of docs/arch/edges.json against the merge base. */
 	edgesDiff?: string[];
-	/** An agent edited system-map.md during the story. */
+	/** An agent changed a project note's services block during the story. */
 	mapEdited?: boolean;
 }
 
@@ -97,7 +97,7 @@ export function checkPrBody(input: PrBodyInput): string[] {
 	}
 	if (gated.has("contract") || edgesChanged || input.mapEdited) {
 		const diff = required("System-map diff");
-		if (diff?.length === 0) problems.push("System-map diff: say what changed in system-map.md, one line per service");
+		if (diff?.length === 0) problems.push("System-map diff: say what changed in the project note's services, one line per service");
 	}
 	if (input.edgesDiff?.length) {
 		const structural = required("Structural changes");

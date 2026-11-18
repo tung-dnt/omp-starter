@@ -29,18 +29,12 @@ Globs are matched against paths relative to the repository root, so each starts 
 A gate may add ${"`repos: [name, …]`"} (origin basenames) to apply to those repositories only.
 `;
 
-export const SYSTEM_MAP_TEMPLATE = `# System map
-
-The lead reads this file; agents keep it current. When the structure changes (a new call between services, a new table owner,
-a new queue or topic), the agent edits the entry here and lists the change in the PR's \`## System-map diff\`.
-List every service: who owns which tables, what it publishes and consumes, and which services it calls.
-\`repo\` is the basename of the repository's origin URL; \`path\` is the service's folder inside it ("" for the root).
-
-${FENCE}yaml
+/** The machine block of a project note (`<kb>/projects/<repo>.md`), shown where a note lacks one. */
+export const PROJECT_NOTE_BLOCK = `${FENCE}yaml
 services:
-  - { name: example-api, repo: example-repo, path: "", owns_tables: [], publishes: [], consumes: [], calls: [] }
-${FENCE}
-`;
+  - { name: example-api, path: "", owns_tables: [], publishes: [], consumes: [], calls: [] }
+invariants: []
+${FENCE}`;
 
 export const BRIEF_TEMPLATE = `---
 mode: async
@@ -93,10 +87,10 @@ One line per item, \`N. yes|no — <note>\`. Every \`yes\` adds \`mechanism: <wh
 1. Retries and duplicates  2. Lost updates  3. Write skew  4. Replication lag  5. Ordering  6. Dual writes
 7. Partial failure  8. Clocks  9. Hot spots  10. Schema evolution  11. Derived data  12. End-to-end check
 
-When the diff touches a contract gate, docs/arch/edges.json changed, or you edited system-map.md during the story:
+When the diff touches a contract gate, docs/arch/edges.json changed, or you changed a project note's services block during the story:
 
 ## System-map diff
-<what changed in system-map.md, one line per service>
+<what changed in the project note's services, one line per service>
 
 When docs/arch/edges.json changed:
 

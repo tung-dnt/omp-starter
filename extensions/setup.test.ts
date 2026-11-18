@@ -389,7 +389,7 @@ describe("/starter lead", () => {
 		const lead = (name: string) => path.join(kb.root, "lead", name);
 
 		const first = await starterCommand(starter(), "lead", {});
-		for (const name of ["hard-gates.md", "system-map.md", "brief-template.md", "pr-format.md"]) expect(fs.existsSync(lead(name))).toBe(true);
+		for (const name of ["hard-gates.md", "brief-template.md", "pr-format.md"]) expect(fs.existsSync(lead(name))).toBe(true);
 		expect(first.notifications.at(-1)?.message).toContain("hard-gates.md");
 		const format = fs.readFileSync(lead("pr-format.md"), "utf8");
 
