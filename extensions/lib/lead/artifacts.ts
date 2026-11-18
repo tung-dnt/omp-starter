@@ -1,30 +1,54 @@
-// Lead-driven workflow artifacts under `<kb>/lead/` of the knowledge base serving a folder: the lead's hard gates,
-// system map and story briefs, the agent's plan, and the state the harness records (approvals, gate decisions, status).
+// Lead-driven workflow artifacts in the knowledge base serving a folder: the lead's hard gates, system map and story
+// briefs, the agent's plan, and the state the harness records (approvals, gate decisions, status). They live under
+// `<kb>/lead/` unless the knowledge base's `lead` setting names other folders (LeadLayout).
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { atomicWrite, withFileLock } from "../file-lock";
-import { forms, resolveKb, within } from "../kb-sources";
+import { forms, inside, resolveKb, within } from "../kb-sources";
 import { splitNote } from "../memory-notes";
 import { repoRoot } from "../repo";
-import { expandHome, HOME, tildify } from "../state";
+import { expandHome, HOME, type KbSource, tildify } from "../state";
 import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE, PR_FORMAT, SYSTEM_MAP_TEMPLATE } from "./templates";
 
 const hash = (algorithm: "sha1" | "sha256", text: string): string => crypto.createHash(algorithm).update(text).digest("hex");
 const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-/** `<kb>/lead` of the knowledge base serving `cwd`, or undefined when none serves it. */
-export function leadDirFor(cwd: string): string | undefined {
-	const source = resolveKb(cwd);
-	return source ? path.join(expandHome(source.kbRef), "lead") : undefined;
+/** Absolute folders of the lead files of one knowledge base. */
+export interface LeadLayout {
+	/** hard-gates.md, system-map.md, pr-format.md and retro-log.md. */
+	policy: string;
+	/** One folder per story: `<stories>/<id>/` holds brief.md, plan.md, state.json and status.md. */
+	stories: string;
+	/** brief-template.md. */
+	templates: string;
 }
 
-/** Whether `/starter lead` has created the lead folder for `cwd`. */
-export function leadReady(cwd: string): boolean {
-	const dir = leadDirFor(cwd);
-	return dir !== undefined && fs.existsSync(dir);
+/** `lead/`, `lead/stories/` and `lead/` of the knowledge base, each replaced by the folder the source's `lead` setting names. */
+export function leadLayout(source: Pick<KbSource, "kbRef" | "lead">): LeadLayout {
+	const kb = expandHome(source.kbRef);
+	const at = (folder: unknown, fallback: string): string => path.resolve(kb, typeof folder === "string" && folder ? expandHome(folder) : fallback);
+	return {
+		policy: at(source.lead?.policy, "lead"),
+		stories: at(source.lead?.stories, path.join("lead", "stories")),
+		templates: at(source.lead?.templates, "lead"),
+	};
 }
+
+/** Layout of the knowledge base serving `cwd`, or undefined when none serves it. */
+export function leadLayoutFor(cwd: string): LeadLayout | undefined {
+	const source = resolveKb(cwd);
+	return source && leadLayout(source);
+}
+
+/** Whether `/starter lead` has set the workflow up: hard-gates.md exists. One that iCloud evicted still counts. */
+export function leadReady(layout: LeadLayout): boolean {
+	return ["hard-gates.md", ".hard-gates.md.icloud"].some(name => fs.existsSync(path.join(layout.policy, name)));
+}
+
+/** Whether `p` is in one of the layout's folders. */
+export const inLead = (layout: LeadLayout, p: string): boolean => [layout.policy, layout.stories, layout.templates].some(dir => inside(p, dir));
 
 // ── YAML blocks ──────────────────────────────────────────────────────────────
 
@@ -107,9 +131,9 @@ function parseHardGates(text: string): HardGates {
  * The lead's hard gates. `{}` when hard-gates.md does not exist (none configured). When the file cannot be read or
  * is invalid, the last good copy is returned with `error`; with no such copy only `error`, and callers fail closed.
  */
-export function readHardGates(leadDir: string): { gates?: HardGates; error?: string } {
-	const file = path.join(leadDir, "hard-gates.md");
-	const cache = path.join(HOME, ".omp", "agent", "lead-cache", `hard-gates-${hash("sha1", leadDir).slice(0, 16)}.md`);
+export function readHardGates(policyDir: string): { gates?: HardGates; error?: string } {
+	const file = path.join(policyDir, "hard-gates.md");
+	const cache = path.join(HOME, ".omp", "agent", "lead-cache", `hard-gates-${hash("sha1", policyDir).slice(0, 16)}.md`);
 	const cached = (): string | undefined => {
 		try {
 			return fs.readFileSync(cache, "utf8");
@@ -129,7 +153,7 @@ export function readHardGates(leadDir: string): { gates?: HardGates; error?: str
 		text = fs.readFileSync(file, "utf8");
 	} catch (error) {
 		// An iCloud-evicted file is unreadable, not absent.
-		const evicted = fs.existsSync(path.join(leadDir, ".hard-gates.md.icloud"));
+		const evicted = fs.existsSync(path.join(policyDir, ".hard-gates.md.icloud"));
 		if ((error as NodeJS.ErrnoException).code === "ENOENT" && !evicted) return {};
 		return lastGood(`cannot read ${tildify(file)}${evicted ? " (evicted to iCloud)" : `: ${message(error)}`}`);
 	}
@@ -161,8 +185,8 @@ export interface Service {
 	calls: string[];
 }
 
-export function readSystemMap(leadDir: string): { services?: Service[]; text?: string; error?: string } {
-	const file = path.join(leadDir, "system-map.md");
+export function readSystemMap(policyDir: string): { services?: Service[]; text?: string; error?: string } {
+	const file = path.join(policyDir, "system-map.md");
 	let text: string;
 	try {
 		text = fs.readFileSync(file, "utf8");
@@ -365,28 +389,35 @@ export function updateStoryState(storyDir: string, change: (state: StoryState) =
 
 // ── Ownership and setup ──────────────────────────────────────────────────────
 
-const PROTECTED = /^(?:hard-gates\.md|retro-log\.md|brief-template\.md|pr-format\.md|stories\/[^/]+\/(?:brief\.md|state\.json|status\.md))$/;
+const POLICY_OWNED: Record<string, true> = { "hard-gates.md": true, "retro-log.md": true, "pr-format.md": true };
+const STORY_OWNED = /^[^/]+\/(?:brief\.md|state\.json|status\.md)$/;
+
+/** `absPath` relative to `dir` with `/` separators, in each symlink form in which it is at or below `dir`. */
+const relativeTo = (dir: string, absPath: string): string[] =>
+	forms(absPath).flatMap(p => forms(dir).filter(d => within(p, d)).map(d => path.relative(d, p).split(path.sep).join("/")));
 
 /** Whether `absPath` is a lead file agents must not write with write/edit (the plan and the system map are theirs to keep current). */
-export function protectedLeadPath(leadDir: string, absPath: string): boolean {
-	return forms(absPath).some(p =>
-		forms(leadDir).some(dir => within(p, dir) && PROTECTED.test(path.relative(dir, p).split(path.sep).join("/"))),
+export function protectedLeadPath(layout: LeadLayout, absPath: string): boolean {
+	return (
+		relativeTo(layout.policy, absPath).some(rel => POLICY_OWNED[rel]) ||
+		relativeTo(layout.templates, absPath).includes("brief-template.md") ||
+		relativeTo(layout.stories, absPath).some(rel => STORY_OWNED.test(rel))
 	);
 }
 
-/** Creates the lead folder. The lead's files are written only when missing; pr-format.md is rewritten every time. */
-export function initLead(leadDir: string): { created: string[]; kept: string[] } {
-	fs.mkdirSync(path.join(leadDir, "stories"), { recursive: true });
+/** Creates the lead files. The lead's files are written only when missing; pr-format.md is rewritten every time. */
+export function initLead(layout: LeadLayout): { created: string[]; kept: string[] } {
+	for (const dir of [layout.policy, layout.stories, layout.templates]) fs.mkdirSync(dir, { recursive: true });
 	const created: string[] = [];
 	const kept: string[] = [];
-	const files: [name: string, content: string, always: boolean][] = [
-		["hard-gates.md", HARD_GATES_TEMPLATE, false],
-		["system-map.md", SYSTEM_MAP_TEMPLATE, false],
-		["brief-template.md", BRIEF_TEMPLATE, false],
-		["pr-format.md", PR_FORMAT, true],
+	const files: [dir: string, name: string, content: string, always: boolean][] = [
+		[layout.policy, "hard-gates.md", HARD_GATES_TEMPLATE, false],
+		[layout.policy, "system-map.md", SYSTEM_MAP_TEMPLATE, false],
+		[layout.templates, "brief-template.md", BRIEF_TEMPLATE, false],
+		[layout.policy, "pr-format.md", PR_FORMAT, true],
 	];
-	for (const [name, content, always] of files) {
-		const file = path.join(leadDir, name);
+	for (const [dir, name, content, always] of files) {
+		const file = path.join(dir, name);
 		const exists = fs.existsSync(file);
 		(exists ? kept : created).push(file);
 		if (!exists || always) atomicWrite(file, content);
@@ -399,7 +430,7 @@ export function initLead(leadDir: string): { created: string[]; kept: string[] }
  * live in code, so it is rewritten when it differs. brief-template.md may be the lead's own: it is never overwritten,
  * and a difference is reported once per shipped template (a marker outside the vault remembers which one was reported).
  */
-export function syncGenerated(leadDir: string): { prFormatRewritten: boolean; briefTemplateDiffers: boolean } {
+export function syncGenerated(layout: LeadLayout): { prFormatRewritten: boolean; briefTemplateDiffers: boolean } {
 	const read = (file: string): string | undefined => {
 		try {
 			return fs.readFileSync(file, "utf8");
@@ -407,13 +438,13 @@ export function syncGenerated(leadDir: string): { prFormatRewritten: boolean; br
 			return undefined;
 		}
 	};
-	const prFormat = path.join(leadDir, "pr-format.md");
+	const prFormat = path.join(layout.policy, "pr-format.md");
 	const prFormatRewritten = read(prFormat) !== PR_FORMAT;
 	if (prFormatRewritten) atomicWrite(prFormat, PR_FORMAT);
 
-	const template = read(path.join(leadDir, "brief-template.md"));
+	const template = read(path.join(layout.templates, "brief-template.md"));
 	if (template === undefined || template === BRIEF_TEMPLATE) return { prFormatRewritten, briefTemplateDiffers: false };
-	const marker = path.join(HOME, ".omp", "agent", "lead-cache", `brief-template-${hash("sha1", leadDir).slice(0, 16)}.seen`);
+	const marker = path.join(HOME, ".omp", "agent", "lead-cache", `brief-template-${hash("sha1", layout.templates).slice(0, 16)}.seen`);
 	const shipped = hash("sha1", BRIEF_TEMPLATE);
 	if (read(marker) === shipped) return { prFormatRewritten, briefTemplateDiffers: false };
 	fs.mkdirSync(path.dirname(marker), { recursive: true });

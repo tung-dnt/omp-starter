@@ -19,7 +19,13 @@ beforeEach(() => {
 	gates = readHardGates(leadDir).gates!;
 });
 
-const story: ActiveStory = { id: "S1", dir: path.join(leadDir, "stories", "S1"), leadDir, mode: "sync", invariants: [{ id: "I1", text: "inserts are idempotent on id" }] };
+const story: ActiveStory = {
+	id: "S1",
+	dir: path.join(leadDir, "stories", "S1"),
+	layout: { policy: leadDir, stories: path.join(leadDir, "stories"), templates: leadDir },
+	mode: "sync",
+	invariants: [{ id: "I1", text: "inserts are idempotent on id" }],
+};
 
 const BASE = [
 	"## Decision log",

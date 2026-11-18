@@ -104,7 +104,8 @@ describe("a subagent hitting a gate", () => {
 
 	test("in an async story the main session is not asked either: the write is queued, the lead told once, and decided later in one sitting", async () => {
 		const s = setup();
-		lead().story = { id: "S1", dir: path.join(s.leadDir, "stories", "S1"), leadDir: s.leadDir, mode: "async", invariants: [] };
+		const layout = { policy: s.leadDir, stories: path.join(s.leadDir, "stories"), templates: s.leadDir };
+		lead().story = { id: "S1", dir: path.join(layout.stories, "S1"), layout, mode: "async", invariants: [] };
 		const { ui, ctx } = s.main({ select: ["Approve"] });
 		const queued = await s.call("write", { path: MIGRATION }, ctx);
 		expect(queued?.reason).toStartWith("HARD GATE migrations (schema): shop/db/migrations/002.sql needs the lead's approval and is queued. Leave this path");

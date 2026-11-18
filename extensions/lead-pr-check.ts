@@ -1,10 +1,10 @@
 // Blocks opening or re-describing a pull request whose body does not follow the lead-driven PR format
 // (lib/lead/pr-body.ts): decision log, invariant checklist with proving tests, risk summary, and the sections the
-// diff calls for. Active once `<kb>/lead/hard-gates.md` exists; off with OMP_STARTER_LEAD=off.
+// diff calls for. Active once hard-gates.md exists (`<kb>/lead/` by default); off with OMP_STARTER_LEAD=off.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { leadDirFor, readBrief, readHardGates, readStoryState } from "./lib/lead/artifacts";
+import { leadLayoutFor, readBrief, readHardGates, readStoryState } from "./lib/lead/artifacts";
 import { checkPrBody } from "./lib/lead/pr-body";
 import { lead } from "./lib/lead/registry";
 import { diffEdges } from "../scripts/arch-graph";
@@ -55,10 +55,10 @@ export default function leadPrCheck(pi: ExtensionAPI): void {
 		const input = (event.input ?? {}) as Record<string, unknown>;
 		const viaGithub = event.toolName === "github" && input.op === "pr_create";
 		if (!viaGithub && !(event.toolName === "bash" && GH_PR.test(String(input.command ?? "")))) return;
-		const leadDir = leadDirFor(ctx.cwd);
-		const gates = leadDir && readHardGates(leadDir).gates;
-		if (!leadDir || !gates) return;
-		const format = path.join(leadDir, "pr-format.md");
+		const policyDir = leadLayoutFor(ctx.cwd)?.policy;
+		const gates = policyDir && readHardGates(policyDir).gates;
+		if (!policyDir || !gates) return;
+		const format = path.join(policyDir, "pr-format.md");
 		const call = viaGithub ? { dir: ctx.cwd, body: typeof input.body === "string" ? input.body : "" } : ghBody(String(input.command), input.cwd, ctx.cwd, format);
 		if (!call) return;
 		if ("refuse" in call) return { block: true, reason: call.refuse };

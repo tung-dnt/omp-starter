@@ -1,10 +1,10 @@
-// Deterministic hard gates of the lead-driven workflow. The lead lists risky paths in `<kb>/lead/hard-gates.md`;
+// Deterministic hard gates of the lead-driven workflow. The lead lists risky paths in hard-gates.md (`<kb>/lead/` by default);
 // a write/edit to one, or a commit, push or PR carrying one, stops until the lead approves that path. The decision is
 // a dialog only the user can answer (main session) or the `lead` tool's op "gate" (after a subagent was blocked).
-// Also keeps agents from editing the lead's own files. Active once `/starter lead` created the folder; off with
+// Also keeps agents from editing the lead's own files. Active once `/starter lead` created hard-gates.md; off with
 // OMP_STARTER_LEAD=off.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { leadDirFor, protectedLeadPath, readHardGates } from "./lib/lead/artifacts";
+import { leadLayoutFor, protectedLeadPath, readHardGates } from "./lib/lead/artifacts";
 import { matchGates, matchRepoFiles, resolveGate } from "./lib/lead/gates";
 import { checkStructure } from "./lib/lead/structure";
 import { changedFiles, repoRoot, stagedFiles } from "./lib/repo";
@@ -51,18 +51,18 @@ export default function leadGates(pi: ExtensionAPI): void {
 	let warned: string | undefined;
 
 	pi.on("tool_call", async (event, ctx) => {
-		const leadDir = leadDirFor(ctx.cwd);
-		if (!leadDir) return;
+		const layout = leadLayoutFor(ctx.cwd);
+		if (!layout) return;
 		const input = (event.input ?? {}) as Record<string, unknown>;
 		const writes = WRITE_TOOLS[event.toolName]
 			? targetPaths(event.toolName, input)
 					.filter(p => !p.includes("://"))
 					.map(p => resolveFrom(ctx.cwd, p))
 			: [];
-		const owned = writes.find(p => protectedLeadPath(leadDir, p));
+		const owned = writes.find(p => protectedLeadPath(layout, p));
 		if (owned) return { block: true, reason: `lead: ${tildify(owned)} is owned by the lead; propose the change in chat or in the PR body instead.` };
 
-		const { gates, error } = readHardGates(leadDir);
+		const { gates, error } = readHardGates(layout.policy);
 		if (!gates && !error) return;
 		const publishing = published(event.toolName, input, ctx.cwd);
 		if (!gates) {
@@ -73,7 +73,7 @@ export default function leadGates(pi: ExtensionAPI): void {
 			warned = error;
 			ctx.ui.notify(`lead: ${error}`, "warning");
 		}
-		const structure = await Promise.all((publishing ?? []).filter(p => p.commit).map(p => checkStructure(p.repo, leadDir)));
+		const structure = await Promise.all((publishing ?? []).filter(p => p.commit).map(p => checkStructure(p.repo, layout.policy)));
 		const stale = structure.find(s => s.block);
 		if (stale) return { block: true, reason: stale.block };
 		const hits = [

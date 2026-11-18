@@ -32,8 +32,9 @@ const capped = (text: string): string => (text.length > TEXT_MAX ? `${text.slice
 export function storyBlock(story: ActiveStory): string {
 	const { approved, repos } = planApproved(story);
 	const brief = readBrief(story.dir);
-	const map = readSystemMap(story.leadDir);
-	const { gates, error } = readHardGates(story.leadDir);
+	const policyDir = story.layout.policy;
+	const map = readSystemMap(policyDir);
+	const { gates, error } = readHardGates(policyDir);
 	const gateLines = gates
 		? gates.gates.map(gate => `${gate.id} · ${gate.category} · ${gate.paths.join(", ") || "(no paths)"}`)
 		: [error ? `(unreadable: ${error}; gates fail closed)` : "(none configured)"];
@@ -43,15 +44,15 @@ export function storyBlock(story: ActiveStory): string {
 		`Plan: ${approved ? "approved" : "NOT approved: repository edits are blocked until the lead approves it through the lead tool (op approve)"}`,
 		`Plan file: ${path.join(story.dir, "plan.md")}`,
 		`Repos in plan: ${repos.join(", ") || "none yet"}`,
-		`PR body format: ${path.join(story.leadDir, "pr-format.md")}`,
+		`PR body format: ${path.join(policyDir, "pr-format.md")}`,
 		"",
 		`## Lead brief (${path.join(story.dir, "brief.md")})`,
 		capped(brief.brief?.text ?? brief.errors.join("; ")),
 		"",
-		`## System map (${path.join(story.leadDir, "system-map.md")})`,
+		`## System map (${path.join(policyDir, "system-map.md")})`,
 		capped((map.text ?? map.error ?? "").trim()),
 		"",
-		`## Hard gates (${path.join(story.leadDir, "hard-gates.md")})`,
+		`## Hard gates (${path.join(policyDir, "hard-gates.md")})`,
 		...gateLines,
 		story.mode === "async"
 			? 'A write to a gated path is refused and queued for the lead, who is away: leave that path, continue with work that does not depend on it, and list the queued gates in your report. Call the lead tool with op "gate" only when the lead asks. Reads and writes outside the plan\'s repos are blocked.'

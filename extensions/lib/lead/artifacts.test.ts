@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { HOME } from "../state";
 import { initGitRepo, resetHome, writeFiles } from "../../test-harness";
-import { approvalDigest, protectedLeadPath, readBrief, readHardGates, readPlan, readSystemMap } from "./artifacts";
+import { approvalDigest, initLead, leadLayout, leadReady, protectedLeadPath, readBrief, readHardGates, readPlan, readSystemMap } from "./artifacts";
 import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE, SYSTEM_MAP_TEMPLATE } from "./templates";
 
 beforeEach(resetHome);
@@ -130,21 +130,73 @@ describe("readPlan", () => {
 	});
 });
 
+describe("leadLayout", () => {
+	const kbRef = "~/kb";
+	const kb = () => path.join(HOME, "kb");
+
+	test("everything is under lead/ unless the knowledge base's lead setting names other folders", () => {
+		expect(leadLayout({ kbRef })).toEqual({ policy: path.join(kb(), "lead"), stories: path.join(kb(), "lead", "stories"), templates: path.join(kb(), "lead") });
+		expect(leadLayout({ kbRef, lead: { stories: "projects", policy: "company", templates: "_templates" } })).toEqual({
+			policy: path.join(kb(), "company"),
+			stories: path.join(kb(), "projects"),
+			templates: path.join(kb(), "_templates"),
+		});
+		expect(leadLayout({ kbRef, lead: { stories: "projects" } }).policy).toBe(path.join(kb(), "lead"));
+	});
+
+	test("/starter lead writes each file to its folder, keeps the notes already there, and only then is the workflow on", () => {
+		const layout = leadLayout({ kbRef, lead: { stories: "projects", policy: "company", templates: "_templates" } });
+		writeFiles(kb(), { "company/security-policy.md": "policy\n", "_templates/project-note.md": "note\n" });
+		expect(leadReady(layout)).toBe(false);
+		const { created } = initLead(layout);
+		expect(created.map(file => path.relative(kb(), file)).sort()).toEqual([
+			"_templates/brief-template.md",
+			"company/hard-gates.md",
+			"company/pr-format.md",
+			"company/system-map.md",
+		]);
+		expect(fs.readdirSync(kb()).sort()).toEqual(["_templates", "company", "projects"]);
+		expect(fs.readFileSync(path.join(kb(), "company", "security-policy.md"), "utf8")).toBe("policy\n");
+		expect(leadReady(layout)).toBe(true);
+	});
+});
+
 describe("protectedLeadPath", () => {
+	const layout = () => leadLayout({ kbRef: "~/kb" });
+
 	test("the lead's files are protected; the plan and the system map are the agent's to keep current", () => {
-		const at = (rel: string) => protectedLeadPath(leadDir(), path.join(leadDir(), rel));
+		const at = (rel: string) => protectedLeadPath(layout(), path.join(leadDir(), rel));
 		expect(at("stories/S1/brief.md")).toBe(true);
 		expect(at("stories/S1/state.json")).toBe(true);
 		expect(at("hard-gates.md")).toBe(true);
+		expect(at("brief-template.md")).toBe(true);
 		expect(at("stories/S1/plan.md")).toBe(false);
 		expect(at("system-map.md")).toBe(false);
+	});
+
+	test("in folders shared with other notes, only the lead's file names are protected, each in its own folder", () => {
+		const shared = leadLayout({ kbRef: "~/kb", lead: { stories: "projects", policy: "company", templates: "_templates" } });
+		const at = (rel: string) => protectedLeadPath(shared, path.join(HOME, "kb", rel));
+		expect(at("projects/S1/brief.md")).toBe(true);
+		expect(at("projects/S1/status.md")).toBe(true);
+		expect(at("company/hard-gates.md")).toBe(true);
+		expect(at("company/retro-log.md")).toBe(true);
+		expect(at("_templates/brief-template.md")).toBe(true);
+		expect(at("projects/S1/plan.md")).toBe(false);
+		expect(at("projects/S1/t01-design.md")).toBe(false);
+		expect(at("projects/paco24.md")).toBe(false);
+		expect(at("projects/S1/notes/brief.md")).toBe(false);
+		expect(at("company/security-policy.md")).toBe(false);
+		expect(at("company/brief-template.md")).toBe(false);
+		expect(at("_templates/hard-gates.md")).toBe(false);
+		expect(at("lead/hard-gates.md")).toBe(false);
 	});
 
 	test("a symlinked spelling of the lead folder is protected too", () => {
 		fs.mkdirSync(leadDir(), { recursive: true });
 		fs.symlinkSync(path.join(HOME, "kb"), path.join(HOME, "link"));
-		expect(protectedLeadPath(leadDir(), path.join(HOME, "link", "lead", "hard-gates.md"))).toBe(false);
+		expect(protectedLeadPath(layout(), path.join(HOME, "link", "lead", "hard-gates.md"))).toBe(false);
 		fs.writeFileSync(path.join(leadDir(), "hard-gates.md"), "x");
-		expect(protectedLeadPath(leadDir(), path.join(HOME, "link", "lead", "hard-gates.md"))).toBe(true);
+		expect(protectedLeadPath(layout(), path.join(HOME, "link", "lead", "hard-gates.md"))).toBe(true);
 	});
 });

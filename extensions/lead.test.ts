@@ -19,14 +19,24 @@ interface Verdict {
 	reason: string;
 }
 
-/** A knowledge base serving ~/work with `files` under its lead folder (null: no lead folder), and repos ~/work/shop and ~/work/other. */
-function setup(files: Record<string, string> | null = { "hard-gates.md": HARD_GATES_TEMPLATE, "system-map.md": SYSTEM_MAP_TEMPLATE, "stories/S1/brief.md": BRIEF }, exec?: FakeExec) {
+/** The knowledge base's `lead` setting that reuses folders shared with other notes. */
+const SHARED = { stories: "projects", policy: "company", templates: "_templates" };
+
+/**
+ * A knowledge base serving ~/work with `files` under its lead folder (null: no lead folder), and repos ~/work/shop and ~/work/other.
+ * With `shared`, the knowledge base has the SHARED setting and `files` are relative to the knowledge base.
+ */
+function setup(
+	files: Record<string, string> | null = { "hard-gates.md": HARD_GATES_TEMPLATE, "system-map.md": SYSTEM_MAP_TEMPLATE, "stories/S1/brief.md": BRIEF },
+	exec?: FakeExec,
+	shared = false,
+) {
 	const folder = path.join(HOME, "work");
 	const kb = seedKb({ name: "kb", folder });
-	seedState({ kb: { status: "done", sources: [kb.source] } });
-	const leadDir = path.join(kb.root, "lead");
+	seedState({ kb: { status: "done", sources: [shared ? { ...kb.source, lead: SHARED } : kb.source] } });
+	const leadDir = shared ? kb.root : path.join(kb.root, "lead");
 	if (files) writeFiles(leadDir, files);
-	const storyDir = path.join(leadDir, "stories", "S1");
+	const storyDir = shared ? path.join(kb.root, "projects", "S1") : path.join(leadDir, "stories", "S1");
 	const shop = path.join(folder, "shop");
 	const other = path.join(folder, "other");
 	initGitRepo(shop);
@@ -42,7 +52,7 @@ function setup(files: Record<string, string> | null = { "hard-gates.md": HARD_GA
 	const call = (toolName: string, toolInput: Record<string, unknown>, ctx: object) => fake.emit("tool_call", { toolName, input: toolInput }, ctx) as Verdict | undefined;
 	const writePlan = (summary = "Goal: add orders\nI1: unique index on id", tasks = "- T1: add the table") =>
 		writeFiles(storyDir, { "plan.md": `---\nrepos:\n  - ${shop}\n---\n\n## Summary\n${summary}\n\n## Tasks\n${tasks}\n` });
-	return { fake, leadDir, storyDir, shop, other, main, sub, input, call, writePlan };
+	return { fake, kbRoot: kb.root, leadDir, storyDir, shop, other, main, sub, input, call, writePlan };
 }
 
 /** `/story S1`, a plan, and the lead's yes. */
@@ -56,7 +66,7 @@ async function approvedStory(exec?: FakeExec) {
 
 describe("/story", () => {
 	test("is refused without a brief, naming the template; nothing is checked before /starter lead", async () => {
-		const s = setup({ "system-map.md": SYSTEM_MAP_TEMPLATE });
+		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE, "system-map.md": SYSTEM_MAP_TEMPLATE });
 		const { ui, ctx } = s.main();
 		expect(await s.input("/story S1", ctx)).toEqual({ handled: true });
 		expect(ui.notifications).toEqual([
@@ -73,13 +83,13 @@ describe("/story", () => {
 	});
 
 	test("is refused without an id, with an incomplete brief, or without a system map", async () => {
-		const s = setup({ "stories/S1/brief.md": BRIEF_TEMPLATE, "stories/S2/brief.md": BRIEF });
+		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE, "stories/S1/brief.md": BRIEF_TEMPLATE, "stories/S2/brief.md": BRIEF });
 		const { ui, ctx } = s.main();
 		expect(await s.input("/story", ctx)).toEqual({ handled: true });
 		expect(await s.input("/story S1", ctx)).toEqual({ handled: true });
 		expect(await s.input("/story S2", ctx)).toEqual({ handled: true });
 		expect(ui.notifications.map(n => n.message)).toEqual([
-			"lead: usage: /story <id>, where lead/stories/<id>/brief.md is your brief",
+			"lead: usage: /story <id>, where ~/kb/lead/stories/<id>/brief.md is your brief",
 			expect.stringContaining('brief: missing or empty section "## Goal"; brief: missing or empty section "## Success criteria"'),
 			"lead: system map missing: ~/kb/lead/system-map.md (run /starter lead). The system map comes before any repo work; fill it in and rerun /story S2.",
 		]);
@@ -293,7 +303,7 @@ describe("builders", () => {
 
 describe("async mode", () => {
 	test("tells the lead when the main session stops, not when a subagent or a continuing turn ends", async () => {
-		const s = setup({ "system-map.md": SYSTEM_MAP_TEMPLATE, "stories/S1/brief.md": BRIEF.replace("mode: sync", "mode: async") });
+		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE, "system-map.md": SYSTEM_MAP_TEMPLATE, "stories/S1/brief.md": BRIEF.replace("mode: sync", "mode: async") });
 		const { ui, ctx } = s.main();
 		await s.input("/story S1", ctx);
 		s.fake.emit("agent_end", { type: "agent_end", messages: [] }, s.sub("task-builder"));
@@ -383,5 +393,47 @@ describe("session start", () => {
 		const bare = setup(null);
 		bare.fake.emit("session_start", { type: "session_start" }, bare.main().ctx);
 		expect(fs.existsSync(bare.leadDir)).toBe(false);
+	});
+});
+
+describe("a knowledge base whose lead setting reuses its own folders", () => {
+	const files = { "company/hard-gates.md": HARD_GATES_TEMPLATE, "company/system-map.md": SYSTEM_MAP_TEMPLATE, "projects/S1/brief.md": BRIEF };
+
+	test("briefs, the template and the policy files are found in those folders, and the story block names them", async () => {
+		const s = setup(files, undefined, true);
+		const { ui, ctx } = s.main();
+		expect(await s.input("/story S2", ctx)).toEqual({ handled: true });
+		expect(ui.notifications.map(n => n.message)).toEqual([
+			"lead: no lead brief at ~/kb/projects/S2/brief.md. Copy ~/kb/_templates/brief-template.md there and fill it in; planning does not start without it.",
+		]);
+		expect(await s.input("/story S1", ctx)).toBeUndefined();
+		// The fake emitter returns the handler's result untyped; this is the shape lead.ts returns for before_agent_start.
+		const started = s.fake.emit("before_agent_start", { type: "before_agent_start", reason: "prompt", prompt: "", systemPrompt: ["base"] }, ctx) as { systemPrompt: string[] } | undefined;
+		const block = started!.systemPrompt[1];
+		expect(block).toContain(`Plan file: ${s.kbRoot}/projects/S1/plan.md\nRepos in plan: none yet\nPR body format: ${s.kbRoot}/company/pr-format.md`);
+		expect(block).toContain(`## System map (${s.kbRoot}/company/system-map.md)`);
+		expect(block).toContain("migrations · schema · **/migrations/**, **/*.sql\n");
+	});
+
+	test("in a vault that is a git repository, the fence leaves the story's and the policy folders alone before and after approval", async () => {
+		const s = setup(files, undefined, true);
+		initGitRepo(s.kbRoot);
+		const { ctx } = s.main({ confirm: [true] });
+		await s.input("/story S1", ctx);
+		expect(s.call("write", { path: path.join(s.storyDir, "plan.md") }, ctx)).toBeUndefined();
+		expect(s.call("write", { path: path.join(s.kbRoot, "_memory", "note.md") }, ctx)?.reason).toStartWith("lead: the plan for S1 is not approved yet");
+
+		s.writePlan();
+		await s.fake.callTool("lead", { op: "approve" }, ctx);
+		expect(readStoryState(s.storyDir).plan).not.toBeNull();
+		expect(s.call("read", { path: path.join(s.kbRoot, "company", "system-map.md") }, ctx)).toBeUndefined();
+		expect(s.call("write", { path: path.join(s.storyDir, "plan.md") }, ctx)).toBeUndefined();
+		expect(s.call("read", { path: path.join(s.kbRoot, "_memory", "note.md") }, ctx)?.reason).toStartWith("lead fence: kb is not in the plan's repos");
+	});
+
+	test("session start writes nothing into the policy folder before /starter lead", () => {
+		const s = setup({ "company/security-policy.md": "policy\n" }, undefined, true);
+		s.fake.emit("session_start", { type: "session_start" }, s.main().ctx);
+		expect(fs.readdirSync(path.join(s.kbRoot, "company"))).toEqual(["security-policy.md"]);
 	});
 });

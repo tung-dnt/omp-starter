@@ -288,6 +288,19 @@ describe("setupKnowledgeBase, existing knowledge bases", () => {
 		expect(state.sources?.map(s => s.kbRef)).toEqual(["~/vaults/Replacement/KnowledgeBase"]);
 	});
 
+	test("setting the same knowledge base up again keeps its lead folders; a different knowledge base starts without them", async () => {
+		const first = await configured();
+		const lead = { stories: "projects", policy: "company", templates: "_templates" };
+		const current = { ...first, sources: first.sources?.map(source => ({ ...source, lead })) };
+		const readd = (name: string) =>
+			setupKnowledgeBase(
+				scriptedUi({ confirm: [true, true], select: [choose("Add"), choose("Sessions under"), choose("Done")], input: [vault(name), "KnowledgeBase", "", home("projects")] }),
+				current,
+			);
+		expect((await readd("Notes")).sources).toEqual(current.sources);
+		expect((await readd("Replacement")).sources?.[0].lead).toBeUndefined();
+	});
+
 	test("removing a knowledge base deletes its AGENTS.md after confirmation, keeping a backup, and the vault is untouched", async () => {
 		const first = await configured();
 		const ui = scriptedUi({ confirm: [true], select: [choose("Remove a"), choose("~/projects"), undefined] });

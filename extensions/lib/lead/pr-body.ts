@@ -1,4 +1,4 @@
-// The PR body format of the lead-driven workflow (`<kb>/lead/pr-format.md` describes it to the agent; templates.ts
+// The PR body format of the lead-driven workflow (pr-format.md, next to hard-gates.md, describes it to the agent; templates.ts
 // holds that text). The lead reads the decision log, the invariant checklist and the risk summary before any code,
 // so a PR is not opened until they are there and every proving test they name exists.
 import * as fs from "node:fs";

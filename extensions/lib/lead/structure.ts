@@ -15,11 +15,11 @@ const SCRIPT = path.join(import.meta.dir, "..", "..", "..", "scripts", "arch-gra
  * The graph is rendered from the system map's services for this repository, so a map change (a service's path, calls
  * or tables) makes docs/arch stale too; services.json stands in only when the map lists none for the repository.
  */
-export async function checkStructure(repo: string, leadDir: string): Promise<{ block?: string; hits: GateHit[] }> {
+export async function checkStructure(repo: string, policyDir: string): Promise<{ block?: string; hits: GateHit[] }> {
 	if (!fs.existsSync(path.join(repo, "docs", "arch", "services.json"))) return { hits: [] };
-	const regenerate = `run bun ${SCRIPT} generate ${repo} --map ${path.join(leadDir, "system-map.md")} and commit docs/arch.`;
+	const regenerate = `run bun ${SCRIPT} generate ${repo} --map ${path.join(policyDir, "system-map.md")} and commit docs/arch.`;
 	const repoName = resolveRepoName(repo) ?? path.basename(repo);
-	const mapped = readSystemMap(leadDir).services?.filter(s => s.repo === repoName) ?? [];
+	const mapped = readSystemMap(policyDir).services?.filter(s => s.repo === repoName) ?? [];
 	let edges: string[];
 	try {
 		const services = mapped.length ? mapped : readServices(repo);

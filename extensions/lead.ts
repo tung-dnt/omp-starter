@@ -1,5 +1,6 @@
-// The lead-driven workflow. The lead (the user) writes a brief per story under `<kb>/lead/stories/<id>/`; the agent
-// plans from it, the lead approves the plan once, and code keeps the build inside what was approved:
+// The lead-driven workflow. The lead (the user) writes a brief per story in the story's folder (`<kb>/lead/stories/<id>/`
+// by default; see LeadLayout); the agent plans from it, the lead approves the plan once, and code keeps the build
+// inside what was approved:
 //  - `/story <id>` and `/build [id]` are checked before they expand: no brief or system map, no planning; no approved plan, no build.
 //  - The active story's brief, system map and hard gates are added to the system prompt of the main session and of the subagents that build or review.
 //  - Repository edits are blocked until the plan is approved; afterwards reads and writes outside the plan's repositories are blocked.
@@ -13,7 +14,9 @@ import { atomicWrite, withFileLock } from "./lib/file-lock";
 import { inside } from "./lib/kb-sources";
 import {
 	approvalDigest,
-	leadDirFor,
+	inLead,
+	type LeadLayout,
+	leadLayoutFor,
 	leadLock,
 	leadReady,
 	readBrief,
@@ -52,14 +55,14 @@ interface LeadParams {
 }
 
 /** Makes story `id` the active one, or returns why it cannot start. */
-function activate(leadDir: string, id: string, missingBrief: (storyDir: string) => string): string | undefined {
-	const storyDir = path.join(leadDir, "stories", id);
+function activate(layout: LeadLayout, id: string, missingBrief: (storyDir: string) => string): string | undefined {
+	const storyDir = path.join(layout.stories, id);
 	if (!STORY_ID.test(id) || !fs.existsSync(path.join(storyDir, "brief.md"))) return missingBrief(storyDir);
 	const { brief, errors } = readBrief(storyDir);
 	if (!brief) return `lead: ${errors.join("; ")}`;
-	const map = readSystemMap(leadDir);
+	const map = readSystemMap(layout.policy);
 	if (map.error) return `lead: ${map.error}. The system map comes before any repo work; fill it in and rerun /story ${id}.`;
-	lead().story = { id, dir: storyDir, leadDir, mode: brief.mode, invariants: brief.invariants };
+	lead().story = { id, dir: storyDir, layout, mode: brief.mode, invariants: brief.invariants };
 	lead().notifiedPlanChange = false;
 	return undefined;
 }
@@ -81,18 +84,18 @@ function approval(story: ActiveStory, ctx: ExtensionContext) {
 }
 
 /** Why `/story <id>` or `/build [id]` must not run, or undefined after making the story active. */
-function refusal(command: string, id: string | undefined, leadDir: string, ctx: ExtensionContext): string | undefined {
+function refusal(command: string, id: string | undefined, layout: LeadLayout, ctx: ExtensionContext): string | undefined {
 	if (command === "story") {
-		if (id === undefined || !STORY_ID.test(id)) return "lead: usage: /story <id>, where lead/stories/<id>/brief.md is your brief";
+		if (id === undefined || !STORY_ID.test(id)) return `lead: usage: /story <id>, where ${tildify(layout.stories)}/<id>/brief.md is your brief`;
 		return activate(
-			leadDir,
+			layout,
 			id,
 			storyDir =>
-				`lead: no lead brief at ${tildify(storyDir)}/brief.md. Copy ${tildify(leadDir)}/brief-template.md there and fill it in; planning does not start without it.`,
+				`lead: no lead brief at ${tildify(storyDir)}/brief.md. Copy ${tildify(layout.templates)}/brief-template.md there and fill it in; planning does not start without it.`,
 		);
 	}
 	if (id !== undefined) {
-		const problem = activate(leadDir, id, () => `lead: no story ${id}; write its brief and run /story ${id}, or use /task for a small change.`);
+		const problem = activate(layout, id, () => `lead: no story ${id}; write its brief and run /story ${id}, or use /task for a small change.`);
 		if (problem) return problem;
 	}
 	const story = lead().story;
@@ -174,16 +177,16 @@ async function recordStatus(pi: ExtensionAPI, story: ActiveStory, endWhenDone: b
 const RETRO_CAUSES = ["spec gap", "missing invariant", "missing context (system map)", "missing test", "rule/skill gap", "model error"];
 
 /** Appends an escaped bug to retro-log.md with the cause the lead picks. */
-async function recordRetro(p: LeadParams, leadDir: string, ctx: ExtensionContext): Promise<string> {
+async function recordRetro(p: LeadParams, policyDir: string, ctx: ExtensionContext): Promise<string> {
 	const [story, summary, artifact] = [p.story, p.summary, p.artifact].map(value => value?.replace(/\s+/g, " ").trim());
 	if (!story || !summary || !artifact) throw new Error("lead: retro needs story, summary and artifact");
 	if (!ctx.hasUI) throw new Error("lead: retro needs an interactive session");
 	const cause = await ctx.ui.select(`Escaped bug in ${story}: ${summary}. Cause?`, RETRO_CAUSES);
 	if (cause === undefined) return "retro not recorded";
-	const file = path.join(leadDir, "retro-log.md");
+	const file = path.join(policyDir, "retro-log.md");
 	const line = `- ${new Date().toLocaleDateString("en-CA")} · ${cause} · ${story} · ${summary} · fixed: ${artifact}\n`;
 	await withFileLock(leadLock(file), `${tildify(file)} is being updated by another session; retry`, () => {
-		fs.mkdirSync(leadDir, { recursive: true });
+		fs.mkdirSync(policyDir, { recursive: true });
 		atomicWrite(file, (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : RETRO_HEADER) + line);
 	});
 	return line.trimEnd();
@@ -196,12 +199,12 @@ export default function leadExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.agent?.kind === "sub") return;
 		resetLead(ctx.sessionManager.getSessionId());
-		const leadDir = leadDirFor(ctx.cwd);
-		if (!leadDir || !leadReady(ctx.cwd)) return;
+		const layout = leadLayoutFor(ctx.cwd);
+		if (!layout || !leadReady(layout)) return;
 		try {
 			// pr-format.md describes checks that live in this plugin's code, so it follows the plugin version.
-			if (syncGenerated(leadDir).briefTemplateDiffers && ctx.hasUI) {
-				ctx.ui.notify(`lead: ${tildify(leadDir)}/brief-template.md differs from the template this plugin version ships; delete it and run /starter lead to take the new one, or keep yours.`, "info");
+			if (syncGenerated(layout).briefTemplateDiffers && ctx.hasUI) {
+				ctx.ui.notify(`lead: ${tildify(layout.templates)}/brief-template.md differs from the template this plugin version ships; delete it and run /starter lead to take the new one, or keep yours.`, "info");
 			}
 		} catch {
 			// A vault that cannot be read right now (iCloud) must not break the session start.
@@ -209,10 +212,12 @@ export default function leadExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("input", async (event, ctx) => {
-		if (ctx.agent?.kind === "sub" || !leadReady(ctx.cwd)) return;
+		if (ctx.agent?.kind === "sub") return;
+		const layout = leadLayoutFor(ctx.cwd);
+		if (!layout || !leadReady(layout)) return;
 		const command = COMMAND.exec(event.text);
 		if (!command) return;
-		const problem = refusal(command[1], command[2], leadDirFor(ctx.cwd)!, ctx);
+		const problem = refusal(command[1], command[2], layout, ctx);
 		if (problem) {
 			ctx.ui.notify(problem, "error");
 			return { handled: true };
@@ -235,7 +240,7 @@ export default function leadExtension(pi: ExtensionAPI): void {
 	pi.on("tool_call", (event, ctx) => {
 		const story = lead().story;
 		if (!story) return;
-		const paths = touchedPaths(event.toolName, (event.input ?? {}) as Record<string, unknown>, ctx.cwd).filter(p => !inside(p, story.leadDir));
+		const paths = touchedPaths(event.toolName, (event.input ?? {}) as Record<string, unknown>, ctx.cwd).filter(p => !inLead(story.layout, p));
 		if (!paths.length) return;
 		const { approved, repos, changed, errors } = approval(story, ctx);
 		const planFile = path.join(story.dir, "plan.md");
@@ -267,9 +272,9 @@ export default function leadExtension(pi: ExtensionAPI): void {
 	// Agents keep the system map current. The lead is not asked, so each edit is announced and has to be described in the PR.
 	pi.on("tool_result", async (event, ctx) => {
 		if (event.isError || !WRITE_TOOLS[event.toolName]) return;
-		const leadDir = leadDirFor(ctx.cwd);
-		if (!leadDir) return;
-		const map = path.join(leadDir, "system-map.md");
+		const policyDir = leadLayoutFor(ctx.cwd)?.policy;
+		if (!policyDir) return;
+		const map = path.join(policyDir, "system-map.md");
 		const targets = targetPaths(event.toolName, (event.input ?? {}) as Record<string, unknown>).filter(p => !p.includes("://"));
 		if (!targets.some(p => inside(resolveFrom(ctx.cwd, p), map))) return;
 		const story = lead().story;
@@ -279,7 +284,7 @@ export default function leadExtension(pi: ExtensionAPI): void {
 				state.mapEditedAt = new Date().toISOString();
 			});
 		}
-		const { error } = readSystemMap(leadDir);
+		const { error } = readSystemMap(policyDir);
 		if (error) return { additionalContext: `[lead] ${error}. Fix system-map.md now: /story and the structural gate read it.` };
 	});
 
@@ -304,7 +309,7 @@ export default function leadExtension(pi: ExtensionAPI): void {
 	pi.on("before_subagent_spawn", event => {
 		const story = lead().story;
 		if (!story || !BUILDERS[event.agent.toLowerCase()]) return;
-		const limit = readHardGates(story.leadDir).gates?.limits.builders ?? 2;
+		const limit = readHardGates(story.layout.policy).gates?.limits.builders ?? 2;
 		const running = lead().runningBuilders.size;
 		if (running < limit) return;
 		return { block: true, reason: `lead: ${running} builders already running (limits.builders = ${limit} in hard-gates.md); wait for one to finish.` };
@@ -326,14 +331,14 @@ export default function leadExtension(pi: ExtensionAPI): void {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (ctx.agent?.kind === "sub") throw new Error("lead: only the main session can call this tool");
-			const leadDir = leadDirFor(ctx.cwd);
-			if (!leadDir) throw new Error("lead: no knowledge base serves this folder; run /starter kb, then /starter lead");
+			const layout = leadLayoutFor(ctx.cwd);
+			if (!layout) throw new Error("lead: no knowledge base serves this folder; run /starter kb, then /starter lead");
 			const p = params as LeadParams;
 			let text: string;
 			if (p.op === "approve") text = await approvePlan(ctx);
 			else if (p.op === "gate") text = await decideGates(ctx);
 			else if (p.op === "status") text = await recordStatus(pi, activeStory(), true);
-			else text = await recordRetro(p, leadDir, ctx);
+			else text = await recordRetro(p, layout.policy, ctx);
 			return { content: [{ type: "text", text }] };
 		},
 	});

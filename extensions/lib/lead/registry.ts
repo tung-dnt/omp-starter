@@ -1,13 +1,13 @@
 // Process-wide state of the lead-driven workflow: the active story, gate decisions outside a story, gates waiting
 // for the lead, and running builders. omp evaluates each extension's imports separately and one process serves the
 // main session and its subagents, so it lives on `globalThis` (see lib/kb-write-flag).
-import type { Invariant } from "./artifacts";
+import type { Invariant, LeadLayout } from "./artifacts";
 
 export interface ActiveStory {
 	id: string;
-	/** `<leadDir>/stories/<id>`. */
+	/** `<layout.stories>/<id>`. */
 	dir: string;
-	leadDir: string;
+	layout: LeadLayout;
 	mode: "sync" | "async";
 	invariants: Invariant[];
 }

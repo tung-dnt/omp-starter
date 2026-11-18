@@ -1,4 +1,4 @@
-// Files `/starter lead` writes into `<kb>/lead/`. The lead edits hard-gates.md, system-map.md and briefs;
+// Files `/starter lead` writes into the lead folders (`<kb>/lead/` by default). The lead edits hard-gates.md, system-map.md and briefs;
 // pr-format.md is regenerated on every run because the PR check's rules live in code (lib/lead/pr-body.ts).
 const FENCE = "```";
 

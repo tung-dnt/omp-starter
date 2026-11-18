@@ -164,7 +164,7 @@ It needs no provider login, never installs or changes an SDK, and never changes 
 ## Commands
 
 - `/starter`: rerun every step.
-- `/starter lead`: create `lead/` in the knowledge base serving this folder (see [Lead-driven workflow](#lead-driven-workflow)).
+- `/starter lead`: create the lead files in the knowledge base serving this folder: in `lead/`, or in the folders the knowledge base sets (see [Lead-driven workflow](#lead-driven-workflow)).
 - `/starter skills`, `/starter models`, `/starter jev`, `/starter kb`, `/starter tools`: rerun one step (`/starter skills` offers to update an installed agent-skills and reports the old and new version; `/starter kb` manages several knowledge bases once one exists; `/starter jev` turns Jev off when it is on).
 - `/starter updates`: check installed/published versions of both `agent-skills@tung-agent-skills` and `starter@omp-starter`; confirm each plugin/scope before updating.
 
@@ -222,9 +222,9 @@ The `ask`-based rules load in the main session only, except `ticket-tracking`, w
 
 ## Lead-driven workflow
 
-You are the tech lead; agents are contractors with no context beyond what you give them. Work flows brief → one batch of questions → one plan approval → build inside fences → PR outputs you read before any code. After the approval you are out of the loop: the agent keeps the plan and the system map current, gates wait in a queue, and you are notified instead of asked. The commands (`/story`, `/build`, `/task`, `/ship`) come from agent-skills; this plugin makes the rules binding in code. Everything lives in the `lead/` folder of the knowledge base serving the session's folder; `/starter lead` creates it. Nothing is enforced until that folder exists, and `OMP_STARTER_LEAD=off` turns every part off.
+You are the tech lead; agents are contractors with no context beyond what you give them. Work flows brief → one batch of questions → one plan approval → build inside fences → PR outputs you read before any code. After the approval you are out of the loop: the agent keeps the plan and the system map current, gates wait in a queue, and you are notified instead of asked. The commands (`/story`, `/build`, `/task`, `/ship`) come from agent-skills; this plugin makes the rules binding in code. Everything lives in the `lead/` folder of the knowledge base serving the session's folder, unless the knowledge base names [other folders](#lead-folders); `/starter lead` creates the files. Nothing is enforced until `hard-gates.md` exists, and `OMP_STARTER_LEAD=off` turns every part off.
 
-| File in `<kb>/lead/` | Written by | Kept current by |
+| File (default folder `<kb>/lead/`) | Written by | Kept current by |
 |---|---|---|
 | `hard-gates.md` | you | You. Read on every tool call; an invalid edit falls back to the last good copy and tells you once. |
 | `system-map.md` | you, then agents | Agents edit it when the structure changes. Each edit notifies you and must be described in the PR's `## System-map diff`. |
@@ -251,6 +251,28 @@ What is enforced:
 Because agents may edit `system-map.md`, the structural gate checks code against a map the agent can change. What tells you is the notification on each edit and the required `## System-map diff` in the PR.
 
 `bun scripts/lead-replay.ts <tasks.yml> [--runs 3] [--out file.md] --yes` replays real tasks in fresh worktrees with the harness on and off and tabulates pass rate, wall time and gate stops; without `--yes` it only prints how many runs it would spend.
+
+### Lead folders
+
+A knowledge base that already has folders for this material can keep using them. Add `lead` to its entry under `kb.sources` in `~/.omp/agent/omp-starter.json`, then run `/starter lead`:
+
+```json
+{ "kbRef": "~/vault/KnowledgeBase", "lead": { "stories": "projects", "policy": "company", "templates": "_templates" } }
+```
+
+| Key | Holds | Default |
+|---|---|---|
+| `stories` | One folder per story: `<id>/brief.md`, `plan.md`, `state.json`, `status.md` | `lead/stories` |
+| `policy` | `hard-gates.md`, `system-map.md`, `pr-format.md`, `retro-log.md` | `lead` |
+| `templates` | `brief-template.md` | `lead` |
+
+Folders are relative to the knowledge base, and a key you leave out keeps its default. In a folder shared with other notes, agents are kept from writing only the lead's files (`hard-gates.md`, `pr-format.md`, `retro-log.md`, `brief-template.md`, and a story's `brief.md`, `state.json` and `status.md`); the other notes stay writable. `/starter kb` keeps the setting when you set the same knowledge base up again.
+
+| Do | Don't |
+|---|---|
+| Set the folders before the first `/starter lead`, and check the paths it reports. | Misspell a folder: no `hard-gates.md` is found there, so nothing is enforced and nothing warns you. |
+| Move the files yourself when you change the setting later. | Expect the files to follow the setting: `/starter lead` writes fresh templates into the new folders. |
+| Keep `brief.md`, `state.json` and `status.md` in a story folder for the workflow. | Point `stories` at a folder where agents already write files with those names. |
 
 ## Usage report
 
@@ -283,6 +305,11 @@ It prints one markdown table per metric, for main sessions and subagents separat
 Limits: M3 and M1's scope check use today's vault, so notes moved later are judged at their new place. A session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names, tool names and note slugs; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder or the vault; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.35.0 — 2026-11-18
+
+- **Added:** a knowledge base can keep the lead files in folders it already has: `lead: { stories, policy, templates }` on its entry in `omp-starter.json` (see [Lead folders](#lead-folders)). Without the setting nothing moves.
+- **Changed:** the workflow is on once `hard-gates.md` exists, the file the hard gates and the PR check already looked for. A `lead/` folder without it no longer has `/story` and `/build` checked.
 
 ### 0.34.0 — 2026-11-18
 
