@@ -316,3 +316,30 @@ describe("retro", () => {
 		expect(ui.prompts).toHaveLength(1);
 	});
 });
+
+describe("the system map", () => {
+	const edited = (fake: FakePi, file: string, ctx: object, isError = false) =>
+		fake.emit("tool_result", { type: "tool_result", toolName: "edit", isError, input: { input: `[${file}#AB12]\nPUT 1.=1:\n+x` } }, ctx) as Promise<{ additionalContext: string } | undefined>;
+
+	test("an agent's edit is announced to the lead and recorded on the story, so the PR has to describe it", async () => {
+		const s = setup();
+		const { ui, ctx } = s.main();
+		s.input("/story S1", ctx);
+		const map = path.join(s.leadDir, "system-map.md");
+		await edited(s.fake, map, ctx, true);
+		await edited(s.fake, path.join(s.storyDir, "plan.md"), ctx);
+		expect(readStoryState(s.storyDir).mapEditedAt).toBeNull();
+
+		expect(await edited(s.fake, map, s.sub("task-builder"))).toBeUndefined();
+		expect(readStoryState(s.storyDir).mapEditedAt).not.toBeNull();
+		await edited(s.fake, map, ctx);
+		expect(ui.notifications).toEqual([{ type: "warning", message: "omp lead · S1 · system-map.md edited by main" }]);
+	});
+
+	test("an edit that leaves the map unreadable is reported back to the agent at once", async () => {
+		const s = setup();
+		fs.writeFileSync(path.join(s.leadDir, "system-map.md"), "```yaml\nservices: nope\n```\n");
+		const result = await edited(s.fake, path.join(s.leadDir, "system-map.md"), s.main().ctx);
+		expect(result?.additionalContext).toBe("[lead] system map ~/kb/lead/system-map.md: services: expected a list. Fix system-map.md now: /story and the structural gate read it.");
+	});
+});

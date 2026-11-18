@@ -4,7 +4,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { leadDirFor, readBrief, readHardGates } from "./lib/lead/artifacts";
+import { leadDirFor, readBrief, readHardGates, readStoryState } from "./lib/lead/artifacts";
 import { checkPrBody } from "./lib/lead/pr-body";
 import { lead } from "./lib/lead/registry";
 import { diffEdges } from "../scripts/arch-graph";
@@ -66,7 +66,16 @@ export default function leadPrCheck(pi: ExtensionAPI): void {
 		if (!repo) return;
 		const active = lead().story;
 		const story = active && { ...active, invariants: readBrief(active.dir).brief?.invariants ?? active.invariants };
-		const problems = checkPrBody({ body: call.body, repo, story, gates, changed: changedFiles(repo), added: addedLines(repo), edgesDiff: diffEdges(repo, mergeBase(repo)) });
+		const problems = checkPrBody({
+			body: call.body,
+			repo,
+			story,
+			gates,
+			changed: changedFiles(repo),
+			added: addedLines(repo),
+			edgesDiff: diffEdges(repo, mergeBase(repo)),
+			mapEdited: active !== undefined && readStoryState(active.dir).mapEditedAt !== null,
+		});
 		if (problems.length) return { block: true, reason: `lead PR check failed (format: ${format}):\n- ${problems.join("\n- ")}` };
 	});
 }

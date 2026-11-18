@@ -31,7 +31,8 @@ A gate may add ${"`repos: [name, …]`"} (origin basenames) to apply to those re
 
 export const SYSTEM_MAP_TEMPLATE = `# System map
 
-The lead owns this file. Agents cannot edit it; they propose changes in the PR's \`## System-map diff\`.
+The lead reads this file; agents keep it current. When the structure changes (a new call between services, a new table owner,
+a new queue or topic), the agent edits the entry here and lists the change in the PR's \`## System-map diff\`.
 List every service: who owns which tables, what it publishes and consumes, and which services it calls.
 \`repo\` is the basename of the repository's origin URL; \`path\` is the service's folder inside it ("" for the root).
 
@@ -92,10 +93,10 @@ One line per item, \`N. yes|no — <note>\`. Every \`yes\` adds \`mechanism: <wh
 1. Retries and duplicates  2. Lost updates  3. Write skew  4. Replication lag  5. Ordering  6. Dual writes
 7. Partial failure  8. Clocks  9. Hot spots  10. Schema evolution  11. Derived data  12. End-to-end check
 
-When the diff touches a contract gate or docs/arch/edges.json changed:
+When the diff touches a contract gate, docs/arch/edges.json changed, or you edited system-map.md during the story:
 
 ## System-map diff
-<proposed change to system-map.md, for the lead to apply>
+<what changed in system-map.md, one line per service>
 
 When docs/arch/edges.json changed:
 

@@ -19,6 +19,8 @@ export interface PrBodyInput {
 	added: string[];
 	/** `+ edge` / `- edge` lines of docs/arch/edges.json against the merge base. */
 	edgesDiff?: string[];
+	/** An agent edited system-map.md during the story. */
+	mapEdited?: boolean;
 }
 
 const TESTREF = /test:\s*(\S+?)::(.+?)\s*$/;
@@ -93,9 +95,9 @@ export function checkPrBody(input: PrBodyInput): string[] {
 			else if (line.startsWith(`${n}. yes`) && !(line.includes("mechanism:") && proven(line))) problems.push(`DDIA item ${n}: yes needs mechanism: and test: path::name`);
 		}
 	}
-	if (gated.has("contract") || edgesChanged) {
+	if (gated.has("contract") || edgesChanged || input.mapEdited) {
 		const diff = required("System-map diff");
-		if (diff?.length === 0) problems.push("System-map diff: describe the proposed change to system-map.md");
+		if (diff?.length === 0) problems.push("System-map diff: say what changed in system-map.md, one line per service");
 	}
 	if (input.edgesDiff?.length) {
 		const structural = required("Structural changes");

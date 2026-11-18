@@ -19,7 +19,7 @@ import { planApproved, STORY_BLOCK_HEADER, storyBlock } from "./lib/lead/story";
 import { RETRO_HEADER } from "./lib/lead/templates";
 import { repoRoot } from "./lib/repo";
 import { tildify } from "./lib/state";
-import { touchedPaths } from "./lib/tool-input";
+import { resolveFrom, targetPaths, touchedPaths } from "./lib/tool-input";
 
 const COMMAND = /^\/(?:[\w-]+:)?(story|build)(?=\s|$)(?:\s+(\S+))?/;
 const STORY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -230,6 +230,25 @@ export default function leadExtension(pi: ExtensionAPI): void {
 				};
 			}
 		}
+	});
+
+	// Agents keep the system map current. The lead is not asked, so each edit is announced and has to be described in the PR.
+	pi.on("tool_result", async (event, ctx) => {
+		if (event.isError || !WRITE_TOOLS[event.toolName]) return;
+		const leadDir = leadDirFor(ctx.cwd);
+		if (!leadDir) return;
+		const map = path.join(leadDir, "system-map.md");
+		const targets = targetPaths(event.toolName, (event.input ?? {}) as Record<string, unknown>).filter(p => !p.includes("://"));
+		if (!targets.some(p => inside(resolveFrom(ctx.cwd, p), map))) return;
+		const story = lead().story;
+		leadNotify(ctx, `omp lead · ${story?.id ?? "session"} · system-map.md edited by ${ctx.agent?.name ?? "main"}`);
+		if (story) {
+			await updateStoryState(story.dir, state => {
+				state.mapEditedAt = new Date().toISOString();
+			});
+		}
+		const { error } = readSystemMap(leadDir);
+		if (error) return { additionalContext: `[lead] ${error}. Fix system-map.md now: /story and the structural gate read it.` };
 	});
 
 	const builderId = (ctx: ExtensionContext): string | undefined =>

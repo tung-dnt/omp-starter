@@ -98,10 +98,12 @@ describe("sections the diff calls for", () => {
 		expect(check(BASE + ddia({ 2: proven.replace("stock never", "stock sometimes") }), { changed })).toEqual(["test reference src/orders.test.ts::stock sometimes goes negative not found"]);
 	});
 
-	test("a contract change or a changed edge list needs the system-map diff", () => {
+	test("a contract change, a changed edge list or an agent's edit of the system map needs the system-map diff", () => {
 		expect(check(BASE + ddia(), { changed: ["api/openapi.yml"] })).toEqual(["Missing section: ## System-map diff"]);
 		expect(check(BASE, { changed: ["docs/arch/edges.json"] })).toEqual(["Missing section: ## System-map diff"]);
-		expect(check(`${BASE}\n\n## System-map diff\n`, { changed: ["docs/arch/edges.json"] })).toEqual(["System-map diff: describe the proposed change to system-map.md"]);
+		expect(check(BASE, { mapEdited: true })).toEqual(["Missing section: ## System-map diff"]);
+		expect(check(`${BASE}\n\n## System-map diff\n`, { mapEdited: true })).toEqual(["System-map diff: say what changed in system-map.md, one line per service"]);
+		expect(check(`${BASE}\n\n## System-map diff\n- api: now calls worker`, { mapEdited: true })).toEqual([]);
 	});
 
 	test("changed edges must be listed line for line under structural changes", () => {

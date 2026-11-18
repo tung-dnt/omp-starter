@@ -131,19 +131,20 @@ describe("readPlan", () => {
 });
 
 describe("protectedLeadPath", () => {
-	test("the lead's files are protected; the plan is the agent's", () => {
+	test("the lead's files are protected; the plan and the system map are the agent's to keep current", () => {
 		const at = (rel: string) => protectedLeadPath(leadDir(), path.join(leadDir(), rel));
 		expect(at("stories/S1/brief.md")).toBe(true);
 		expect(at("stories/S1/state.json")).toBe(true);
 		expect(at("hard-gates.md")).toBe(true);
 		expect(at("stories/S1/plan.md")).toBe(false);
+		expect(at("system-map.md")).toBe(false);
 	});
 
 	test("a symlinked spelling of the lead folder is protected too", () => {
 		fs.mkdirSync(leadDir(), { recursive: true });
 		fs.symlinkSync(path.join(HOME, "kb"), path.join(HOME, "link"));
-		expect(protectedLeadPath(leadDir(), path.join(HOME, "link", "lead", "system-map.md"))).toBe(false);
-		fs.writeFileSync(path.join(leadDir(), "system-map.md"), "x");
-		expect(protectedLeadPath(leadDir(), path.join(HOME, "link", "lead", "system-map.md"))).toBe(true);
+		expect(protectedLeadPath(leadDir(), path.join(HOME, "link", "lead", "hard-gates.md"))).toBe(false);
+		fs.writeFileSync(path.join(leadDir(), "hard-gates.md"), "x");
+		expect(protectedLeadPath(leadDir(), path.join(HOME, "link", "lead", "hard-gates.md"))).toBe(true);
 	});
 });

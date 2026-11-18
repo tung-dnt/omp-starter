@@ -332,6 +332,8 @@ export interface StoryState {
 	/** Gate decisions by gate key (`<repo root>::<repo-relative path>`). */
 	gates: Record<string, GateDecision>;
 	status: { value: "in-progress" | "in-review" | "done"; prs: { repo: string; url: string; state: string }[]; at: string } | null;
+	/** When an agent last edited system-map.md during the story; the PR body must then describe the change. */
+	mapEditedAt: string | null;
 }
 
 export function readStoryState(storyDir: string): StoryState {
@@ -340,10 +342,10 @@ export function readStoryState(storyDir: string): StoryState {
 		text = fs.readFileSync(path.join(storyDir, "state.json"), "utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		return { plan: null, gates: {}, status: null };
+		return { plan: null, gates: {}, status: null, mapEditedAt: null };
 	}
 	const state = JSON.parse(text) as Partial<StoryState>;
-	return { plan: state.plan ?? null, gates: state.gates ?? {}, status: state.status ?? null };
+	return { plan: state.plan ?? null, gates: state.gates ?? {}, status: state.status ?? null, mapEditedAt: state.mapEditedAt ?? null };
 }
 
 /** Lock file for a read-modify-write of `file`; in the temp dir, not the vault, so it never syncs. */
@@ -363,9 +365,9 @@ export function updateStoryState(storyDir: string, change: (state: StoryState) =
 
 // ── Ownership and setup ──────────────────────────────────────────────────────
 
-const PROTECTED = /^(?:hard-gates\.md|system-map\.md|retro-log\.md|brief-template\.md|pr-format\.md|stories\/[^/]+\/(?:brief\.md|state\.json|status\.md))$/;
+const PROTECTED = /^(?:hard-gates\.md|retro-log\.md|brief-template\.md|pr-format\.md|stories\/[^/]+\/(?:brief\.md|state\.json|status\.md))$/;
 
-/** Whether `absPath` is a lead file agents must not write with write/edit (the plan file is theirs). */
+/** Whether `absPath` is a lead file agents must not write with write/edit (the plan and the system map are theirs to keep current). */
 export function protectedLeadPath(leadDir: string, absPath: string): boolean {
 	return forms(absPath).some(p =>
 		forms(leadDir).some(dir => within(p, dir) && PROTECTED.test(path.relative(dir, p).split(path.sep).join("/"))),
