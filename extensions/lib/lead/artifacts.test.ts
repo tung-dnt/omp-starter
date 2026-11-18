@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { HOME } from "../state";
 import { initGitRepo, resetHome, writeFiles } from "../../test-harness";
-import { protectedLeadPath, readBrief, readHardGates, readPlan, readSystemMap } from "./artifacts";
+import { approvalDigest, protectedLeadPath, readBrief, readHardGates, readPlan, readSystemMap } from "./artifacts";
 import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE, SYSTEM_MAP_TEMPLATE } from "./templates";
 
 beforeEach(resetHome);
@@ -95,18 +95,24 @@ describe("readPlan", () => {
 	const plan = (summary: string[], tasks = "- T1: add the table") =>
 		`---\nrepos:\n  - ${repo()}\n---\n\n## Summary\n${summary.join("\n")}\n\n## Tasks\n${tasks}\n`;
 
-	test("only the repo list and the summary are approved: editing tasks keeps the digest, editing the summary changes it", () => {
+	test("the approval covers the repos and the brief's invariants and boundaries, not the plan's summary or tasks", () => {
 		initGitRepo(repo());
-		writeFiles(storyDir(), { "plan.md": plan(["Goal: add orders", "I1: unique index on id"]) });
-		const first = readPlan(storyDir());
-		expect(first.errors).toEqual([]);
-		expect(first.plan?.repos).toEqual([repo()]);
+		initGitRepo(`${repo()}-two`);
+		const digest = (planText: string, briefText = FILLED_BRIEF) => {
+			writeFiles(storyDir(), { "plan.md": planText, "brief.md": briefText });
+			const { plan, errors } = readPlan(storyDir());
+			expect(errors).toEqual([]);
+			return approvalDigest(plan!, readBrief(storyDir()).brief!);
+		};
+		const first = digest(plan(["Goal: add orders", "I1: unique index on id"]));
+		expect(readPlan(storyDir()).plan?.repos).toEqual([repo()]);
 
-		writeFiles(storyDir(), { "plan.md": plan(["Goal: add orders", "I1: unique index on id"], "- T1: add the table\n- T2: backfill") });
-		expect(readPlan(storyDir()).plan?.digest).toBe(first.plan!.digest);
+		expect(digest(plan(["Goal: add orders and refunds", "I1: a lock instead"], "- T1: add the table\n- T2: backfill"))).toBe(first);
+		expect(digest(plan(["Goal: add orders"]), FILLED_BRIEF.replace("## Goal\none line", "## Goal\nanother goal"))).toBe(first);
 
-		writeFiles(storyDir(), { "plan.md": plan(["Goal: add orders and refunds", "I1: unique index on id"]) });
-		expect(readPlan(storyDir()).plan?.digest).not.toBe(first.plan!.digest);
+		expect(digest(plan(["Goal: add orders"]).replace(`  - ${repo()}\n`, `  - ${repo()}\n  - ${repo()}-two\n`))).not.toBe(first);
+		expect(digest(plan(["Goal: add orders"]), FILLED_BRIEF.replace("totals never go negative", "totals may go negative"))).not.toBe(first);
+		expect(digest(plan(["Goal: add orders"]), FILLED_BRIEF.replace("## Boundaries\none line", "## Boundaries\nonly the orders service"))).not.toBe(first);
 	});
 
 	test("a summary over 15 lines is rejected with its length", () => {

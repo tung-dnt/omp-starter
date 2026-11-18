@@ -219,6 +219,8 @@ export interface Invariant {
 export interface Brief {
 	mode: "sync" | "async";
 	invariants: Invariant[];
+	/** Non-empty lines of `## Boundaries`. */
+	boundaries: string[];
 	/** The brief without its frontmatter. */
 	text: string;
 }
@@ -244,12 +246,14 @@ export function readBrief(storyDir: string): { brief?: Brief; errors: string[] }
 	const mode = data.mode ?? "sync";
 	if (mode !== "sync" && mode !== "async") errors.push("brief: mode must be sync or async");
 	const invariants: Invariant[] = [];
+	let boundaries: string[] = [];
 	for (const heading of BRIEF_HEADINGS) {
 		const lines = section(body, heading);
 		if (!lines?.length) {
 			errors.push(`brief: missing or empty section "## ${heading}"`);
 			continue;
 		}
+		if (heading === "Boundaries") boundaries = lines;
 		if (heading !== "Invariants") continue;
 		for (const line of lines) {
 			const m = INVARIANT.exec(line);
@@ -258,16 +262,15 @@ export function readBrief(storyDir: string): { brief?: Brief; errors: string[] }
 		if (!invariants.length && !(lines.length === 1 && lines[0].trim() === "none")) errors.push("Invariants: list them as `- I1: …` or write `none`");
 	}
 	if (errors.length) return { errors };
-	return { brief: { mode: mode as Brief["mode"], invariants, text: body.trim() }, errors };
+	return { brief: { mode: mode as Brief["mode"], invariants, boundaries, text: body.trim() }, errors };
 }
 
 export interface Plan {
 	/** Symlink-resolved roots of the repositories the plan reads or changes. */
 	repos: string[];
+	/** Non-empty lines of `## Summary`: the current plan in brief. The agent replaces them as the approach changes. */
 	summary: string[];
 	text: string;
-	/** Hash of `repos` and `summary`: what the lead approves. The rest of the plan stays the agent's to edit. */
-	digest: string;
 }
 
 const SUMMARY_MAX = 15;
@@ -304,7 +307,15 @@ export function readPlan(storyDir: string): { plan?: Plan; errors: string[] } {
 	if (summary.length === 0) errors.push('plan: missing or empty section "## Summary"');
 	else if (summary.length > SUMMARY_MAX) errors.push(`Summary: ${summary.length} lines; keep it to ${SUMMARY_MAX}`);
 	if (errors.length) return { errors };
-	return { plan: { repos, summary, text, digest: hash("sha256", JSON.stringify({ repos, summary })) }, errors };
+	return { plan: { repos, summary, text }, errors };
+}
+
+/**
+ * What the lead's approval covers: the plan's repositories and the brief's invariants and boundaries. The plan's
+ * summary and tasks are the agent's to replace as the work changes; a change to any covered part needs approval again.
+ */
+export function approvalDigest(plan: Plan, brief: Brief): string {
+	return hash("sha256", JSON.stringify({ repos: plan.repos, invariants: brief.invariants, boundaries: brief.boundaries }));
 }
 
 // ── Story state ──────────────────────────────────────────────────────────────

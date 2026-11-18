@@ -11,7 +11,7 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { atomicWrite, withFileLock } from "./lib/file-lock";
 import { inside } from "./lib/kb-sources";
-import { leadDirFor, leadLock, leadReady, readBrief, readHardGates, readPlan, readSystemMap, type StoryState, updateStoryState } from "./lib/lead/artifacts";
+import { approvalDigest, leadDirFor, leadLock, leadReady, readBrief, readHardGates, readPlan, readSystemMap, type StoryState, updateStoryState } from "./lib/lead/artifacts";
 import { gateTitle, recordGate } from "./lib/lead/gates";
 import { leadNotify } from "./lib/lead/notify";
 import { type ActiveStory, lead, resetLead } from "./lib/lead/registry";
@@ -55,12 +55,12 @@ function activeStory(): ActiveStory {
 	return story;
 }
 
-/** Whether the story's plan is approved; tells the lead once when an approved plan's repos or summary changed. */
+/** Whether the story's plan is approved; tells the lead once when what they approved has changed since. */
 function approval(story: ActiveStory, ctx: ExtensionContext) {
 	const state = planApproved(story);
 	if (state.changed && !lead().notifiedPlanChange && ctx.hasUI) {
 		lead().notifiedPlanChange = true;
-		ctx.ui.notify("lead: the plan's repos or summary changed after approval; edits are blocked until the lead approves again.", "warning");
+		ctx.ui.notify("lead: the plan's repos or the brief's invariants or boundaries changed after approval; edits are blocked until the lead approves again.", "warning");
 	}
 	return state;
 }
@@ -91,14 +91,15 @@ async function approvePlan(ctx: ExtensionContext): Promise<string> {
 	const story = activeStory();
 	const { plan, errors } = readPlan(story.dir);
 	if (!plan) throw new Error(`lead: ${errors.join("; ")}`);
-	const invariants = readBrief(story.dir).brief?.invariants ?? story.invariants;
-	const missing = invariants.filter(inv => !new RegExp(`\\b${inv.id}\\b`).test(plan.text)).map(inv => inv.id);
+	const { brief, errors: briefErrors } = readBrief(story.dir);
+	if (!brief) throw new Error(`lead: ${briefErrors.join("; ")}`);
+	const missing = brief.invariants.filter(inv => !new RegExp(`\\b${inv.id}\\b`).test(plan.text)).map(inv => inv.id);
 	if (missing.length) throw new Error(`lead: plan does not mention invariant(s) ${missing.join(", ")}`);
 	if (!ctx.hasUI) throw new Error("lead: approval needs an interactive session");
 	const yes = await ctx.ui.confirm(`Approve plan for ${story.id}?`, `${plan.summary.join("\n")}\n\nRepos: ${plan.repos.join(", ")}`);
 	if (!yes) return "plan NOT approved; revise it with the lead and call approve again";
 	await updateStoryState(story.dir, state => {
-		state.plan = { digest: plan.digest, approvedAt: new Date().toISOString() };
+		state.plan = { digest: approvalDigest(plan, brief), approvedAt: new Date().toISOString() };
 	});
 	lead().notifiedPlanChange = false;
 	return `plan approved; building may start (/build ${story.id})`;
@@ -204,16 +205,21 @@ export default function leadExtension(pi: ExtensionAPI): void {
 		if (!story) return;
 		const paths = touchedPaths(event.toolName, (event.input ?? {}) as Record<string, unknown>, ctx.cwd).filter(p => !inside(p, story.leadDir));
 		if (!paths.length) return;
-		const { approved, repos } = approval(story, ctx);
+		const { approved, repos, changed, errors } = approval(story, ctx);
+		const planFile = path.join(story.dir, "plan.md");
 		for (const p of paths) {
 			const repo = repoRoot(p);
 			if (!repo) continue;
 			if (!approved) {
 				if (!WRITE_TOOLS[event.toolName]) continue;
-				return {
-					block: true,
-					reason: `lead: the plan for ${story.id} is not approved yet; write ${path.join(story.dir, "plan.md")} and call the lead tool with op "approve".`,
-				};
+				if (changed) {
+					return {
+						block: true,
+						reason: `lead: the plan's repos, or the brief's invariants or boundaries, changed since the lead approved ${story.id}; call the lead tool with op "approve" again.`,
+					};
+				}
+				const problems = errors.length && fs.existsSync(planFile) ? ` Problems: ${errors.join("; ")}.` : "";
+				return { block: true, reason: `lead: the plan for ${story.id} is not approved yet; write ${planFile} and call the lead tool with op "approve".${problems}` };
 			}
 			if (!repos.includes(fs.realpathSync(repo)) && !/\/node_modules\//.test(p)) {
 				return {

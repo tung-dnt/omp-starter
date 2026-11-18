@@ -1,22 +1,26 @@
 // The active story as the agent sees it: whether the lead approved its plan, and the system-prompt block carrying
 // the lead's brief, the system map and the hard gates.
 import * as path from "node:path";
-import { readBrief, readHardGates, readPlan, readStoryState, readSystemMap } from "./artifacts";
+import { approvalDigest, readBrief, readHardGates, readPlan, readStoryState, readSystemMap } from "./artifacts";
 import type { ActiveStory } from "./registry";
 
 export interface PlanApproval {
 	approved: boolean;
 	/** Symlink-resolved repository roots of the plan as it is now; empty while the plan is missing or invalid. */
 	repos: string[];
-	/** An approval was recorded, but the plan's repos or summary no longer match it. */
+	/** An approval was recorded, but the plan's repos or the brief's invariants or boundaries no longer match it. */
 	changed: boolean;
+	/** Why the plan or the brief cannot be read; an unreadable one is never approved. */
+	errors: string[];
 }
 
 export function planApproved(story: ActiveStory): PlanApproval {
-	const { plan } = readPlan(story.dir);
+	const { plan, errors: planErrors } = readPlan(story.dir);
+	const { brief, errors: briefErrors } = readBrief(story.dir);
 	const stored = readStoryState(story.dir).plan;
-	const approved = plan !== undefined && plan.digest === stored?.digest;
-	return { approved, repos: plan?.repos ?? [], changed: stored !== null && !approved };
+	const errors = [...planErrors, ...briefErrors];
+	const approved = plan !== undefined && brief !== undefined && approvalDigest(plan, brief) === stored?.digest;
+	return { approved, repos: plan?.repos ?? [], changed: stored !== null && !approved && errors.length === 0, errors };
 }
 
 /** First line of the block; also how a prompt that already carries it is recognised. */

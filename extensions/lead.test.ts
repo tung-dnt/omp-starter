@@ -167,16 +167,29 @@ describe("the single plan approval", () => {
 		expect(readStoryState(s.storyDir).plan).toBeNull();
 	});
 
-	test("covers the repo list and the summary only: editing tasks keeps it, editing the summary revokes it and tells the lead once", async () => {
+	test("the agent may replace the plan's summary and tasks; a new repo or a changed brief invariant needs approval again, told once", async () => {
 		const s = await approvedStory();
 		const { ui, ctx } = s.main();
-		s.writePlan(undefined, "- T1: add the table\n- T2: backfill");
+		s.writePlan("Goal: add orders and refunds\nI1: a row lock instead of the index", "- T1: add the table\n- T2: backfill");
 		expect(s.call("write", { path: "src/a.ts" }, ctx)).toBeUndefined();
+		expect(ui.notifications).toEqual([]);
 
-		s.writePlan("Goal: add orders and refunds\nI1: unique index on id");
-		expect(s.call("write", { path: "src/a.ts" }, ctx)?.reason).toContain("is not approved yet");
+		writeFiles(s.storyDir, { "plan.md": `---\nrepos:\n  - ${s.shop}\n  - ${s.other}\n---\n\n## Summary\nGoal: add orders\nI1: unique index on id\n` });
+		const changed = 'lead: the plan\'s repos, or the brief\'s invariants or boundaries, changed since the lead approved S1; call the lead tool with op "approve" again.';
+		expect(s.call("write", { path: "src/a.ts" }, ctx)).toEqual({ block: true, reason: changed });
 		expect(s.call("write", { path: "src/a.ts" }, ctx)?.block).toBe(true);
-		expect(ui.notifications).toEqual([{ type: "warning", message: "lead: the plan's repos or summary changed after approval; edits are blocked until the lead approves again." }]);
+		expect(ui.notifications).toEqual([{ type: "warning", message: "lead: the plan's repos or the brief's invariants or boundaries changed after approval; edits are blocked until the lead approves again." }]);
+
+		s.writePlan();
+		expect(s.call("write", { path: "src/a.ts" }, ctx)).toBeUndefined();
+		writeFiles(s.storyDir, { "brief.md": BRIEF.replace("inserts are idempotent on id", "inserts are idempotent on id and tenant") });
+		expect(s.call("write", { path: "src/a.ts" }, ctx)).toEqual({ block: true, reason: changed });
+	});
+
+	test("an approved plan that becomes unreadable blocks edits and says what is wrong", async () => {
+		const s = await approvedStory();
+		s.writePlan(Array.from({ length: 16 }, (_, i) => `line ${i + 1}`).join("\n"));
+		expect(s.call("write", { path: "src/a.ts" }, s.main().ctx)?.reason).toEndWith('call the lead tool with op "approve". Problems: Summary: 16 lines; keep it to 15.');
 	});
 
 	test("is refused for a plan that drops an invariant, for a subagent, and without an active story", async () => {
