@@ -42,7 +42,7 @@ ${FENCE}
 `;
 
 export const BRIEF_TEMPLATE = `---
-mode: sync
+mode: async
 ---
 
 ## Goal

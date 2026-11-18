@@ -10,7 +10,9 @@ import { type FakeExec, type FakePi, fakeContext, fakePi, initGitRepo, resetHome
 
 beforeEach(resetHome);
 
-const BRIEF = BRIEF_TEMPLATE.replace("- I1: …", "- I1: inserts are idempotent on id").replace(/^(## (?!Invariants).+)$/gm, "$1\none line");
+const BRIEF = BRIEF_TEMPLATE.replace("mode: async", "mode: sync")
+	.replace("- I1: …", "- I1: inserts are idempotent on id")
+	.replace(/^(## (?!Invariants).+)$/gm, "$1\none line");
 
 interface Verdict {
 	block: boolean;

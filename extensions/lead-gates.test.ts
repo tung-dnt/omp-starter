@@ -102,6 +102,21 @@ describe("a subagent hitting a gate", () => {
 		expect(await s.call("write", { path: MIGRATION }, s.sub)).toBeUndefined();
 	});
 
+	test("in an async story the main session is not asked either: the write is queued, the lead told once, and decided later in one sitting", async () => {
+		const s = setup();
+		lead().story = { id: "S1", dir: path.join(s.leadDir, "stories", "S1"), leadDir: s.leadDir, mode: "async", invariants: [] };
+		const { ui, ctx } = s.main({ select: ["Approve"] });
+		const queued = await s.call("write", { path: MIGRATION }, ctx);
+		expect(queued?.reason).toStartWith("HARD GATE migrations (schema): shop/db/migrations/002.sql needs the lead's approval and is queued. Leave this path");
+		await s.call("write", { path: MIGRATION }, ctx);
+		expect(ui.prompts).toEqual([]);
+		expect(ui.notifications).toEqual([{ type: "warning", message: "omp lead · S1 · gate migrations (schema) · shop/db/migrations/002.sql" }]);
+		expect((await s.call("write", { path: MIGRATION }, s.sub))?.reason).toEndWith("The gate is queued for the lead, who is away.");
+
+		expect((await s.tool.callTool("lead", { op: "gate" }, ctx)).text).toBe("migrations shop/db/migrations/002.sql: approved");
+		expect(await s.call("write", { path: MIGRATION }, ctx)).toBeUndefined();
+	});
+
 	test("`Decide later` leaves the gate pending and the subagent blocked", async () => {
 		const s = setup();
 		await s.call("write", { path: MIGRATION }, s.sub);

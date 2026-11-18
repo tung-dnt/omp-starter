@@ -244,8 +244,10 @@ export default function leadExtension(pi: ExtensionAPI): void {
 		const id = builderId(ctx);
 		if (id) lead().runningBuilders.delete(id);
 		const story = lead().story;
-		// In async mode the lead is away: tell them when the main session comes to rest.
-		if (story?.mode === "async" && ctx.agent?.kind !== "sub" && !event.willContinue) leadNotify(ctx, `omp lead · ${story.id} · agent stopped: review or approve`);
+		// In async mode the lead is away: tell them when the main session comes to rest, and how many gates wait for them.
+		if (story?.mode !== "async" || ctx.agent?.kind === "sub" || event.willContinue) return;
+		const queued = lead().pending.size;
+		leadNotify(ctx, `omp lead · ${story.id} · agent stopped: review or approve${queued ? ` · ${queued} gate${queued === 1 ? "" : "s"} queued` : ""}`);
 	});
 
 	pi.on("before_subagent_spawn", event => {

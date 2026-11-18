@@ -53,6 +53,8 @@ export function storyBlock(story: ActiveStory): string {
 		"",
 		`## Hard gates (${path.join(story.leadDir, "hard-gates.md")})`,
 		...gateLines,
-		'A write to a gated path stops for the lead. Subagents: stop and report "blocked: hard gate <id> <repo>/<path>"; the main session then calls the lead tool with op "gate". Reads and writes outside the plan\'s repos are blocked.',
+		story.mode === "async"
+			? 'A write to a gated path is refused and queued for the lead, who is away: leave that path, continue with work that does not depend on it, and list the queued gates in your report. Call the lead tool with op "gate" only when the lead asks. Reads and writes outside the plan\'s repos are blocked.'
+			: 'A write to a gated path stops for the lead. Subagents: stop and report "blocked: hard gate <id> <repo>/<path>"; the main session then calls the lead tool with op "gate". Reads and writes outside the plan\'s repos are blocked.',
 	].join("\n");
 }

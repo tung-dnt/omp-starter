@@ -56,9 +56,10 @@ describe("readSystemMap", () => {
 	});
 });
 
-const FILLED_BRIEF = BRIEF_TEMPLATE.replace("mode: sync", "mode: async")
-	.replace("- I1: …", "- I1: inserts are idempotent on id\n- I2: totals never go negative")
-	.replace(/^(## (?!Invariants).+)$/gm, "$1\none line");
+const FILLED_BRIEF = BRIEF_TEMPLATE.replace("- I1: …", "- I1: inserts are idempotent on id\n- I2: totals never go negative").replace(
+	/^(## (?!Invariants).+)$/gm,
+	"$1\none line",
+);
 
 describe("readBrief", () => {
 	test("a filled brief gives its mode and invariants", () => {

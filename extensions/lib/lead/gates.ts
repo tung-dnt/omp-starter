@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { repoRoot, resolveRepoName } from "../repo";
 import { type Gate, readStoryState, updateStoryState } from "./artifacts";
 import { leadNotify, type NotifyContext } from "./notify";
-import { lead, type PendingGate } from "./registry";
+import { lead } from "./registry";
 
 export interface GateHit {
 	gate: { id: string; category: string };
@@ -63,8 +63,9 @@ export const gateTitle = (hit: { gateId: string; category: string; repoName: str
 	`HARD GATE · ${hit.category} · ${hit.repoName}/${hit.rel} (gate ${hit.gateId}${suffix})`;
 
 /**
- * Settles each hit with the lead's decision. An undecided hit opens a dialog in an interactive main session; anywhere
- * else it is queued for the `lead` tool (op "gate") and blocks. Undefined means every hit is approved.
+ * Settles each hit with the lead's decision. An undecided hit opens a dialog in an interactive main session, unless
+ * the active story is in async mode (the lead is away); anywhere else it is queued for the `lead` tool (op "gate")
+ * and blocks that one call. Undefined means every hit is approved.
  */
 export async function resolveGate(ctx: GateContext, hits: GateHit[]): Promise<{ block: true; reason: string } | undefined> {
 	for (const hit of hits) {
@@ -77,7 +78,8 @@ export async function resolveGate(ctx: GateContext, hits: GateHit[]): Promise<{ 
 
 		const story = lead().story;
 		const notice = `omp lead · ${story?.id ?? "session"} · gate ${id} (${category}) · ${where}`;
-		if (ctx.agent?.kind !== "sub" && ctx.hasUI) {
+		const subagent = ctx.agent?.kind === "sub";
+		if (!subagent && ctx.hasUI && story?.mode !== "async") {
 			leadNotify(ctx, notice);
 			const scope = story ? `for story ${story.id}` : "for this session";
 			const approve = category === "lead-owned" ? `Approve implementing lead-owned code ${scope}` : `Approve ${scope}`;
@@ -101,15 +103,19 @@ export async function resolveGate(ctx: GateContext, hits: GateHit[]): Promise<{ 
 			continue;
 		}
 
-		const pending: PendingGate = { key: hit.key, gateId: id, category, repoName: hit.repoName, rel: hit.rel, agent: ctx.agent?.name ?? "main" };
-		lead().pending.set(hit.key, pending);
-		leadNotify(ctx, notice);
-		return {
-			block: true,
-			reason:
-				`HARD GATE ${id} (${category}): ${where} needs the lead's approval. Stop this task and report ` +
-				`"blocked: hard gate ${id} ${where}" to your parent. The main session then calls the lead tool with op "gate".`,
-		};
+		if (!lead().pending.has(hit.key)) leadNotify(ctx, notice);
+		lead().pending.set(hit.key, { key: hit.key, gateId: id, category, repoName: hit.repoName, rel: hit.rel, agent: ctx.agent?.name ?? "main" });
+		const needs = `HARD GATE ${id} (${category}): ${where} needs the lead's approval`;
+		if (!subagent) {
+			return {
+				block: true,
+				reason:
+					`${needs} and is queued. Leave this path, continue with work that does not depend on it, and list the queued gates ` +
+					'in your report. Call the lead tool with op "gate" only when the lead is back and asks for it.',
+			};
+		}
+		const next = story?.mode === "async" ? "The gate is queued for the lead, who is away." : 'The main session then calls the lead tool with op "gate".';
+		return { block: true, reason: `${needs}. Stop this task and report "blocked: hard gate ${id} ${where}" to your parent. ${next}` };
 	}
 	return undefined;
 }
