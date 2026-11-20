@@ -36,6 +36,8 @@ export interface LeadRegistry {
 	noteBefore: Map<string, string>;
 	/** Names of the project notes whose services block an agent changed in this session. */
 	editedNotes: Set<string>;
+	/** `/build` started the lead loop for the active story; `/story` ends it. */
+	building: boolean;
 }
 
 const KEY = Symbol.for("omp-starter.lead");
@@ -49,6 +51,7 @@ const empty = (sessionId?: string): LeadRegistry => ({
 	notifiedPlanChange: false,
 	noteBefore: new Map(),
 	editedNotes: new Set(),
+	building: false,
 });
 
 export function lead(): LeadRegistry {

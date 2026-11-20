@@ -26,6 +26,18 @@ export function repoRoot(p: string): string | undefined {
 	return undefined;
 }
 
+/** The commit `cwd` is at. */
+export const headSha = (cwd: string): string | undefined => git(cwd, ["rev-parse", "HEAD"]);
+
+/** Whether the work tree has uncommitted changes, untracked files included. */
+export const isDirty = (cwd: string): boolean => git(cwd, ["status", "--porcelain"]) !== undefined;
+
+/** The checked-out branch, or `HEAD` when detached. */
+export const branchName = (cwd: string): string | undefined => git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+
+/** The commit the branch's upstream is at; undefined without an upstream. */
+export const upstreamSha = (cwd: string): string | undefined => git(cwd, ["rev-parse", "@{u}"]);
+
 const BASE_REFS = ["origin/HEAD", "origin/main", "origin/master", "origin/develop", "origin/development"];
 
 /** The commit the branch at `cwd` forked from: its merge base with the first base ref that exists. */

@@ -26,6 +26,8 @@ export function planApproved(story: ActiveStory): PlanApproval {
 /** First line of the block; also how a prompt that already carries it is recognised. */
 export const STORY_BLOCK_HEADER = "# Lead story ";
 const TEXT_MAX = 8000;
+/** Story ids that are Jira keys: a missing brief can be drafted from the ticket. */
+export const JIRA_ID = /^[A-Z][A-Z0-9]+-\d+$/;
 const capped = (text: string): string => (text.length > TEXT_MAX ? `${text.slice(0, TEXT_MAX)}\n… (truncated; read the file)` : text);
 
 /** The `# Lead story` system-prompt block, read from the files as they are now. */
@@ -52,6 +54,7 @@ export function storyBlock(story: ActiveStory): string {
 		"",
 		`## Lead brief (${path.join(story.dir, "brief.md")})`,
 		capped(brief.brief?.text ?? brief.errors.join("; ")),
+		...(!brief.brief && JIRA_ID.test(story.id) ? [`No valid brief yet: draft brief.md in the story folder from Jira ${story.id} as /story describes; the lead approves it with the plan.`] : []),
 		"",
 		"## Project notes: the services and standing invariants of the plan's repositories",
 		`Each repository in the plan needs ${path.join(notesDir, "<repo>.md")} with a \`\`\`yaml block of its services before the lead can approve. Keep the block true as the structure changes; the lead is told of each change.`,

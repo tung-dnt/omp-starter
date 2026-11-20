@@ -226,11 +226,11 @@ You are the tech lead; agents are contractors with no context beyond what you gi
 
 | File (default folder `<kb>/lead/`) | Written by | Kept current by |
 |---|---|---|
-| `hard-gates.md` | you | You. Read on every tool call; an invalid edit falls back to the last good copy and tells you once. |
+| `hard-gates.md` | you | You. Read on every tool call; an invalid edit falls back to the last good copy and tells you once. Besides the gates it holds `checks:` per repository (see [The loop](#the-loop)). |
 | `<kb>/projects/<repo>.md` (always this folder) | you, then agents | Agents keep its `services:` block true as the structure changes. Each change to the block notifies you and must be described in the PR's `## System-map diff`. See [Project notes](#project-notes). |
-| `stories/<id>/brief.md` | you | You. Goal, success criteria, boundaries, invariants (`- I1: …`), must-never-break, out of scope; `mode: async\|sync`. |
-| `stories/<id>/plan.md` | the agent | The agent replaces it as the approach changes: it states the current plan only, never a history. `repos:` plus a `## Summary` of at most 15 lines, then `## Tasks` and `## Decision log`. |
-| `stories/<id>/state.json` | the harness | On approval, each gate decision, each map edit, each status. |
+| `stories/<id>/brief.md` | you; the agent drafts it for a Jira-keyed story until its plan is approved | You. Goal, success criteria (`- AC1: …`), boundaries, invariants (`- I1: …`), must-never-break, out of scope; `mode: async\|sync`. |
+| `stories/<id>/plan.md` | the agent | The agent replaces it as the approach changes: it states the current plan only, never a history. `repos:` plus a `## Summary` of at most 15 lines, a `## Proof` (a yaml `proof:` list with one row per AC), then `## Tasks` and `## Decision log`. |
+| `stories/<id>/state.json` | the harness | On approval, each gate decision, each map edit, each status, and each check run and review of the loop. |
 | `stories/<id>/status.md` | the harness | On `lead` with `op: "status"`, and whenever `/story` or `/build` returns to a story with an approved plan. |
 | `retro-log.md` | the harness | On `lead` with `op: "retro"`. |
 | `pr-format.md` | `/starter lead` | Rewritten at session start when it differs from this plugin version's text. |
@@ -238,12 +238,13 @@ You are the tech lead; agents are contractors with no context beyond what you gi
 
 What is enforced:
 
-- **Input check.** `/story <id>` is refused without a complete brief; `/build` is refused without an approved plan, or when a repository in the plan has lost its project note.
+- **Input check.** `/story <id>` is refused without a complete brief (an id that is a Jira key, such as `PAC2-1234`, may start without one until its plan is approved: the agent drafts `brief.md` from the ticket and you approve it with the plan); `/build` is refused without an approved plan, or when a repository in the plan has lost its project note.
 - **Context.** The brief, the hard gates and the project notes of the plan's repositories are added to the system prompt of the main session and of building and reviewing subagents.
-- **One approval.** The agent calls the `lead` tool (`op: "approve"`). It is refused until every repository in the plan has a project note with a `services:` block. You then answer a confirm dialog showing the plan's summary, its repositories and how fresh the notes are. Subagents cannot call it and no argument approves anything. The approval covers the plan's `repos:` and the brief's invariants and boundaries: a new repository, or your edit to those brief sections, needs approval again. The plan's summary and tasks are the agent's to replace.
+- **One approval.** The agent calls the `lead` tool (`op: "approve"`). It is refused until every repository in the plan has a project note with a `services:` block, every brief AC has a proof row, and `hard-gates.md` has a `checks:` entry for every repository. You then answer one confirm dialog showing the plan's summary, each AC with how it is proven (or `UNPROVABLE: <reason>`), the invariants, the boundaries, the repositories and how fresh the notes are. Subagents cannot call it and no argument approves anything. The approval covers the plan's `repos:`, the brief's criteria, invariants and boundaries, and what each AC is proven by (test, acceptance, unprovable): a change to any of them needs approval again. The plan's summary, tasks and proof commands are the agent's to replace.
+- **Loop.** After `/build`, see [The loop](#the-loop).
 - **Fence.** No repository edits before approval; afterwards reads and writes outside the plan's repositories are blocked.
 - **Hard gates.** A write, commit, push or PR touching a gated path needs your decision. In `mode: sync` the main session asks you in a dialog (`Approve for story` / `Reject`). In `mode: async` (the template's default) nothing is asked mid-work: that one write is refused and queued, you are notified, and the agent carries on with other work; you decide the queue in one sitting when the agent calls `lead` with `op: "gate"`. A blocked subagent reports the gate to its parent in both modes. An unreadable `hard-gates.md` fails closed. Agents cannot edit `hard-gates.md`, briefs, or the harness's files.
-- **PR check.** `gh pr create|edit` and the github tool's `pr_create` are blocked unless the body has the decision log, an invariant checklist whose proving tests exist, and a risk summary with `file:line` pointers, plus the concurrency note, DDIA checklist, system-map diff and structural changes the diff calls for (`pr-format.md`).
+- **PR check.** `gh pr create|edit` and the github tool's `pr_create` are blocked unless the body has the decision log, an invariant checklist whose proving tests exist, and a risk summary with `file:line` pointers, plus the concurrency note, DDIA checklist, system-map diff and structural changes the diff calls for (`pr-format.md`). In an approved story the body also needs `## Evidence` (a line per AC the repository proves) and `## Unproven` (a line per unprovable AC), and the loop's receipts and a clean review must be recorded at HEAD.
 - **Structure.** `scripts/arch-graph.ts generate|check|diff` writes `docs/arch/` (code, cross-service, Serverless infra and table-write edges). A commit in a repo with `docs/arch/services.json` is blocked while it is stale against the code or against the services in the repository's project note. Undeclared cross-service calls or writes to tables another service owns become a `structure` gate. `templates/arch-graph.yml` is the matching CI check.
 - **Builders and notifications.** At most `limits.builders` task/task-builder/test-engineer agents run at once while a story is active. Gate stops, changes to a project note's services, and in `async` mode every stop of the main session (with the number of queued gates) notify you through the UI, `OMP_STARTER_NOTIFY_CMD` (`sh -c`, text in `OMP_STARTER_NOTIFY_TEXT`) or a macOS notification; texts carry metadata only.
 - **Status and retro.** `lead` with `op: "status"` computes the story's state from `gh pr list`; `op: "retro"` logs an escaped bug with the cause you pick.
@@ -251,6 +252,17 @@ What is enforced:
 Because agents may edit project notes, the structural gate checks code against services the agent can change. What tells you is the notification on each change, the mark in the approval dialog and the required `## System-map diff` in the PR.
 
 `bun scripts/lead-replay.ts <tasks.yml> [--runs 3] [--out file.md] --yes` replays real tasks in fresh worktrees with the harness on and off and tabulates pass rate, wall time and gate stops; without `--yes` it only prints how many runs it would spend.
+
+### The loop
+
+After `/build`, code, not the agent, decides what happens next. At the end of each main-session turn the harness reads the git state, the check receipts and the reviewer's verdict, and either sends the agent the next `[lead loop]` instruction or lets the session rest. The order: commit; `verify`; `test`; `proof`; an independent review; push; `acceptance` (when a repository has acceptance rows); open the PR. You are asked only at the plan approval, at queued hard gates, when a budget is spent, and at the merge.
+
+- **Checks.** `hard-gates.md` lists per repository (origin basename) `checks: { verify: [...], test: [...] }`, optionally `worktree_setup` and `acceptance: { deploy_wait, env }` (`{branch}`, `{sha}`, `{story}` are replaced). The agent runs them only through the `lead` tool (`op: "check"`, `stage: verify|test|proof|acceptance`); each run records a receipt keyed by HEAD in `state.json`. Logs are written to `~/.omp/agent/lead-logs/<story>/`, outside the vault.
+- **Proof.** A proof test must fail on the commit `/build` started from and pass on HEAD: the harness copies the test files onto a throwaway worktree of that commit and runs the command there. A test that also passes on the base does not prove its AC.
+- **Review.** The `code-reviewer` subagent runs on the `slow` role, not on the builders' model, and its prompt carries the proof rows, the base commits and the receipts' log paths. Its `lead-verdict` block counts only when it names the current HEAD of every repository; blockers, or an AC it judges unproven, send the agent back to fix and re-check.
+- **Budgets.** Three failed runs of a stage, three non-clean reviews, or 60 continuations stop the loop: the agent has the `deep` agent write a diagnosis to `<story>/stuck.md`, then you are notified. `/build` starts the budgets again.
+- **The lead is out of the loop.** While `/build` runs, the main session's `ask` is blocked: the agent decides and records it in the plan's `## Decision log`.
+- **Off switch.** `OMP_STARTER_LEAD_LOOP=off` turns the controller off; the checks and the PR check stay.
 
 ### Project notes
 
@@ -294,7 +306,7 @@ A knowledge base that already has folders for this material can keep using them.
 | `policy` | `hard-gates.md`, `pr-format.md`, `retro-log.md` | `lead` |
 | `templates` | `brief-template.md` | `lead` |
 
-Folders are relative to the knowledge base, and a key you leave out keeps its default. In a folder shared with other notes, agents are kept from writing only the lead's files (`hard-gates.md`, `pr-format.md`, `retro-log.md`, `brief-template.md`, and a story's `brief.md`, `state.json` and `status.md`); the other notes stay writable. `/starter kb` keeps the setting when you set the same knowledge base up again.
+Folders are relative to the knowledge base, and a key you leave out keeps its default. In a folder shared with other notes, agents are kept from writing only the lead's files (`hard-gates.md`, `pr-format.md`, `retro-log.md`, `brief-template.md`, a story's `state.json` and `status.md`, and its `brief.md` once the plan is approved); the other notes stay writable. `/starter kb` keeps the setting when you set the same knowledge base up again.
 
 | Do | Don't |
 |---|---|
@@ -333,6 +345,14 @@ It prints one markdown table per metric, for main sessions and subagents separat
 Limits: M3 and M1's scope check use today's vault, so notes moved later are judged at their new place. A session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names, tool names and note slugs; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder or the vault; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.37.0 — 2026-11-21
+
+- **Added:** the lead loop (see [The loop](#the-loop)): after `/build` the harness drives verify → test → proof → independent review → push → acceptance → PR from check receipts keyed by HEAD, stops after three failed runs of a stage or three non-clean reviews with a `deep` diagnosis and a notification, and blocks the main session's `ask` while it runs.
+- **Added:** briefs carry `- AC1: …` criteria and plans a `## Proof` list; one approval dialog shows each AC with how it is proven or why it is unprovable. A proof test must fail on the base commit and pass on HEAD.
+- **Added:** `checks:` per repository in `hard-gates.md`, a `check` op on the `lead` tool, `## Evidence` and `## Unproven` in the PR body, and PR checks for receipts and a clean review at HEAD.
+- **Added:** `/story <jira-key>` without a brief: the agent drafts `brief.md` from the ticket and you approve it with the plan.
+- **Changed:** the `code-reviewer` runs on the `slow` role. Existing installs: add `checks:` for each repository to `hard-gates.md`, and `- AC<n>:` lines to open briefs. Use agent-skills 0.9.0, which drops its `verification` tool.
 
 ### 0.36.0 — 2026-11-18
 

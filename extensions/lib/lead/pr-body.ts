@@ -3,7 +3,7 @@
 // so a PR is not opened until they are there and every proving test they name exists.
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { DATA_CATEGORIES, type GateCategory, type HardGates } from "./artifacts";
+import { DATA_CATEGORIES, type GateCategory, type HardGates, type ProofRow } from "./artifacts";
 import { matchRepoFiles } from "./gates";
 import type { ActiveStory } from "./registry";
 
@@ -21,6 +21,8 @@ export interface PrBodyInput {
 	edgesDiff?: string[];
 	/** An agent changed a project note's services block during the story. */
 	mapEdited?: boolean;
+	/** The approved plan's proof rows; present in a lead story. `repoName` is this repository's project-note name. */
+	proof?: { rows: ProofRow[]; repoName: string };
 }
 
 const TESTREF = /test:\s*(\S+?)::(.+?)\s*$/;
@@ -103,6 +105,18 @@ export function checkPrBody(input: PrBodyInput): string[] {
 		const structural = required("Structural changes");
 		for (const edge of structural ? input.edgesDiff : []) {
 			if (!structural!.includes(edge)) problems.push(`Structural changes: missing ${edge}`);
+		}
+	}
+	if (input.proof) {
+		const proven = input.proof.rows.filter(row => row.repo === input.proof?.repoName && row.unprovable === undefined);
+		const evidence = proven.length ? required("Evidence") : undefined;
+		for (const row of evidence ? proven : []) {
+			if (!evidence!.some(line => line.startsWith(`- ${row.ac}:`))) problems.push(`Evidence: no line for ${row.ac}`);
+		}
+		const unproven = input.proof.rows.filter(row => row.unprovable !== undefined);
+		const accepted = unproven.length ? required("Unproven") : undefined;
+		for (const row of accepted ? unproven : []) {
+			if (!accepted!.some(line => line.startsWith(`- ${row.ac}: `))) problems.push(`Unproven: no line for ${row.ac}`);
 		}
 	}
 	return problems;

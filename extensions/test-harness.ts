@@ -147,7 +147,7 @@ export interface FakePi {
 	runCommand(name: string, args: string, ctx: object): Promise<void>;
 }
 
-export type FakeExec = (command: string, args: string[], options?: { timeout?: number }) => { stdout?: string; stderr?: string; code?: number } | Promise<{ stdout?: string; stderr?: string; code?: number }>;
+export type FakeExec = (command: string, args: string[], options?: { timeout?: number; cwd?: string }) => { stdout?: string; stderr?: string; code?: number } | Promise<{ stdout?: string; stderr?: string; code?: number }>;
 
 /** A fake `pi` that captures `on`, `registerTool` and `registerCommand`; `exec` answers from `exec` (default: success, no output). */
 export function fakePi(exec?: FakeExec): FakePi {
@@ -160,7 +160,7 @@ export function fakePi(exec?: FakeExec): FakePi {
 		on: (event: string, handler: Handler) => void handlers.set(event, handler),
 		registerTool: (tool: FakeTool) => void tools.set(tool.name, tool),
 		registerCommand: (name: string, command: FakeCommand) => void commands.set(name, command),
-		exec: async (command: string, args: string[], options?: { timeout?: number }) => {
+		exec: async (command: string, args: string[], options?: { timeout?: number; cwd?: string }) => {
 			execCalls.push({ command, args });
 			return (await exec?.(command, args, options)) ?? { stdout: "", stderr: "", code: 0 };
 		},

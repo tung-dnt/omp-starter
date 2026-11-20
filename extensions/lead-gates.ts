@@ -4,7 +4,7 @@
 // Also keeps agents from editing the lead's own files. Active once `/starter lead` created hard-gates.md; off with
 // OMP_STARTER_LEAD=off.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { leadLayoutFor, protectedLeadPath, readHardGates } from "./lib/lead/artifacts";
+import { draftableBrief, leadLayoutFor, protectedLeadPath, readHardGates } from "./lib/lead/artifacts";
 import { matchGates, matchRepoFiles, resolveGate } from "./lib/lead/gates";
 import { checkStructure } from "./lib/lead/structure";
 import { changedFiles, repoRoot, stagedFiles } from "./lib/repo";
@@ -59,7 +59,8 @@ export default function leadGates(pi: ExtensionAPI): void {
 					.filter(p => !p.includes("://"))
 					.map(p => resolveFrom(ctx.cwd, p))
 			: [];
-		const owned = writes.find(p => protectedLeadPath(layout, p));
+		// A story's brief is the agent's to draft until the lead approves it with the plan.
+		const owned = writes.find(p => protectedLeadPath(layout, p) && !draftableBrief(layout, p));
 		if (owned) return { block: true, reason: `lead: ${tildify(owned)} is owned by the lead; propose the change in chat or in the PR body instead.` };
 
 		const { gates, error } = readHardGates(layout.policy);

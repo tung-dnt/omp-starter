@@ -14,6 +14,12 @@ const BRIEF = BRIEF_TEMPLATE.replace("mode: async", "mode: sync")
 	.replace("- I1: …", "- I1: inserts are idempotent on id")
 	.replace(/^(## (?!Invariants).+)$/gm, "$1\none line");
 
+/** hard-gates.md with the check commands of shop, the repository the tests plan for. */
+const GATES = HARD_GATES_TEMPLATE.replace("checks: {}", 'checks:\n  shop: { verify: ["true"], test: ["true"] }');
+
+/** The plan's proof of AC1 of BRIEF. */
+const PROOF = '\n## Proof\n```yaml\nproof:\n  - { ac: AC1, repo: shop, test: { run: "sh t.sh", files: [t.sh] } }\n```\n';
+
 interface Verdict {
 	block: boolean;
 	reason: string;
@@ -30,7 +36,7 @@ const NOTE = `---\nupdated: ${today()}\n---\n\n# shop\n\n${PROJECT_NOTE_BLOCK}\n
  * shop, and repos ~/work/shop and ~/work/other.
  * With `shared`, the knowledge base has the SHARED setting and `files` are relative to the knowledge base.
  */
-function setup(files: Record<string, string> | null = { "hard-gates.md": HARD_GATES_TEMPLATE, "stories/S1/brief.md": BRIEF }, exec?: FakeExec, shared = false) {
+function setup(files: Record<string, string> | null = { "hard-gates.md": GATES, "stories/S1/brief.md": BRIEF }, exec?: FakeExec, shared = false) {
 	const folder = path.join(HOME, "work");
 	const kb = seedKb({ name: "kb", folder });
 	seedState({ kb: { status: "done", sources: [shared ? { ...kb.source, lead: SHARED } : kb.source] } });
@@ -53,7 +59,7 @@ function setup(files: Record<string, string> | null = { "hard-gates.md": HARD_GA
 	const input = (text: string, ctx: object) => fake.emit("input", { type: "input", text, source: "interactive" }, ctx) as Promise<{ handled: boolean } | undefined>;
 	const call = (toolName: string, toolInput: Record<string, unknown>, ctx: object) => fake.emit("tool_call", { toolName, input: toolInput }, ctx) as Verdict | undefined;
 	const writePlan = (summary = "Goal: add orders\nI1: unique index on id", tasks = "- T1: add the table") =>
-		writeFiles(storyDir, { "plan.md": `---\nrepos:\n  - ${shop}\n---\n\n## Summary\n${summary}\n\n## Tasks\n${tasks}\n` });
+		writeFiles(storyDir, { "plan.md": `---\nrepos:\n  - ${shop}\n---\n\n## Summary\n${summary}\n\n## Tasks\n${tasks}\n${PROOF}` });
 	/** An edit of `file` as the host runs it: the call, `change` standing in for what the tool does, then the result. */
 	const edit = (file: string, ctx: object, change: () => void, isError = false) => {
 		const toolInput = { input: `[${file}#AB12]\nPUT 1.=1:\n+x` };
@@ -75,7 +81,7 @@ async function approvedStory(exec?: FakeExec) {
 
 describe("/story", () => {
 	test("is refused without a brief, naming the template; nothing is checked before /starter lead", async () => {
-		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE });
+		const s = setup({ "hard-gates.md": GATES });
 		const { ui, ctx } = s.main();
 		expect(await s.input("/story S1", ctx)).toEqual({ handled: true });
 		expect(ui.notifications).toEqual([
@@ -92,13 +98,13 @@ describe("/story", () => {
 	});
 
 	test("is refused without an id or with an incomplete brief", async () => {
-		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE, "stories/S1/brief.md": BRIEF_TEMPLATE });
+		const s = setup({ "hard-gates.md": GATES, "stories/S1/brief.md": BRIEF_TEMPLATE });
 		const { ui, ctx } = s.main();
 		expect(await s.input("/story", ctx)).toEqual({ handled: true });
 		expect(await s.input("/story S1", ctx)).toEqual({ handled: true });
 		expect(ui.notifications.map(n => n.message)).toEqual([
 			"lead: usage: /story <id>, where ~/kb/lead/stories/<id>/brief.md is your brief",
-			expect.stringContaining('brief: missing or empty section "## Goal"; brief: missing or empty section "## Success criteria"'),
+			expect.stringContaining('brief: missing or empty section "## Goal"; brief: missing or empty section "## Boundaries"'),
 		]);
 	});
 
@@ -171,7 +177,13 @@ describe("the single plan approval", () => {
 		const { ui, ctx } = s.main({ confirm: [true] });
 		expect((await s.fake.callTool("lead", { op: "approve" }, ctx)).text).toBe("plan approved; building may start (/build S1)");
 		expect(ui.prompts).toEqual([
-			{ kind: "confirm", title: "Approve plan for S1?", detail: `Goal: add orders\nI1: unique index on id\n\nRepos: ${s.shop}\n\nNotes:\n- shop: updated ${today()} (0 days ago), 0 unverified` },
+			{
+				kind: "confirm",
+				title: "Approve brief and plan for S1?",
+				detail:
+					"Goal: add orders\nI1: unique index on id\n\nAcceptance criteria and proof:\n- AC1: … → test in shop\n\n" +
+					`Invariants:\n- I1: inserts are idempotent on id\n\nBoundaries:\none line\n\nRepos: ${s.shop}\n\nNotes:\n- shop: updated ${today()} (0 days ago), 0 unverified`,
+			},
 		]);
 		expect(readStoryState(s.storyDir).plan?.digest).toMatch(/^[0-9a-f]{64}$/);
 
@@ -222,7 +234,7 @@ describe("the single plan approval", () => {
 		expect(s.call("write", { path: "src/a.ts" }, ctx)).toBeUndefined();
 		expect(ui.notifications).toEqual([]);
 
-		writeFiles(s.storyDir, { "plan.md": `---\nrepos:\n  - ${s.shop}\n  - ${s.other}\n---\n\n## Summary\nGoal: add orders\nI1: unique index on id\n` });
+		writeFiles(s.storyDir, { "plan.md": `---\nrepos:\n  - ${s.shop}\n  - ${s.other}\n---\n\n## Summary\nGoal: add orders\nI1: unique index on id\n${PROOF}` });
 		const changed = 'lead: the plan\'s repos, or the brief\'s invariants or boundaries, changed since the lead approved S1; call the lead tool with op "approve" again.';
 		expect(s.call("write", { path: "src/a.ts" }, ctx)).toEqual({ block: true, reason: changed });
 		expect(s.call("write", { path: "src/a.ts" }, ctx)?.block).toBe(true);
@@ -322,7 +334,7 @@ describe("builders", () => {
 		fake.emit("before_subagent_spawn", { type: "before_subagent_spawn", agent, invocationKind: "task", patterns: [] }, ctx) as Verdict | undefined;
 
 	test("are capped at limits.builders while a story is active; scouts are not counted or capped", async () => {
-		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE.replace("builders: 2", "builders: 1"), "stories/S1/brief.md": BRIEF });
+		const s = setup({ "hard-gates.md": GATES.replace("builders: 2", "builders: 1"), "stories/S1/brief.md": BRIEF });
 		const { ctx } = s.main();
 		const builder = fakeContext({ cwd: s.shop, hasUI: false, agent: { kind: "sub", id: "a1", name: "task-builder" } });
 		s.fake.emit("agent_start", { type: "agent_start" }, builder);
@@ -339,7 +351,7 @@ describe("builders", () => {
 
 describe("async mode", () => {
 	test("tells the lead when the main session stops, not when a subagent or a continuing turn ends", async () => {
-		const s = setup({ "hard-gates.md": HARD_GATES_TEMPLATE, "stories/S1/brief.md": BRIEF.replace("mode: sync", "mode: async") });
+		const s = setup({ "hard-gates.md": GATES, "stories/S1/brief.md": BRIEF.replace("mode: sync", "mode: async") });
 		const { ui, ctx } = s.main();
 		await s.input("/story S1", ctx);
 		s.fake.emit("agent_end", { type: "agent_end", messages: [] }, s.sub("task-builder"));
@@ -445,7 +457,7 @@ describe("session start", () => {
 });
 
 describe("a knowledge base whose lead setting reuses its own folders", () => {
-	const files = { "company/hard-gates.md": HARD_GATES_TEMPLATE, "projects/S1/brief.md": BRIEF };
+	const files = { "company/hard-gates.md": GATES, "projects/S1/brief.md": BRIEF };
 
 	test("briefs, the template and the policy files are found in those folders, and the story block names them", async () => {
 		const s = setup(files, undefined, true);

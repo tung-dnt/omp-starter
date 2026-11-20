@@ -41,6 +41,24 @@ describe("readHardGates", () => {
 		expect(result.gates).toBeUndefined();
 		expect(result.error).toContain("gates[0].id");
 	});
+
+	test("checks: per-repository commands with defaults; a wrong type names its key and falls back to the last good copy", () => {
+		const withChecks = (checks: string) => HARD_GATES_TEMPLATE.replace("checks: {}", checks);
+		writeFiles(leadDir(), { "hard-gates.md": withChecks('checks:\n  shop:\n    verify: ["bun run lint"]\n    test: ["bun test"]\n    acceptance: { deploy_wait: "wait-for-stack {branch}", env: { STACK: "https://{story}.example" } }') });
+		expect(readHardGates(leadDir()).gates?.checks).toEqual({
+			shop: {
+				verify: ["bun run lint"],
+				test: ["bun test"],
+				timeoutSeconds: 900,
+				acceptance: { deployWait: "wait-for-stack {branch}", env: { STACK: "https://{story}.example" }, timeoutSeconds: 1800 },
+			},
+		});
+
+		writeFiles(leadDir(), { "hard-gates.md": withChecks('checks:\n  shop: { verify: [], test: ["bun test"] }') });
+		const { gates, error } = readHardGates(leadDir());
+		expect(error).toContain("checks.shop.verify: expected at least one command");
+		expect(gates?.checks.shop.verify).toEqual(["bun run lint"]);
+	});
 });
 
 describe("readProjectNote", () => {
@@ -109,9 +127,17 @@ describe("readBrief", () => {
 
 	test("the unfilled template is refused section by section", () => {
 		writeFiles(storyDir(), { "brief.md": BRIEF_TEMPLATE });
-		expect(readBrief(storyDir()).errors).toEqual(
-			["Goal", "Success criteria", "Boundaries", "Must never break", "Out of scope"].map(h => `brief: missing or empty section "## ${h}"`),
-		);
+		expect(readBrief(storyDir()).errors).toEqual(["Goal", "Boundaries", "Must never break", "Out of scope"].map(h => `brief: missing or empty section "## ${h}"`));
+	});
+
+	test("criteria are read as `- AC<n>: …` lines and are required", () => {
+		writeFiles(storyDir(), { "brief.md": FILLED_BRIEF.replace("- AC1: …", "- AC1: orders are listed\n- AC2: refunds are listed") });
+		expect(readBrief(storyDir()).brief?.acs).toEqual([
+			{ id: "AC1", text: "orders are listed" },
+			{ id: "AC2", text: "refunds are listed" },
+		]);
+		writeFiles(storyDir(), { "brief.md": FILLED_BRIEF.replace("- AC1: …", "") });
+		expect(readBrief(storyDir()).errors).toEqual(["Success criteria: list each as `- AC1: …`"]);
 	});
 
 	test("a missing heading and malformed invariants are named exactly", () => {
@@ -127,8 +153,9 @@ describe("readBrief", () => {
 
 describe("readPlan", () => {
 	const repo = () => path.join(HOME, "work", "shop");
-	const plan = (summary: string[], tasks = "- T1: add the table") =>
-		`---\nrepos:\n  - ${repo()}\n---\n\n## Summary\n${summary.join("\n")}\n\n## Tasks\n${tasks}\n`;
+	const row = '{ ac: AC1, repo: shop, test: { run: "sh t.sh", files: [t.sh] } }';
+	const plan = (summary: string[], tasks = "- T1: add the table", proofRow = row) =>
+		`---\nrepos:\n  - ${repo()}\n---\n\n## Summary\n${summary.join("\n")}\n\n## Tasks\n${tasks}\n\n## Proof\n\`\`\`yaml\nproof:\n  - ${proofRow}\n\`\`\`\n`;
 
 	test("the approval covers the repos and the brief's invariants and boundaries, not the plan's summary or tasks", () => {
 		initGitRepo(repo());
@@ -150,6 +177,33 @@ describe("readPlan", () => {
 		expect(digest(plan(["Goal: add orders"]), FILLED_BRIEF.replace("## Boundaries\none line", "## Boundaries\nonly the orders service"))).not.toBe(first);
 	});
 
+	test("the approval covers what is proven and how, not the proof commands", () => {
+		initGitRepo(repo());
+		const digest = (proofRow: string) => {
+			writeFiles(storyDir(), { "plan.md": plan(["Goal"], "- T1", proofRow), "brief.md": FILLED_BRIEF });
+			const { plan: read, errors } = readPlan(storyDir());
+			expect(errors).toEqual([]);
+			return approvalDigest(read!, readBrief(storyDir()).brief!);
+		};
+		expect(digest(row.replace("sh t.sh", "sh other.sh"))).toBe(digest(row));
+		expect(digest('{ ac: AC1, unprovable: "needs EMIS sandbox" }')).not.toBe(digest(row));
+		expect(digest('{ ac: AC1, repo: shop, acceptance: { run: "sh a.sh" } }')).not.toBe(digest(row));
+	});
+
+	test("a proof row is checked field by field", () => {
+		initGitRepo(repo());
+		const errors = (proofRow: string) => {
+			writeFiles(storyDir(), { "plan.md": plan(["Goal"], "- T1", proofRow) });
+			return readPlan(storyDir()).errors;
+		};
+		expect(errors('{ ac: AC1, unprovable: "no sandbox", test: { run: "x", files: [t.sh] } }')).toEqual(["proof[0]: unprovable excludes test and acceptance"]);
+		expect(errors('{ ac: first, repo: shop, test: { run: "x", files: [t.sh] } }')).toEqual(["proof[0]: ac: expected AC<n>"]);
+		expect(errors("{ ac: AC1, test: { run: x, files: [t.sh] } }")).toEqual(["proof[0]: repo: expected the repository's origin basename"]);
+		expect(errors("{ ac: AC1, repo: shop }")).toEqual(["proof[0]: needs test, acceptance or unprovable"]);
+		expect(errors("{ ac: AC1, repo: shop, test: { run: x, files: [] } }")).toEqual(["proof[0]: test.files: list the test files to copy onto the base commit"]);
+		writeFiles(storyDir(), { "plan.md": plan(["Goal"]).replace(/\n## Proof[\s\S]*$/, "\n") });
+		expect(readPlan(storyDir()).errors).toEqual(['plan: missing "## Proof" with a ```yaml proof: list']);
+	});
 	test("a summary over 15 lines is rejected with its length", () => {
 		initGitRepo(repo());
 		writeFiles(storyDir(), { "plan.md": plan(Array.from({ length: 16 }, (_, i) => `line ${i + 1}`)) });

@@ -4,9 +4,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { leadLayoutFor, readBrief, readHardGates, readStoryState } from "./lib/lead/artifacts";
+import { leadLayoutFor, noteName, readBrief, readHardGates, readPlan, readStoryState } from "./lib/lead/artifacts";
+import { shipProblems } from "./lib/lead/loop";
 import { checkPrBody } from "./lib/lead/pr-body";
 import { lead } from "./lib/lead/registry";
+import { planApproved } from "./lib/lead/story";
 import { diffEdges } from "../scripts/arch-graph";
 import { addedLines, changedFiles, mergeBase, repoRoot } from "./lib/repo";
 import { bashDir, GH_PR, resolveFrom, simpleCommands } from "./lib/tool-input";
@@ -66,6 +68,8 @@ export default function leadPrCheck(pi: ExtensionAPI): void {
 		if (!repo) return;
 		const active = lead().story;
 		const story = active && { ...active, invariants: readBrief(active.dir).brief?.invariants ?? active.invariants };
+		// In an approved story the PR also needs the loop's receipts and a clean review at HEAD, and an evidence line per proven AC.
+		const approved = active && planApproved(active).approved ? readPlan(active.dir).plan : undefined;
 		const problems = checkPrBody({
 			body: call.body,
 			repo,
@@ -75,7 +79,9 @@ export default function leadPrCheck(pi: ExtensionAPI): void {
 			added: addedLines(repo),
 			edgesDiff: diffEdges(repo, mergeBase(repo)),
 			mapEdited: active !== undefined && readStoryState(active.dir).mapEditedAt !== null,
+			proof: approved && { rows: approved.proof, repoName: noteName(repo) },
 		});
+		if (active && approved) problems.push(...shipProblems(active, repo));
 		if (problems.length) return { block: true, reason: `lead PR check failed (format: ${format}):\n- ${problems.join("\n- ")}` };
 	});
 }

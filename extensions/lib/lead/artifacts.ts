@@ -57,7 +57,7 @@ export const inLead = (layout: LeadLayout, p: string): boolean =>
 // ── YAML blocks ──────────────────────────────────────────────────────────────
 
 type Yaml = Record<string, unknown>;
-const isObject = (value: unknown): value is Yaml => typeof value === "object" && value !== null && !Array.isArray(value);
+export const isObject = (value: unknown): value is Yaml => typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** The first fenced ```yaml block of a Markdown file, parsed; throws when there is none or it is not a mapping. */
 function yamlBlock(text: string): Yaml {
@@ -91,10 +91,58 @@ export interface Gate {
 	paths: string[];
 }
 
+/** Commands the lead loop runs for one repository, from `checks.<repo>` of hard-gates.md. */
+export interface RepoChecks {
+	verify: string[];
+	test: string[];
+	/** Run in a fresh worktree of the base commit before a base-run test; undefined: link the repository's node_modules. */
+	worktreeSetup?: string;
+	timeoutSeconds: number;
+	acceptance?: { deployWait: string; env: Record<string, string>; timeoutSeconds: number };
+}
+
 export interface HardGates {
 	gates: Gate[];
 	concurrencyTriggers: { paths: string[]; patterns: RegExp[] };
 	limits: { builders: number };
+	/** Check commands by repository (origin basename). */
+	checks: Record<string, RepoChecks>;
+}
+
+function seconds(value: unknown, where: string, fallback: number): number {
+	if (value === undefined) return fallback;
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 7200) throw new Error(`${where}: expected an integer of 1 to 7200`);
+	return value;
+}
+
+function parseChecks(raw: unknown): Record<string, RepoChecks> {
+	if (raw === undefined) return {};
+	if (!isObject(raw)) throw new Error("checks: expected a mapping");
+	const checks: Record<string, RepoChecks> = {};
+	for (const [repo, value] of Object.entries(raw)) {
+		const at = `checks.${repo}`;
+		if (!isObject(value)) throw new Error(`${at}: expected a mapping`);
+		const commands = (key: "verify" | "test"): string[] => {
+			const list = strings(value[key], `${at}.${key}`);
+			if (!list.length || list.some(command => !command.trim())) throw new Error(`${at}.${key}: expected at least one command`);
+			return list;
+		};
+		const entry: RepoChecks = { verify: commands("verify"), test: commands("test"), timeoutSeconds: seconds(value.timeout_seconds, `${at}.timeout_seconds`, 900) };
+		if (value.worktree_setup !== undefined) {
+			if (typeof value.worktree_setup !== "string" || !value.worktree_setup.trim()) throw new Error(`${at}.worktree_setup: expected a command`);
+			entry.worktreeSetup = value.worktree_setup;
+		}
+		if (value.acceptance !== undefined) {
+			const acceptance = value.acceptance;
+			if (!isObject(acceptance)) throw new Error(`${at}.acceptance: expected a mapping`);
+			if (typeof acceptance.deploy_wait !== "string" || !acceptance.deploy_wait.trim()) throw new Error(`${at}.acceptance.deploy_wait: expected a command`);
+			const env = acceptance.env ?? {};
+			if (!isObject(env) || Object.values(env).some(v => typeof v !== "string")) throw new Error(`${at}.acceptance.env: expected a mapping of strings`);
+			entry.acceptance = { deployWait: acceptance.deploy_wait, env: env as Record<string, string>, timeoutSeconds: seconds(acceptance.timeout_seconds, `${at}.acceptance.timeout_seconds`, 1800) };
+		}
+		checks[repo] = entry;
+	}
+	return checks;
 }
 
 const GATE_ID = /^[a-z0-9][a-z0-9-]*$/;
@@ -128,7 +176,12 @@ function parseHardGates(text: string): HardGates {
 	if (!isObject(limits)) throw new Error("limits: expected a mapping");
 	const builders = limits.builders ?? 2;
 	if (typeof builders !== "number" || !Number.isInteger(builders) || builders < 1) throw new Error("limits.builders: expected an integer of 1 or more");
-	return { gates, concurrencyTriggers: { paths: strings(triggers.paths, "concurrency_triggers.paths", []), patterns }, limits: { builders } };
+	return {
+		gates,
+		concurrencyTriggers: { paths: strings(triggers.paths, "concurrency_triggers.paths", []), patterns },
+		limits: { builders },
+		checks: parseChecks(doc.checks),
+	};
 }
 
 /**
@@ -314,8 +367,15 @@ export interface Invariant {
 	text: string;
 }
 
+export interface Criterion {
+	id: string;
+	text: string;
+}
+
 export interface Brief {
 	mode: "sync" | "async";
+	/** `- AC<n>: …` lines of `## Success criteria`. */
+	acs: Criterion[];
 	invariants: Invariant[];
 	/** Non-empty lines of `## Boundaries`. */
 	boundaries: string[];
@@ -324,6 +384,7 @@ export interface Brief {
 }
 
 const INVARIANT = /^- (I\d+): (.+)$/;
+const CRITERION = /^- (AC\d+): (.+)$/;
 
 /** The lead's brief for a story, with every problem that keeps planning from starting. */
 export function readBrief(storyDir: string): { brief?: Brief; errors: string[] } {
@@ -344,6 +405,7 @@ export function readBrief(storyDir: string): { brief?: Brief; errors: string[] }
 	const mode = data.mode ?? "sync";
 	if (mode !== "sync" && mode !== "async") errors.push("brief: mode must be sync or async");
 	const invariants: Invariant[] = [];
+	const acs: Criterion[] = [];
 	let boundaries: string[] = [];
 	for (const heading of BRIEF_HEADINGS) {
 		const lines = section(body, heading);
@@ -352,6 +414,13 @@ export function readBrief(storyDir: string): { brief?: Brief; errors: string[] }
 			continue;
 		}
 		if (heading === "Boundaries") boundaries = lines;
+		if (heading === "Success criteria") {
+			for (const line of lines) {
+				const m = CRITERION.exec(line);
+				if (m) acs.push({ id: m[1], text: m[2] });
+			}
+			if (!acs.length) errors.push("Success criteria: list each as `- AC1: …`");
+		}
 		if (heading !== "Invariants") continue;
 		for (const line of lines) {
 			const m = INVARIANT.exec(line);
@@ -360,7 +429,15 @@ export function readBrief(storyDir: string): { brief?: Brief; errors: string[] }
 		if (!invariants.length && !(lines.length === 1 && lines[0].trim() === "none")) errors.push("Invariants: list them as `- I1: …` or write `none`");
 	}
 	if (errors.length) return { errors };
-	return { brief: { mode: mode as Brief["mode"], invariants, boundaries, text: body.trim() }, errors };
+	return { brief: { mode: mode as Brief["mode"], acs, invariants, boundaries, text: body.trim() }, errors };
+}
+
+export interface ProofRow {
+	ac: string;
+	repo?: string;
+	test?: { run: string; files: string[] };
+	acceptance?: { run: string };
+	unprovable?: string;
 }
 
 export interface Plan {
@@ -368,10 +445,71 @@ export interface Plan {
 	repos: string[];
 	/** Non-empty lines of `## Summary`: the current plan in brief. The agent replaces them as the approach changes. */
 	summary: string[];
+	/** The yaml `proof:` list of `## Proof`: how each brief AC is shown to hold. */
+	proof: ProofRow[];
 	text: string;
 }
 
 const SUMMARY_MAX = 15;
+
+/** Raw lines under `## <heading>` up to the next `## `, blank lines kept (a yaml block needs them), or undefined when the heading is missing. */
+function sectionText(body: string, heading: string): string | undefined {
+	const lines = body.split("\n");
+	const at = lines.findIndex(line => line.trimEnd() === `## ${heading}`);
+	if (at < 0) return undefined;
+	const rest = lines.slice(at + 1);
+	const end = rest.findIndex(line => line.startsWith("## "));
+	return (end < 0 ? rest : rest.slice(0, end)).join("\n");
+}
+
+function parseProof(body: string): { rows: ProofRow[]; errors: string[] } {
+	const missing = { rows: [], errors: ['plan: missing "## Proof" with a ```yaml proof: list'] };
+	const text = sectionText(body, "Proof");
+	const block = text === undefined ? null : /^```ya?ml[^\n]*\n([\s\S]*?)^```[ \t]*$/m.exec(text);
+	if (!block) return missing;
+	let doc: unknown;
+	try {
+		doc = Bun.YAML.parse(block[1]);
+	} catch (error) {
+		return { rows: [], errors: [`proof: not valid YAML (${message(error)})`] };
+	}
+	if (!isObject(doc) || !Array.isArray(doc.proof)) return missing;
+	const rows: ProofRow[] = [];
+	const errors: string[] = [];
+	doc.proof.forEach((raw: unknown, i) => {
+		const fail = (why: string): void => void errors.push(`proof[${i}]: ${why}`);
+		if (!isObject(raw)) return fail("expected a mapping");
+		if (typeof raw.ac !== "string" || !/^AC\d+$/.test(raw.ac)) return fail("ac: expected AC<n>");
+		const row: ProofRow = { ac: raw.ac };
+		if (typeof raw.repo === "string" && raw.repo.trim()) row.repo = raw.repo.trim();
+		if (raw.unprovable !== undefined) {
+			if (typeof raw.unprovable !== "string" || !raw.unprovable.trim()) return fail("unprovable: expected the reason as a non-empty string");
+			if (raw.test !== undefined || raw.acceptance !== undefined) return fail("unprovable excludes test and acceptance");
+			row.unprovable = raw.unprovable.trim();
+			rows.push(row);
+			return;
+		}
+		if (!row.repo) return fail("repo: expected the repository's origin basename");
+		if (raw.test === undefined && raw.acceptance === undefined) return fail("needs test, acceptance or unprovable");
+		if (raw.test !== undefined) {
+			if (!isObject(raw.test) || typeof raw.test.run !== "string" || !raw.test.run.trim()) return fail("test.run: expected a command");
+			let files: string[];
+			try {
+				files = strings(raw.test.files, "test.files");
+			} catch (error) {
+				return fail(message(error));
+			}
+			if (!files.length) return fail("test.files: list the test files to copy onto the base commit");
+			row.test = { run: raw.test.run, files };
+		}
+		if (raw.acceptance !== undefined) {
+			if (!isObject(raw.acceptance) || typeof raw.acceptance.run !== "string" || !raw.acceptance.run.trim()) return fail("acceptance.run: expected a command");
+			row.acceptance = { run: raw.acceptance.run };
+		}
+		rows.push(row);
+	});
+	return { rows, errors };
+}
 
 export function readPlan(storyDir: string): { plan?: Plan; errors: string[] } {
 	const file = path.join(storyDir, "plan.md");
@@ -404,16 +542,20 @@ export function readPlan(storyDir: string): { plan?: Plan; errors: string[] } {
 	const summary = section(body, "Summary") ?? [];
 	if (summary.length === 0) errors.push('plan: missing or empty section "## Summary"');
 	else if (summary.length > SUMMARY_MAX) errors.push(`Summary: ${summary.length} lines; keep it to ${SUMMARY_MAX}`);
+	const parsed = parseProof(body);
+	errors.push(...parsed.errors);
 	if (errors.length) return { errors };
-	return { plan: { repos, summary, text }, errors };
+	return { plan: { repos, summary, proof: parsed.rows, text }, errors };
 }
 
 /**
- * What the lead's approval covers: the plan's repositories and the brief's invariants and boundaries. The plan's
- * summary and tasks are the agent's to replace as the work changes; a change to any covered part needs approval again.
+ * What the lead's approval covers: the plan's repositories, what is proven and how (not the commands), and the brief's
+ * criteria, invariants and boundaries. The plan's summary, tasks and proof commands are the agent's to replace as the
+ * work changes; a change to any covered part needs approval again.
  */
 export function approvalDigest(plan: Plan, brief: Brief): string {
-	return hash("sha256", JSON.stringify({ repos: plan.repos, invariants: brief.invariants, boundaries: brief.boundaries }));
+	const proof = plan.proof.map(r => ({ ac: r.ac, repo: r.repo ?? null, test: !!r.test, acceptance: !!r.acceptance, unprovable: r.unprovable ?? null }));
+	return hash("sha256", JSON.stringify({ repos: plan.repos, acs: brief.acs, proof, invariants: brief.invariants, boundaries: brief.boundaries }));
 }
 
 // ── Story state ──────────────────────────────────────────────────────────────
@@ -425,6 +567,55 @@ export interface GateDecision {
 	at: string;
 }
 
+export type Stage = "verify" | "test" | "proof" | "acceptance";
+
+export interface CommandResult {
+	command: string;
+	code: number;
+	/** Absolute path of the log; kept outside the vault. */
+	log: string;
+}
+
+export interface ProofResult {
+	ac: string;
+	base: CommandResult;
+	head: CommandResult;
+	passed: boolean;
+}
+
+/** The outcome of one stage in one repository, keyed by the HEAD it ran at. */
+export interface StageReceipt {
+	head: string;
+	passed: boolean;
+	at: string;
+	results: CommandResult[];
+	proof?: ProofResult[];
+}
+
+/** The independent reviewer's verdict on the heads it reviewed. */
+export interface Verdict {
+	heads: Record<string, string>;
+	blockers: { severity: "Critical" | "Required"; where: string; finding: string }[];
+	acs: { ac: string; proven: boolean; note: string }[];
+	at: string;
+	clean: boolean;
+}
+
+export interface LoopState {
+	/** Commit each plan repository was at when `/build` started, by repository name. */
+	base: Record<string, string>;
+	/** Stage receipts by repository name. */
+	receipts: Record<string, Partial<Record<Stage, StageReceipt>>>;
+	/** Consecutive failed runs per stage. */
+	failures: Partial<Record<Stage, number>>;
+	reviewRounds: number;
+	review: Verdict | null;
+	continuations: number;
+	stuck: { stage: Stage | "review" | "loop"; at: string; prompted: boolean; notified: boolean } | null;
+	/** The heads (joined) for which "ready to merge" was announced. */
+	readyNotified: string | null;
+}
+
 export interface StoryState {
 	plan: { digest: string; approvedAt: string } | null;
 	/** Gate decisions by gate key (`<repo root>::<repo-relative path>`). */
@@ -432,7 +623,10 @@ export interface StoryState {
 	status: { value: "in-progress" | "in-review" | "done"; prs: { repo: string; url: string; state: string }[]; at: string } | null;
 	/** When an agent last changed a project note's services block during the story; the PR body must then describe the change. */
 	mapEditedAt: string | null;
+	loop: LoopState;
 }
+
+const emptyLoop = (): LoopState => ({ base: {}, receipts: {}, failures: {}, reviewRounds: 0, review: null, continuations: 0, stuck: null, readyNotified: null });
 
 export function readStoryState(storyDir: string): StoryState {
 	let text: string;
@@ -440,10 +634,10 @@ export function readStoryState(storyDir: string): StoryState {
 		text = fs.readFileSync(path.join(storyDir, "state.json"), "utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		return { plan: null, gates: {}, status: null, mapEditedAt: null };
+		return { plan: null, gates: {}, status: null, mapEditedAt: null, loop: emptyLoop() };
 	}
 	const state = JSON.parse(text) as Partial<StoryState>;
-	return { plan: state.plan ?? null, gates: state.gates ?? {}, status: state.status ?? null, mapEditedAt: state.mapEditedAt ?? null };
+	return { plan: state.plan ?? null, gates: state.gates ?? {}, status: state.status ?? null, mapEditedAt: state.mapEditedAt ?? null, loop: { ...emptyLoop(), ...state.loop } };
 }
 
 /** Lock file for a read-modify-write of `file`; in the temp dir, not the vault, so it never syncs. */
@@ -477,6 +671,22 @@ export function protectedLeadPath(layout: LeadLayout, absPath: string): boolean 
 		relativeTo(layout.templates, absPath).includes("brief-template.md") ||
 		relativeTo(layout.stories, absPath).some(rel => STORY_OWNED.test(rel))
 	);
+}
+
+/**
+ * Whether `absPath` is the brief of a story the lead has not approved a plan for yet: the agent drafts it from the
+ * ticket, and the lead approves brief and plan together. After approval the brief is the lead's again.
+ */
+export function draftableBrief(layout: LeadLayout, absPath: string): boolean {
+	return relativeTo(layout.stories, absPath).some(rel => {
+		const id = /^([^/]+)\/brief\.md$/.exec(rel)?.[1];
+		if (!id) return false;
+		try {
+			return readStoryState(path.join(layout.stories, id)).plan === null;
+		} catch {
+			return false;
+		}
+	});
 }
 
 /** Creates the lead files. The lead's files are written only when missing; pr-format.md is rewritten every time. */

@@ -23,10 +23,13 @@ concurrency_triggers:
   patterns: ["\\bFOR UPDATE\\b", "\\btransaction\\(", "SendMessage(Batch)?Command", "\\bpublish\\(", "\\bretr(y|ies)\\b", "\\bredis\\b", "\\bcache\\b", "idempoten"]
 limits:
   builders: 2
+checks: {}
 ${FENCE}
 
 Globs are matched against paths relative to the repository root, so each starts with ${"`**/`"}.
 A gate may add ${"`repos: [name, …]`"} (origin basenames) to apply to those repositories only.
+
+${"`checks:`"} lists, per repository (origin basename), the commands the lead loop runs: ${"`verify`"} (lint, typecheck), ${"`test`"} (full suite), optional ${"`worktree_setup`"} (run in a fresh worktree of the base commit; default: link the repository's node_modules), optional ${"`acceptance: { deploy_wait, env }`"} for checks against the deployed feature stack. ${"`{branch}`"}, ${"`{sha}`"} and ${"`{story}`"} are replaced in commands and env values. A plan cannot be approved while one of its repositories has no entry.
 `;
 
 /** The machine block of a project note (`<kb>/projects/<repo>.md`), shown where a note lacks one. */
@@ -43,6 +46,7 @@ mode: async
 ## Goal
 
 ## Success criteria
+- AC1: …
 
 ## Boundaries
 
@@ -96,4 +100,13 @@ When docs/arch/edges.json changed:
 
 ## Structural changes
 <the + and - lines printed by \`arch-graph diff\`>
+
+In a lead story:
+
+## Evidence
+- AC1: <test file::name> fails on base <sha7>, passes on <sha7>; <acceptance script> passed on <stack url>
+(one line per AC this repository proves; the PR check also requires the harness's receipts and a clean review at HEAD)
+
+## Unproven
+- AC3: <reason the lead accepted at plan approval>
 `;

@@ -174,13 +174,19 @@ describe("commit, push and PR", () => {
 });
 
 describe("the lead's own files", () => {
-	test("cannot be written by an agent, even before hard-gates.md exists; the plan can", async () => {
+	test("cannot be written by an agent, even before hard-gates.md exists; a story's brief and the plan can until the plan is approved", async () => {
 		const s = setup(null);
 		const { ctx } = s.main();
 		const verdict = await s.call("write", { path: path.join(s.leadDir, "hard-gates.md") }, ctx);
 		expect(verdict).toEqual({ block: true, reason: "lead: ~/kb/lead/hard-gates.md is owned by the lead; propose the change in chat or in the PR body instead." });
-		expect((await s.call("edit", { input: `[${path.join(s.leadDir, "stories/S1/brief.md")}#AB12]\nPUT 1.=1:\n+x` }, ctx))?.block).toBe(true);
+		const brief = { input: `[${path.join(s.leadDir, "stories/S1/brief.md")}#AB12]\nPUT 1.=1:\n+x` };
+		expect(await s.call("edit", brief, ctx)).toBeUndefined();
 		expect(await s.call("write", { path: path.join(s.leadDir, "stories/S1/plan.md") }, ctx)).toBeUndefined();
+		expect((await s.call("write", { path: path.join(s.leadDir, "stories/S1/state.json") }, ctx))?.block).toBe(true);
+
+		fs.mkdirSync(path.join(s.leadDir, "stories/S1"), { recursive: true });
+		fs.writeFileSync(path.join(s.leadDir, "stories/S1/state.json"), JSON.stringify({ plan: { digest: "x", approvedAt: "2026-01-01" } }));
+		expect((await s.call("edit", brief, ctx))?.reason).toContain("owned by the lead");
 	});
 });
 
