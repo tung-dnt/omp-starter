@@ -4,8 +4,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import leadExtension from "./lead";
 import leadGates from "./lead-gates";
+import { approvalDigest, readBrief, readPlan, readStoryState, updateStoryState } from "./lib/lead/artifacts";
 import { lead } from "./lib/lead/registry";
-import { HARD_GATES_TEMPLATE } from "./lib/lead/templates";
+import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE } from "./lib/lead/templates";
 import { collectEdges, renderFiles } from "../scripts/arch-graph";
 import { HOME } from "./lib/state";
 import { fakeContext, fakePi, initGitRepo, resetHome, runExtensionChild, scriptedUi, seedKb, seedState, type UiScript, writeFiles } from "./test-harness";
@@ -140,6 +141,50 @@ describe("a subagent hitting a gate", () => {
 		const s = setup();
 		await expect(s.tool.callTool("lead", { op: "gate" }, s.sub)).rejects.toThrow("only the main session");
 		expect((await s.tool.callTool("lead", { op: "gate" }, s.main().ctx)).text).toBe("no pending gates");
+	});
+});
+
+describe("a story whose plan the lead approved", () => {
+	/** Story S1 with a brief and a plan on disk; `approve` records the digest the lead's approval would. */
+	async function story(approve: boolean) {
+		const s = setup();
+		const layout = { policy: s.leadDir, stories: path.join(s.leadDir, "stories"), templates: s.leadDir, notes: s.notesDir };
+		const dir = path.join(layout.stories, "S1");
+		const brief = BRIEF_TEMPLATE.replace("- I1: …", "- I1: inserts are idempotent on id").replace(/^(## (?!Invariants).+)$/gm, "$1\none line");
+		writeFiles(dir, {
+			"brief.md": brief,
+			"plan.md": `---\nrepos:\n  - ${s.repo}\n---\n\n## Summary\nGoal: add orders\nI1: unique index on id\n\n## Tasks\n- T1: add the table\n\n## Proof\n\`\`\`yaml\nproof:\n  - { ac: AC1, repo: shop, test: { run: "sh t.sh", files: [t.sh] } }\n\`\`\`\n`,
+		});
+		if (approve) {
+			const plan = readPlan(dir).plan;
+			const parsed = readBrief(dir).brief;
+			if (!plan || !parsed) throw new Error("fixture plan or brief does not parse");
+			await updateStoryState(dir, state => {
+				state.plan = { digest: approvalDigest(plan, parsed), approvedAt: new Date().toISOString() };
+			});
+		}
+		lead().story = { id: "S1", dir, layout, mode: "sync", invariants: [] };
+		return { s, dir };
+	}
+
+	test("passes gated writes without a dialog or a queue, and records each as approved", async () => {
+		const { s, dir } = await story(true);
+		const { ui, ctx } = s.main();
+		expect(await s.call("write", { path: MIGRATION }, s.sub)).toBeUndefined();
+		expect(await s.call("write", { path: "src/auth/session.ts" }, ctx)).toBeUndefined();
+		expect(ui.prompts).toEqual([]);
+		expect(lead().pending.size).toBe(0);
+		expect(Object.values(readStoryState(dir).gates).map(g => [g.gateId, g.decision])).toEqual([
+			["migrations", "approved"],
+			["auth", "approved"],
+		]);
+	});
+
+	test("still asks before the plan is approved", async () => {
+		const { s } = await story(false);
+		const { ui, ctx } = s.main({ select: ["Approve for story S1"] });
+		expect(await s.call("write", { path: MIGRATION }, ctx)).toBeUndefined();
+		expect(ui.prompts.map(p => p.title)).toEqual(["HARD GATE · schema · shop/db/migrations/002.sql (gate migrations)"]);
 	});
 });
 

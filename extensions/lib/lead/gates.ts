@@ -1,9 +1,11 @@
 // Hard gates: which gate a path hits, what the lead decided for it, and how an undecided hit is put to the lead.
 // A decision lasts per gated path for the active story (stored in its state.json), or for the session outside a story.
+// Once the lead approves a story's plan, that approval covers its hard gates: a hit is recorded as approved, not asked.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { repoRoot, resolveRepoName } from "../repo";
 import { type Gate, readStoryState, updateStoryState } from "./artifacts";
+import { planApproved } from "./story";
 import { leadNotify, type NotifyContext } from "./notify";
 import { lead } from "./registry";
 
@@ -63,9 +65,10 @@ export const gateTitle = (hit: { gateId: string; category: string; repoName: str
 	`HARD GATE · ${hit.category} · ${hit.repoName}/${hit.rel} (gate ${hit.gateId}${suffix})`;
 
 /**
- * Settles each hit with the lead's decision. An undecided hit opens a dialog in an interactive main session, unless
- * the active story is in async mode (the lead is away); anywhere else it is queued for the `lead` tool (op "gate")
- * and blocks that one call. Undefined means every hit is approved.
+ * Settles each hit with the lead's decision. In a story whose plan the lead approved, an undecided hit is recorded as
+ * approved: the plan approval is the one decision. Otherwise an undecided hit opens a dialog in an interactive main
+ * session, unless the active story is in async mode (the lead is away); anywhere else it is queued for the `lead` tool
+ * (op "gate") and blocks that one call. Undefined means every hit is approved.
  */
 export async function resolveGate(ctx: GateContext, hits: GateHit[]): Promise<{ block: true; reason: string } | undefined> {
 	for (const hit of hits) {
@@ -77,6 +80,10 @@ export async function resolveGate(ctx: GateContext, hits: GateHit[]): Promise<{ 
 		if (decided === "rejected") return rejected;
 
 		const story = lead().story;
+		if (story && planApproved(story).approved) {
+			await recordGate(hit.key, "approved", id, category);
+			continue;
+		}
 		const notice = `omp lead · ${story?.id ?? "session"} · gate ${id} (${category}) · ${where}`;
 		const subagent = ctx.agent?.kind === "sub";
 		if (!subagent && ctx.hasUI && story?.mode !== "async") {
