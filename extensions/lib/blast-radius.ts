@@ -1,6 +1,5 @@
 // Finds the exported symbols an edit changed and formats where else they are used.
 // Pure text logic: the extension (extensions/blast-radius.ts) feeds it file snapshots and language-server answers.
-// Design: Specs/omp-starter/stories/blast-radius-hook/lld/t01-blast-radius-hook.md in the vault.
 
 export type Lang = "ts" | "go";
 

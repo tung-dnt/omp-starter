@@ -169,13 +169,6 @@ test("an empty sessions folder exits 0 and says there are no sessions", () => {
 	expect(result.stdout).toMatch(/no sessions/i);
 });
 
-test("--vault is refused: the report no longer reads a vault", () => {
-	const w = world();
-	const result = w.run(["--vault", join(w.root, "KnowledgeBase")]);
-	expect(result.code).toBe(2);
-	expect(result.stderr).toContain('Unknown argument "--vault"');
-});
-
 test("the report never contains text, arguments, commands or file contents from the transcripts", () => {
 	const w = world();
 	w.write("secret.jsonl", [

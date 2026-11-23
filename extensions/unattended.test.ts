@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import { HOME } from "./lib/state";
 import { fakeContext, fakePi, resetHome } from "./test-harness";
@@ -6,6 +6,10 @@ import unattended from "./unattended";
 
 beforeEach(() => {
 	resetHome();
+	delete process.env.OMP_STARTER_UNATTENDED;
+});
+
+afterAll(() => {
 	delete process.env.OMP_STARTER_UNATTENDED;
 });
 

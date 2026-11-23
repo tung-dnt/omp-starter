@@ -1,10 +1,39 @@
 // Memory step (`/starter memory`): picks omp's `memory.backend` and the commit-gate folders, and holds what the
 // generated AGENTS.md and the commit gate say about each backend. omp owns the backend settings (`/settings` →
 // Memory, `/memory`); this plugin only adds the agent rules and the gate.
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { Exec, WizardUi } from "../setup";
 import { applySettings, readSetting } from "./routing";
-import { doneSources, existingFolder } from "./kb-sources";
-import { tildify, type MemoryBackend, type MemoryState, type SetupState } from "./state";
+import { HOME, expandHome, tildify, type MemoryBackend, type MemoryState, type SetupState } from "./state";
+
+/** The AGENTS.md omp loads in every session: the memory rules and the commit gate live here. */
+export const EVERY_SESSION_FILE = path.join(HOME, ".omp", "agent", "AGENTS.md");
+
+/** `raw` as an absolute, existing folder (`~` expands), or undefined after telling the user why not. */
+export function existingFolder(ui: WizardUi, raw: string): string | undefined {
+	const dir = expandHome(raw);
+	if (!path.isAbsolute(dir) || !fs.statSync(dir, { throwIfNoEntry: false })?.isDirectory()) {
+		ui.notify(`${tildify(dir)} is not an existing absolute folder. Use a path like ~/projects.`, "error");
+		return undefined;
+	}
+	return path.resolve(dir);
+}
+
+const within = (p: string, dir: string): boolean => p === dir || p.startsWith(dir + path.sep);
+
+/** Existing path as written plus its symlink-resolved form, so either spelling matches. */
+function forms(p: string): string[] {
+	try {
+		const real = fs.realpathSync(p);
+		return real === p ? [p] : [p, real];
+	} catch {
+		return [p];
+	}
+}
+
+/** Whether `p` is `dir` or below it, comparing as-written and symlink-resolved forms of both. */
+export const inside = (p: string, dir: string): boolean => forms(p).some(a => forms(dir).some(d => within(a, d)));
 
 interface BackendInfo {
 	label: string;
@@ -34,13 +63,6 @@ export async function readBackend(exec: Exec): Promise<MemoryBackend | undefined
 	} catch {
 		return undefined;
 	}
-}
-
-/** `memory` with its backend filled in from omp when the step is done but never recorded it (migrated state). */
-export async function withLiveBackend(exec: Exec, memory: MemoryState | undefined): Promise<MemoryState | undefined> {
-	if (memory?.status !== "done" || memory.backend) return memory;
-	const backend = await readBackend(exec);
-	return backend ? { ...memory, backend } : memory;
 }
 
 const DATA_RULE = "Never retain database query results, tool output that holds patient data, or secrets.";
@@ -74,20 +96,18 @@ const list = (items: string[], joiner: "or" | "and" = "or"): string =>
 
 /**
  * What satisfies the commit gate: a successful memory write with the backend's tools (a generic phrase while the backend
- * is unknown) or a note written into a knowledge base. Undefined when nothing can satisfy it, so the gate has no use.
+ * is unknown). Undefined when the backend has no write tool, so the gate has no use.
  */
-export function gateRequirement(backend: MemoryBackend | undefined, kbRefs: string[]): string | undefined {
-	const parts: string[] = [];
-	if (!backend) parts.push("a successful memory tool call such as `retain` or `learn`");
-	else if (MEMORY_BACKENDS[backend].writeTools.length) parts.push(`a successful ${list(MEMORY_BACKENDS[backend].writeTools.map(t => `\`${t}\``))}`);
-	if (kbRefs.length) parts.push(`a \`write\` or \`edit\` of a note under ${list(kbRefs.map(ref => `\`${ref}/\``))}`);
-	return parts.length ? parts.join(", or ") : undefined;
+export function gateRequirement(backend: MemoryBackend | undefined): string | undefined {
+	if (!backend) return "a successful memory tool call such as `retain` or `learn`";
+	const tools = MEMORY_BACKENDS[backend].writeTools;
+	return tools.length ? `a successful ${list(tools.map(t => `\`${t}\``))}` : undefined;
 }
 
 /** The commit-gate rules for AGENTS.md, or undefined without gate folders or anything that could satisfy the gate. */
-export function gateSection(memory: MemoryState | undefined, kbRefs: string[]): string | undefined {
+export function gateSection(memory: MemoryState | undefined): string | undefined {
 	const dirs = memory?.status === "done" ? memory.gateDirs ?? [] : [];
-	const requirement = gateRequirement(memory?.backend, kbRefs);
+	const requirement = gateRequirement(memory?.backend);
 	if (!dirs.length || !requirement) return undefined;
 	return `# Commit gate\n\n\`git commit\` under ${list(dirs.map(tildify))} is blocked until this session has saved something: ${requirement}. Save the relevant facts first; for commits with no new facts (typos, formatting) put \`[skip-mem]\` in the commit message.\n`;
 }
@@ -121,9 +141,8 @@ export async function setupMemory(ui: WizardUi, exec: Exec, current: SetupState)
 		"info",
 	);
 
-	const kbRefs = doneSources(current.kb).map(s => s.kbRef);
 	const previous = current.memory?.gateDirs ?? [];
-	const gateDirs = gateRequirement(backend, kbRefs) ? await askGateDirs(ui, previous) : [];
+	const gateDirs = gateRequirement(backend) ? await askGateDirs(ui, previous) : [];
 	return { status: "done", backend, ...(gateDirs.length ? { gateDirs } : {}) };
 }
 
@@ -132,7 +151,7 @@ async function askGateDirs(ui: WizardUi, previous: string[]): Promise<string[]> 
 	const fallback = previous.length ? previous.map(tildify).join(", ") : GATE_DEFAULT;
 	const on = await ui.confirm(
 		"Commit gate",
-		`Block agent \`git commit\` under ${fallback} until a memory was saved or a knowledge-base note written in the session ([skip-mem] bypasses)?`,
+		`Block agent \`git commit\` under ${fallback} until a memory was saved in the session ([skip-mem] bypasses)?`,
 	);
 	if (!on) return [];
 	const raw = (await ui.input("Folders for the commit gate (comma-separated)", fallback))?.trim() || fallback;

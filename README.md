@@ -7,8 +7,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 | **Skill kits** *(optional)* | A checkbox picker for any combination of [pstack](https://github.com/cursor/plugins/tree/main/pstack), [Matt Pocock's skills](https://github.com/mattpocock/skills), [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) and [spec-kit](https://github.com/github/spec-kit), with a warning when the chosen kits cover the same job. See [Skill kits](#skill-kits-starter-skills). |
 | **Model routing** *(Claude-first)* | Saves `claude` and `codex` subscription presets without requiring a login. When the required Claude models are available, also routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels; otherwise keeps the current routing. Using a preset requires its provider login. |
 | **TypeSafe Jev judge** *(optional)* | Routes omp's `judge` role to TypeSafe Jev after checking your API key, and stores the key in `~/.omp/agent/.env` (mode 600). Jev then answers `question` rules and picks the thinking level per prompt. Offered on a brand-new install; existing installs run `/starter jev`. See [TypeSafe Jev judge](#typesafe-jev-judge-starter-jev). |
-| **Memory** | Picks omp's memory backend (`off`, `local`, `hindsight`, `mnemopi`, `sharpshooter`), writes the matching memory rules into `~/.omp/agent/AGENTS.md`, and optionally adds a commit gate. omp itself owns the backend settings (`/settings` → Memory). Offered on a brand-new install; existing installs run `/starter memory`. See [Memory and knowledge base](#memory-and-knowledge-base). |
-| **Obsidian docs** *(optional)* | Uses Obsidian vaults for docs, standards and projects, one per folder if you like (e.g. `~/work` and `~/personal`). Lets you pick a vault Obsidian already knows about and writes an `AGENTS.md` that points sessions at it. Memory is not kept in the vault. See [Obsidian docs](#obsidian-docs-starter-kb-optional). |
+| **Memory** | Picks omp's memory backend (`off`, `local`, `hindsight`, `mnemopi`, `sharpshooter`), writes the matching memory rules into `~/.omp/agent/AGENTS.md`, and optionally adds a commit gate. omp itself owns the backend settings (`/settings` → Memory). Offered on a brand-new install; existing installs run `/starter memory`. See [Memory](#memory-starter-memory). |
 | **Developer tools** *(optional)* | Sets up a language server (LSP) and a debugger (DAP) for JavaScript/TypeScript, Python, Go, Rust and C/C++ with the SDKs you already have. Offered on a brand-new install; existing installs run `/starter tools`. See [Language tooling](#language-tooling-starter-tools). |
 
 Every step can be skipped.
@@ -20,8 +19,6 @@ omp plugin marketplace add tung-dnt/omp-starter
 omp plugin install starter@omp-starter
 omp
 ```
-
-Before the knowledge-base step, open Obsidian once so your vault is registered (and synced, if it lives in iCloud).
 
 ## Model routing
 
@@ -104,9 +101,7 @@ Optional. It sends judged tool calls and your prompts to TypeSafe (processed in 
 
 Rerunning `/starter jev` offers to turn Jev off: the presets' own judges come back, and the key stays in `~/.omp/agent/.env`.
 
-## Memory and knowledge base
-
-### Memory (`/starter memory`)
+## Memory (`/starter memory`)
 
 The step picks omp's memory backend and nothing else about it. omp already owns the backend and its settings: `memory.backend`, `/settings` → Memory, and `/memory`. omp-starter adds what omp lacks: the memory rules in `~/.omp/agent/AGENTS.md` and the commit gate.
 
@@ -120,8 +115,8 @@ The step picks omp's memory backend and nothing else about it. omp already owns 
 
 1. The select shows the current `memory.backend` (read with `omp config get`) and marks it. `omp config set memory.backend` runs only when you choose a different one.
 2. For `hindsight` the step does not ask for the server. It tells you to set the URL and token in `/settings` → Memory, or export `HINDSIGHT_API_URL` and `HINDSIGHT_API_TOKEN` (which win over the settings and keep the token out of the settings file).
-3. **Commit gate (optional):** offered when the backend has a write tool or a knowledge base exists. You confirm it and name the folders (default `~/projects`).
-4. The step then rewrites `~/.omp/agent/AGENTS.md` from the docs of a vault source serving every session (if any), the memory rules of the chosen backend, and the gate rules. An existing different file is backed up after you confirm.
+3. **Commit gate (optional):** offered when the backend has a write tool. You confirm it and name the folders (default `~/projects`).
+4. The step then rewrites `~/.omp/agent/AGENTS.md` from the memory rules of the chosen backend and the gate rules. An existing different file is backed up after you confirm.
 
 It runs automatically only on a brand-new install; existing installs opt in with `/starter memory`. The generated rules, per backend:
 
@@ -132,30 +127,14 @@ It runs automatically only on a brand-new install; existing installs opt in with
 
 This plugin adds no memory tools, memory index or memory folder. Recommended Hindsight settings: `hindsight.autoRetain false` (session transcripts carry tool output) and `hindsight.recallTimeoutMs 5000`.
 
-**Commit gate.** Blocks the agent's `git commit` under a gate folder until the session saved something: a successful `retain`, `learn` or `memory_edit` (whichever the backend has) or a `write`/`edit` of a note in any configured knowledge base. `[skip-mem]` in the commit message bypasses it, and so does an unattended build (`OMP_STARTER_UNATTENDED=1`). Only the `commit` subcommand is gated: `git commit-tree` or `git log --grep commit` pass. The gate checks the folder the commit really runs in (bash `cwd`, a leading `cd <dir> &&`, `git -C <dir>`). A note counts when a `write`/`edit` target is inside a knowledge base (symlinked or real path) or a `vault://` path; mentioning the KB path in a file's content doesn't. A save counts when the tool returns without an error. The block message names the tools of the current backend. A backend with no write tool and no knowledge base has nothing that could satisfy the gate, so the gate never blocks. The setting lives in `memory.gateDirs` of `~/.omp/agent/omp-starter.json`.
-
-### Obsidian docs (`/starter kb`, optional)
-
-An Obsidian vault can still hold docs, standards and project pages next to the memory backend. This is secondary: the first-run prompt is "Also use an Obsidian vault for docs and standards?".
-
-- **Vault:** chosen from Obsidian's own vault list, or any folder you type.
-- **Knowledge-base folder:** a folder inside the vault (default `KnowledgeBase`). If it does not exist yet, it is created after you confirm.
-- **Space-free link:** omp's `@` imports stop at spaces, so a vault path containing spaces gets a `~/.omp-kb` symlink (`~/.omp-kb-<vault>` when that name already points at another vault; existing links are never repointed).
-- **Always-loaded notes:** optional list of notes (relative paths) imported into every session, e.g. your coding standards. A rewrite keeps the notes the file already loads.
-- **Scope:** every omp session (`~/.omp/agent/AGENTS.md`) or only sessions under one folder (`<folder>/AGENTS.md`). An existing file is backed up before it's replaced. A per-folder `AGENTS.md` holds the docs only; the memory rules and the gate always live in the every-session file.
-- **Several knowledge bases:** rerunning `/starter kb` opens a menu to add or replace a knowledge base for another folder, or remove one (its `AGENTS.md` is backed up and deleted only if you agree; the vault is never touched). Removing the every-session source rewrites that file with the memory rules and gate instead of deleting it. Each session uses the knowledge base whose folder contains its working directory. Folders must not contain each other, since omp loads every enclosing `AGENTS.md` and two knowledge-base roots would mix; "every omp session" is only offered while it is the sole knowledge base.
-- **Memory is not in the vault.** An existing `_memory/` folder stays where it is as a read-only archive that nothing in this plugin reads or writes.
-
-`/kb` (or `/kb status`) is read-only: it shows the memory backend (or that it is unknown, with a pointer to `/settings` → Memory), the commit gate state, the knowledge base serving the current session's folder, whether its vault is reachable and the other configured knowledge bases.
+**Commit gate.** Blocks the agent's `git commit` under a gate folder until the session saved a memory: a successful `retain`, `learn` or `memory_edit` (whichever the backend has). File writes and edits never count. `[skip-mem]` in the commit message bypasses it, and so does an unattended build (`OMP_STARTER_UNATTENDED=1`). Only the `commit` subcommand is gated: `git commit-tree` or `git log --grep commit` pass. The gate checks the folder the commit really runs in (bash `cwd`, a leading `cd <dir> &&`, `git -C <dir>`). A save counts when the tool returns without an error. The block message names the tools of the current backend. A backend with no write tool has nothing that could satisfy the gate, so the gate never blocks. The setting lives in `memory.gateDirs` of `~/.omp/agent/omp-starter.json`.
 
 | Do | Don't |
 |---|---|
 | Save a decision with who, what, when and why, and `recall` before asking about a past choice. | Retain database query results, tool output that holds patient data, or secrets. |
-| Keep `hindsight.autoRetain` off: session transcripts carry tool output. | Write new notes into an archived `_memory/` folder. |
+| Keep `hindsight.autoRetain` off: session transcripts carry tool output. | Retain a whole session transcript. |
 
-**Verify:** `bun test extensions/kb-commit-gate.test.ts extensions/kb-command.test.ts extensions/setup.test.ts`.
-
-The plugin also ships a `knowledge-base` skill for searching and creating notes in the knowledge base.
+**Verify:** `bun test extensions/memory-commit-gate.test.ts extensions/setup.test.ts extensions/lib/state.test.ts`.
 
 ## Language tooling (`/starter tools`)
 
@@ -195,7 +174,7 @@ It needs no provider login, never installs or changes an SDK, and never changes 
 ## Commands
 
 - `/starter`: rerun every step.
-- `/starter skills`, `/starter models`, `/starter jev`, `/starter memory`, `/starter kb`, `/starter tools`: rerun one step (`/starter skills` reopens the kit picker and offers updates for kept kits; `/starter memory` picks the memory backend and the commit gate; `/starter kb` manages several Obsidian docs vaults once one exists; `/starter jev` turns Jev off when it is on).
+- `/starter skills`, `/starter models`, `/starter jev`, `/starter memory`, `/starter tools`: rerun one step (`/starter skills` reopens the kit picker and offers updates for kept kits; `/starter memory` picks the memory backend and the commit gate; `/starter jev` turns Jev off when it is on).
 - `/starter updates`: check installed/published versions of the installed skill kits and `starter@omp-starter`; confirm each plugin/scope before updating. pstack and Matt Pocock publish no version in their catalogs, so for them it prints the upgrade command instead.
 
 Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p` or subagents.
@@ -238,7 +217,7 @@ Unmanaged copies (npm, link, Git) and project-scope installs count as installed 
 
 Native session todo and task tools hold mutable progress. The active session is the single progress owner; a task run is execution, not proof that code is verified.
 
-Keep plans, acceptance criteria, designs and decisions as static artifacts, and pass workers their approved artifact paths. Native todo/task state is session-local: it does not provide a shared project board, cross-session claims or automatic dependency scheduling. For durable cross-session project coordination, choose and maintain an external tracker deliberately; do not mirror native task status into KB notes.
+Keep plans, acceptance criteria, designs and decisions as static artifacts, and pass workers their approved artifact paths. Native todo/task state is session-local: it does not provide a shared project board, cross-session claims or automatic dependency scheduling. For durable cross-session project coordination, choose and maintain an external tracker deliberately; do not mirror native task status into notes.
 
 ## Asking questions
 
@@ -258,7 +237,7 @@ A seventh always-on rule (`rules/cross-repo-investigation.md`): an investigation
 
 An eighth always-on rule (`rules/subagent-absolute-paths.md`) loads in every subagent and never in the main session: `read`, `edit`, `write`, `glob` and `lsp` resolve relative paths from the session's directory, not from where `bash` `cd`'ed, so subagents pass them absolute paths. Before it, subagents of a session started in a parent folder of the repo lost a turn on each relative `read`/`lsp` call that came back "not found".
 
-`extensions/cross-repo-reads.ts` reminds the main session of the cross-repo scout fan-out once it has read source from a second repository: a `read` of a source file, `rg`/`grep` over a repo folder, or `cat`/`head`/`sed`… of a source file, with relative paths resolved from the session's folder or the command's `cd`. It reminds again only when a further repo appears. A session working in one repo never sees it. Docs, `node_modules`, hidden folders (`~/.omp`, a vault), files outside any git repo (such as `/tmp` scratch files) and system folders don't count, nor do subagents' reads.
+`extensions/cross-repo-reads.ts` reminds the main session of the cross-repo scout fan-out once it has read source from a second repository: a `read` of a source file, `rg`/`grep` over a repo folder, or `cat`/`head`/`sed`… of a source file, with relative paths resolved from the session's folder or the command's `cd`. It reminds again only when a further repo appears. A session working in one repo never sees it. Docs, `node_modules`, hidden folders (`~/.omp`), files outside any git repo (such as `/tmp` scratch files) and system folders don't count, nor do subagents' reads.
 
 `extensions/blast-radius.ts` appends a short **Blast radius** block to an `edit` or `write` result when the change alters an exported symbol in a TS/JS or Go file. A symbol counts as changed when its signature does: the parameters and return type of a function or method (including an exported arrow-function `const`), or the whole declaration of an `interface`/`type`/`enum`/Go `type`. The block lists that symbol's references in other files, from the language server the `lsp` tool already runs, so no second server starts. A removed or renamed export can no longer be asked about, so its uses come from `git grep -w` over tracked files and are labelled `text matches`. Body-only edits, reformatting and new exports add nothing. Limits: 3 changed and 3 removed symbols per call, 8 locations per symbol, 700 characters, 6 s. A slow or missing server, or any error, adds nothing and never changes the edit's own result. The block holds paths and line numbers only, never code. It runs in every agent. Turn it off with omp's extension toggle.
 
@@ -269,13 +248,13 @@ The `ask`-based rules load in the main session only, except `ticket-tracking`, w
 A build nobody watches is an omp session started with `OMP_STARTER_UNATTENDED=1`; the dispatcher that starts it sets it. With exactly that value, `extensions/unattended.ts` registers one hook. In any other session it registers nothing. The same value switches the commit gate off.
 
 - **No questions.** The `ask` tool is refused: the agent decides and records the choice, with the alternative it rejected, in the pull request's `## Decision log`, or writes `stuck.md` in the spec folder and stops when the work cannot continue.
-- **No commit gate.** `kb-commit-gate` lets every commit through, so a build needs no memory write to commit.
+- **No commit gate.** `memory-commit-gate` lets every commit through, so a build needs no memory write to commit.
 
 | Do | Don't |
 |---|---|
 | Record each decision, with the rejected alternative, in the PR's `## Decision log`. | Wait for an answer: nobody reads the session. |
 
-**Verify:** `bun test extensions/unattended.test.ts extensions/kb-commit-gate.test.ts`.
+**Verify:** `bun test extensions/unattended.test.ts extensions/memory-commit-gate.test.ts`.
 
 ## Usage report
 
@@ -295,7 +274,7 @@ It prints one markdown table per metric, for main sessions and subagents separat
 | M5 | Todo: did the session end with open items, how many edit/write/bash calls ran after the last todo update, how many turns held only `todo` calls? |
 | M6 | How many `todo` calls were made, and in how many sessions? |
 
-The numbering starts at M5: M1 to M4 measured the vault's memory notes, and memory is no longer stored there.
+The numbering starts at M5: M1 to M4 measured memory notes that omp's memory backend now holds.
 
 | Do | Don't |
 |---|---|
@@ -306,6 +285,13 @@ The numbering starts at M5: M1 to M4 measured the vault's memory notes, and memo
 Limits: a session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names and tool names; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.41.0 — 2026-11-23
+
+- **Removed / Breaking:** Obsidian vault support. `/starter kb` and `/kb` are gone, along with the `knowledge-base` skill and the vault docs in the generated `AGENTS.md`. Knowledge and memory live in omp's memory backend (Hindsight); see [Memory](#memory-starter-memory).
+- **Changed:** the commit gate is satisfied only by a successful `retain`, `learn` or `memory_edit`; a `write`/`edit` of a file, including a note, no longer counts. The extension is `memory-commit-gate`. `~/.omp/agent/AGENTS.md` holds the memory rules and the gate rules only.
+- **Changed:** the legacy `kb` key of `omp-starter.json` is read once for its gate folders (when `memory` is absent) and is dropped from the state, so the next write removes it from disk.
+- Existing installs: nothing to delete. Your vault and its `AGENTS.md` files stay where they are and nothing reads them; remove a per-folder `AGENTS.md` that only pointed at the vault, and rerun `/starter memory` to regenerate `~/.omp/agent/AGENTS.md` without the vault docs.
 
 ### 0.40.0 — 2026-11-23
 

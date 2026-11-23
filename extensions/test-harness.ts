@@ -1,22 +1,21 @@
 // Shared harness for tests of extension entry points. Two ways to run an extension:
 //
-//  - In process (`fakePi`, `fakeContext`, `scriptedUi`, `seedKb`, `resetHome`): the extension runs inside the
+//  - In process (`fakePi`, `fakeContext`, `scriptedUi`, `seedState`, `resetHome`): the extension runs inside the
 //    test process, so `bun test --coverage` sees it. Safe only because bunfig.toml preloads
 //    extensions/test-preload.ts, which swaps HOME for a private directory before lib/state.ts caches it;
 //    `privateHome()` throws when that did not happen.
 //  - In a `bun -e` child (`runExtensionChild`): a fresh HOME per scenario, for extensions whose state lives
 //    in module scope or on disk across registrations.
 //
-// Nothing in here touches the real ~/.omp, ~/.obsidian-personal or ~/.config.
+// Nothing in here touches the real ~/.omp or ~/.config.
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as zod from "@oh-my-pi/omptype/zod";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { EVERY_SESSION_DIR } from "./lib/kb-sources";
-import { resetKbWritten } from "./lib/kb-write-flag";
-import { HOME, tildify, writeState, type KbSource, type SetupState } from "./lib/state";
+import { resetMemoryWritten } from "./lib/memory-write-flag";
+import { HOME, writeState, type SetupState } from "./lib/state";
 
 // ── Private HOME ─────────────────────────────────────────────────────────────
 
@@ -39,7 +38,7 @@ export function privateHome(): string {
 export function resetHome(): void {
 	const home = privateHome();
 	for (const entry of fs.readdirSync(home)) fs.rmSync(path.join(home, entry), { recursive: true, force: true });
-	resetKbWritten();
+	resetMemoryWritten();
 }
 
 /** Writes `files` (paths relative to `root`, parents created). */
@@ -61,38 +60,6 @@ export function initGitRepo(dir: string, origin?: string): void {
 export function seedState(state: SetupState): void {
 	privateHome();
 	writeState(state);
-}
-
-// ── Knowledge bases ──────────────────────────────────────────────────────────
-
-export interface KbSpec {
-	/** Folder name under the private home holding the vault root; also the vault's name. */
-	name: string;
-	/** Session folder the knowledge base serves; omit for a knowledge base serving every session. */
-	folder?: string;
-}
-
-export interface SeededKb {
-	source: KbSource;
-	/** Absolute knowledge-base root (the folder `kbRef` points at). */
-	root: string;
-	/** Session folder served; created. */
-	folder: string;
-}
-
-/** Creates one vault on disk and returns the `kb.sources` entry that wires it in. Pass entries to `seedState`. */
-export function seedKb(spec: KbSpec): SeededKb {
-	const home = privateHome();
-	const root = path.join(home, spec.name);
-	const folder = spec.folder ?? EVERY_SESSION_DIR;
-	fs.mkdirSync(root, { recursive: true });
-	fs.mkdirSync(folder, { recursive: true });
-	const source: KbSource = {
-		kbRef: tildify(root),
-		kbPaths: [root],
-		contextFile: path.join(folder, "AGENTS.md"),
-	};
-	return { source, root, folder };
 }
 
 // ── Fake host ────────────────────────────────────────────────────────────────

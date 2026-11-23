@@ -169,7 +169,7 @@ const OLD: ToolingState["results"] = {
 
 test("declining the optional step writes no tool or config files and keeps other setup answers", async () => {
 	const box = sandbox();
-	writeFileSync(box.stateFile, JSON.stringify({ kb: { status: "done" }, custom: { keep: 1 } }));
+	writeFileSync(box.stateFile, JSON.stringify({ jev: "done", custom: { keep: 1 } }));
 	const script = scriptedUi(["go"], { optional: false });
 	let planned = 0;
 	const { context } = build(box, { plan: async () => (planned++, planFor(box, "go")) });
@@ -179,7 +179,7 @@ test("declining the optional step writes no tool or config files and keeps other
 	expect(state).toEqual({ status: "skipped", selected: [], results: {} });
 	expect(planned).toBe(0);
 	expect(readdirSync(box.agentDir).sort()).toEqual(["omp-starter.json"]);
-	expect(saved(box)).toEqual({ kb: { status: "done" }, custom: { keep: 1 }, tooling: { status: "skipped", selected: [], results: {} } });
+	expect(saved(box)).toEqual({ jev: "done", custom: { keep: 1 }, tooling: { status: "skipped", selected: [], results: {} } });
 });
 
 test("picking nothing is an explicit skip, and an earlier completed setup is not overwritten by a later decline", async () => {
@@ -197,7 +197,7 @@ test("picking nothing is an explicit skip, and an earlier completed setup is not
 
 test("ready needs a passing check and an effective approved config; other languages' results and keys survive", async () => {
 	const box = sandbox();
-	writeFileSync(box.stateFile, JSON.stringify({ kb: { status: "done" }, custom: { keep: 1 }, tooling: { status: "done", selected: ["rust"], results: OLD } }));
+	writeFileSync(box.stateFile, JSON.stringify({ jev: "done", custom: { keep: 1 }, tooling: { status: "done", selected: ["rust"], results: OLD } }));
 	const prior = readTooling(box.stateFile).tooling;
 	const script = scriptedUi(["go"]);
 	const checked = verifier();
@@ -213,7 +213,7 @@ test("ready needs a passing check and an effective approved config; other langua
 	expect((await effective(box, "lsp", "gopls"))?.value.command).toBe(join(box.home, "bin", "gopls"));
 	expect((await effective(box, "dap", "delve"))?.value.command).toBe(join(box.home, "bin", "dlv"));
 	const file = saved(box);
-	expect(file.kb).toEqual({ status: "done" });
+	expect(file.jev).toBe("done");
 	expect(file.custom).toEqual({ keep: 1 });
 	expect(file.tooling.results.rust).toEqual(OLD.rust);
 	expect(file.tooling.status).toBe("done");
@@ -512,9 +512,9 @@ test("a corrupt state file is an error that never resets the file, and saving ke
 	expect(() => saveTooling(tooling, box.stateFile)).toThrow();
 	expect(readFileSync(box.stateFile, "utf8")).toBe("{oops");
 
-	writeFileSync(box.stateFile, JSON.stringify({ models: "done", kb: { status: "skipped" } }));
+	writeFileSync(box.stateFile, JSON.stringify({ models: "done", jev: "skipped" }));
 	saveTooling(tooling, box.stateFile);
-	expect(saved(box)).toEqual({ models: "done", kb: { status: "skipped" }, tooling });
+	expect(saved(box)).toEqual({ models: "done", jev: "skipped", tooling });
 	expect(readdirSync(box.agentDir)).toEqual(["omp-starter.json"]);
 
 	writeFileSync(box.stateFile, "[1]");
@@ -538,12 +538,12 @@ test("invalid saved tooling records are reported and dropped, never promoted to 
 });
 
 test("only a brand-new install is offered the memory step, tooling and the Jev judge automatically", () => {
-	const complete = { agentSkills: "done", models: "done", kb: { status: "done" } } as const;
+	const complete = { agentSkills: "done", models: "done" } as const;
 	expect(startupSteps(complete, true)).toBeUndefined();
 	expect(startupSteps({ ...complete, tooling: { status: "skipped", selected: [], results: {} } }, true)).toBeUndefined();
-	expect(startupSteps({ agentSkills: "done", models: "done" }, true)).toEqual({ skills: false, models: false, jev: false, memory: false, kb: true, tools: false });
+	expect(startupSteps({ agentSkills: "done" }, true)).toEqual({ skills: false, models: true, jev: false, memory: false, tools: false });
 	expect(startupSteps({}, true)).toMatchObject({ jev: false, memory: false, tools: false });
-	expect(startupSteps({}, false)).toEqual({ skills: true, models: true, jev: true, memory: true, kb: true, tools: true });
+	expect(startupSteps({}, false)).toEqual({ skills: true, models: true, jev: true, memory: true, tools: true });
 });
 
 test("the omp executable is the compiled binary itself, or the shim on PATH when running under Bun or Node", () => {

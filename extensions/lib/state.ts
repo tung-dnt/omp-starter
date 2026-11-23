@@ -4,23 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { LANGUAGE_IDS, type LanguageId, type ToolResult, type ToolStatus } from "./tooling/types";
 
-/** One knowledge base and the folder it serves. */
-export interface KbSource {
-	/** Absolute vault root (the space-free link when one was made). */
-	vault?: string;
-	/** Space-free path the agent uses, e.g. `~/.omp-kb/KnowledgeBase`. */
-	kbRef: string;
-	/** Absolute paths that identify a write into this KB (symlink form and resolved form). */
-	kbPaths: string[];
-	/** AGENTS.md written for this source. Its folder is the source's scope; `~/.omp/agent` means every session. */
-	contextFile: string;
-}
-
-export interface KbState {
-	status: "done" | "skipped";
-	sources?: KbSource[];
-}
-
 /** The values of omp's `memory.backend` setting. */
 export type MemoryBackend = "off" | "local" | "hindsight" | "mnemopi" | "sharpshooter";
 
@@ -53,8 +36,6 @@ export interface SetupState {
 	jev?: "done" | "skipped";
 	/** Memory backend and commit gate (`/starter memory`). */
 	memory?: MemoryState;
-	/** Optional Obsidian vaults used as docs and standards (`/starter kb`). */
-	kb?: KbState;
 	tooling?: ToolingState;
 }
 
@@ -69,54 +50,35 @@ export function tildify(p: string): string {
 	return p === HOME ? "~" : p.startsWith(HOME + path.sep) ? `~/${p.slice(HOME.length + 1)}` : p;
 }
 
-/** State written before multi-source knowledge bases (≤ 0.13): one source's fields directly on `kb`. Before 0.40 a source also carried its commit-gate folder. */
+/** The removed `kb` key of state written before 0.41; only its commit-gate folders (`gateDir`, since 0.40 on each source) still matter. */
 interface LegacyKb {
-	status: "done" | "skipped";
-	vault?: string;
-	kbRef?: string;
-	kbPaths?: string[];
-	contextFile?: string;
+	status?: string;
 	gateDir?: string;
-	sources?: Array<KbSource & { primary?: boolean; gateDir?: string }>;
+	sources?: Array<{ gateDir?: string }>;
 }
 
-/** Commit-gate folders that sources of state written before 0.40 carried (`gateDir`), deduplicated. */
-function legacyGateDirs(kb: LegacyKb | undefined): string[] {
-	if (kb?.status !== "done") return [];
+/** Commit-gate folders a legacy `kb` carried, deduplicated. */
+function legacyGateDirs(kb: LegacyKb): string[] {
+	if (kb.status !== "done") return [];
 	const dirs = kb.sources ? kb.sources.map(s => s.gateDir) : [kb.gateDir];
 	return [...new Set(dirs.filter((dir): dir is string => Boolean(dir)))];
 }
 
-/** Converts old single- and multi-source state while discarding obsolete primary markers and per-source gate folders. */
-export function migrateKb(kb: LegacyKb | undefined): KbState | undefined {
-	if (!kb) return undefined;
-	if (kb.sources) {
-		return {
-			status: kb.status,
-			sources: kb.sources.map(({ primary: _, gateDir: __, ...source }) => source),
-		};
-	}
-	if (!kb.kbRef || !kb.contextFile) return { status: kb.status };
-	const source: KbSource = {
-		...(kb.vault ? { vault: kb.vault } : {}),
-		kbRef: kb.kbRef,
-		kbPaths: kb.kbPaths ?? [],
-		contextFile: kb.contextFile,
-	};
-	return { status: kb.status, sources: [source] };
-}
-
+/**
+ * The saved state. A legacy `kb` key is converted to `memory.gateDirs` when `memory` is absent, then dropped from the
+ * result, so the next write removes it from disk.
+ */
 export function readState(file = STATE_FILE): SetupState {
-	let state: SetupState;
+	let raw: SetupState & { kb?: LegacyKb };
 	try {
-		state = JSON.parse(fs.readFileSync(file, "utf8")) as SetupState;
+		raw = JSON.parse(fs.readFileSync(file, "utf8")) as SetupState & { kb?: LegacyKb };
 	} catch {
 		return {};
 	}
-	if (state.kb) {
-		const gateDirs = legacyGateDirs(state.kb as LegacyKb);
-		if (!state.memory && gateDirs.length) state.memory = { status: "done", gateDirs };
-		state.kb = migrateKb(state.kb as LegacyKb);
+	const { kb, ...state } = raw;
+	if (kb && !state.memory) {
+		const gateDirs = legacyGateDirs(kb);
+		if (gateDirs.length) state.memory = { status: "done", gateDirs };
 	}
 	return state;
 }

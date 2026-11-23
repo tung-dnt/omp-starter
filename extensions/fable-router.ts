@@ -75,7 +75,7 @@ async function takeQuota(route: Route): Promise<number | null> {
 }
 
 // Repos written by write/edit in this process. One process serves the main session and its subagents, and omp
-// evaluates extension modules separately, so the set lives on `globalThis` (see lib/kb-write-flag).
+// evaluates extension modules separately, so the set lives on `globalThis` (see lib/memory-write-flag).
 const EDITED = Symbol.for("omp-starter.edited-repos");
 const store = globalThis as typeof globalThis & { [EDITED]?: Set<string> };
 const editedRepos = (store[EDITED] ??= new Set<string>());

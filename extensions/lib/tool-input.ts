@@ -70,7 +70,7 @@ export function searchPaths(words: string[]): string[] | undefined {
 
 const LEADING_CD = /^\s*cd\s+("[^"]*"|'[^']*'|\S+)\s*&&/;
 
-export const unquote = (s: string): string => (/^(["']).*\1$/.test(s) ? s.slice(1, -1) : s);
+const unquote = (s: string): string => (/^(["']).*\1$/.test(s) ? s.slice(1, -1) : s);
 export const resolveFrom = (base: string, p: string): string => path.resolve(base, expandHome(unquote(p.trim())));
 
 /** Folder a bash command starts in: its `cwd` argument (relative to the session's folder), then a leading `cd <dir> &&`. */
