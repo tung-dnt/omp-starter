@@ -4,14 +4,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { leadLayoutFor, noteName, readBrief, readHardGates, readPlan, readStoryState } from "./lib/lead/artifacts";
+import { ghCommands, leadLayoutFor, noteName, readBrief, readHardGates, readPlan, readStoryState } from "./lib/lead/artifacts";
 import { shipProblems } from "./lib/lead/loop";
 import { checkPrBody } from "./lib/lead/pr-body";
 import { lead } from "./lib/lead/registry";
 import { planApproved } from "./lib/lead/story";
 import { diffEdges } from "../scripts/arch-graph";
 import { addedLines, changedFiles, mergeBase, repoRoot } from "./lib/repo";
-import { bashDir, GH_PR, resolveFrom, simpleCommands } from "./lib/tool-input";
+import { bashDir, ghPr, resolveFrom, simpleCommands } from "./lib/tool-input";
 
 interface PrCall {
 	/** Folder the PR is opened from. */
@@ -22,8 +22,8 @@ interface PrCall {
 const NO_BODY: Record<string, true> = { "--fill": true, "-f": true, "--fill-first": true, "--web": true, "-w": true };
 
 /** The PR body a `gh pr create|edit` command carries; undefined when there is nothing to check; `refuse` when it cannot be read. */
-function ghBody(command: string, cwd: unknown, sessionCwd: string, format: string): PrCall | { refuse: string } | undefined {
-	const words = simpleCommands(command).find(c => GH_PR.test(c.words.join(" ")))?.words;
+function ghBody(command: string, cwd: unknown, sessionCwd: string, format: string, ghPrCommand: RegExp): PrCall | { refuse: string } | undefined {
+	const words = simpleCommands(command).find(c => ghPrCommand.test(c.words.join(" ")))?.words;
 	if (!words) return undefined;
 	const dir = bashDir(command, cwd, sessionCwd);
 	let body: string | undefined;
@@ -56,12 +56,15 @@ export default function leadPrCheck(pi: ExtensionAPI): void {
 	pi.on("tool_call", (event, ctx) => {
 		const input = (event.input ?? {}) as Record<string, unknown>;
 		const viaGithub = event.toolName === "github" && input.op === "pr_create";
-		if (!viaGithub && !(event.toolName === "bash" && GH_PR.test(String(input.command ?? "")))) return;
+		// Cheap test first: the hard gates are read only for a command that could set a PR body.
+		if (!viaGithub && !(event.toolName === "bash" && /\bpr\s+(?:create|edit)\b/.test(String(input.command ?? "")))) return;
 		const policyDir = leadLayoutFor(ctx.cwd)?.policy;
 		const gates = policyDir && readHardGates(policyDir).gates;
 		if (!policyDir || !gates) return;
+		const ghPrCommand = ghPr(ghCommands(gates));
+		if (!viaGithub && !ghPrCommand.test(String(input.command ?? ""))) return;
 		const format = path.join(policyDir, "pr-format.md");
-		const call = viaGithub ? { dir: ctx.cwd, body: typeof input.body === "string" ? input.body : "" } : ghBody(String(input.command), input.cwd, ctx.cwd, format);
+		const call = viaGithub ? { dir: ctx.cwd, body: typeof input.body === "string" ? input.body : "" } : ghBody(String(input.command), input.cwd, ctx.cwd, format, ghPrCommand);
 		if (!call) return;
 		if ("refuse" in call) return { block: true, reason: call.refuse };
 		const repo = repoRoot(call.dir);

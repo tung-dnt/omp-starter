@@ -272,7 +272,13 @@ export type Step =
 	| { kind: "review"; blockers: Verdict["blockers"] }
 	| { kind: "push"; repos: string[]; branch: string }
 	| { kind: "pr"; repos: string[] }
-	| { kind: "done"; prs: string[] };
+	| { kind: "feedback"; prs: PrFeedback[] }
+	/** PRs are open with nothing to act on: checks still running, or a PR's feedback could not be read. */
+	| { kind: "waiting"; prs: string[] }
+	/** PRs are open, green and without open feedback: ready for the lead to merge. */
+	| { kind: "done"; prs: string[] }
+	| { kind: "merged"; prs: string[] }
+	| { kind: "closed"; prs: string[] };
 
 const passedAt = (state: StoryState, name: string, stage: Stage, head: string): boolean => {
 	const receipt = state.loop.receipts[name]?.[stage];
@@ -280,7 +286,7 @@ const passedAt = (state: StoryState, name: string, stage: Stage, head: string): 
 };
 
 /** The first thing still missing before the pull request, in the order the lead's loop runs them. */
-export async function nextStep(pi: ExtensionAPI, plan: Plan, state: StoryState): Promise<Step> {
+export async function nextStep(pi: ExtensionAPI, plan: Plan, state: StoryState, checks: Record<string, RepoChecks> = {}): Promise<Step> {
 	const current = heads(plan.repos);
 	const names = Object.keys(current);
 	const dirty = names.filter(name => current[name].dirty);
@@ -304,25 +310,154 @@ export async function nextStep(pi: ExtensionAPI, plan: Plan, state: StoryState):
 		return { kind: "check", stage: "acceptance", failed: state.loop.failures.acceptance ?? 0, logs: failingLogs(state, "acceptance") };
 	}
 
-	const prs: string[] = [];
+	const prs: { name: string; url: string; state: string }[] = [];
 	const without: string[] = [];
 	for (const name of names) {
 		const { root, branch } = current[name];
-		const listed = await pi.exec("gh", ["pr", "list", "--head", branch, "--state", "open", "--json", "url", "--limit", "1"], { cwd: root, timeout: GH_TIMEOUT_MS });
-		let url: string | undefined;
+		const gh = checks[name]?.gh ?? "gh";
+		const listed = await pi.exec(gh, ["pr", "list", "--head", branch, "--state", "all", "--json", "url,state", "--limit", "1"], { cwd: root, timeout: GH_TIMEOUT_MS });
+		let pr: { url: string; state: string } | undefined;
 		if (listed.code === 0) {
 			try {
-				url = (JSON.parse(listed.stdout || "[]") as { url: string }[])[0]?.url;
+				pr = (JSON.parse(listed.stdout || "[]") as { url: string; state: string }[])[0];
 			} catch {}
 		}
-		if (url) prs.push(url);
+		if (pr) prs.push({ name, ...pr });
 		else without.push(name);
 	}
-	return without.length ? { kind: "pr", repos: without } : { kind: "done", prs };
+	if (without.length) return { kind: "pr", repos: without };
+	const urls = prs.map(pr => pr.url);
+	if (prs.every(pr => pr.state === "MERGED")) return { kind: "merged", prs: urls };
+	if (prs.some(pr => pr.state === "CLOSED")) return { kind: "closed", prs: prs.filter(pr => pr.state === "CLOSED").map(pr => pr.url) };
+
+	const feedback: PrFeedback[] = [];
+	let unknown = false;
+	for (const pr of prs.filter(p => p.state === "OPEN")) {
+		const config = checks[pr.name] ?? { gh: "gh", ignoredChecks: [] };
+		const read = await readFeedback(pi, current[pr.name].root, pr.url, config.gh, config.ignoredChecks, state.loop.feedback.escalated);
+		if (!read) unknown = true;
+		else feedback.push(read);
+	}
+	const actionable = feedback.filter(f => f.failed.length || f.threads.length || f.changes.length || f.conflict);
+	if (actionable.length) return { kind: "feedback", prs: actionable };
+	if (unknown || feedback.some(f => f.pending)) return { kind: "waiting", prs: urls };
+	return { kind: "done", prs: urls };
+}
+
+// ── PR feedback ──────────────────────────────────────────────────────────────
+
+/** What a pull request asks of the agent. Each item carries a `key` that changes when the item gets new content. */
+export interface PrFeedback {
+	url: string;
+	gh: string;
+	failed: { key: string; name: string; url: string }[];
+	threads: { key: string; id: string; where: string; author: string; body: string; url: string }[];
+	changes: { key: string; author: string; body: string }[];
+	conflict: boolean;
+	pending: boolean;
+}
+
+const FEEDBACK_QUERY = `query($url: URI!) {
+  viewer { login }
+  resource(url: $url) { ... on PullRequest {
+    mergeable headRefOid
+    commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+      __typename
+      ... on CheckRun { name status conclusion detailsUrl }
+      ... on StatusContext { context state targetUrl }
+    } } } } } }
+    reviewThreads(first: 100) { nodes { id isResolved path line comments(last: 1) { nodes { databaseId body url author { login } } } } }
+    reviews(last: 30) { nodes { id state body author { login } commit { oid } } }
+  } }
+}`;
+
+const FAILED = ["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"];
+const BODY_CHARS = 600;
+
+const clip = (text: string): string => {
+	const flat = text.replace(/\s+/g, " ").trim();
+	return flat.length > BODY_CHARS ? `${flat.slice(0, BODY_CHARS)}…` : flat;
+};
+
+/**
+ * Reads the feedback of one pull request: failed and pending checks (minus `ignored`), unresolved threads whose last
+ * comment is not the viewer's, changes requested on the head commit, and merge conflicts. Items in `escalated` wait for
+ * the lead. Undefined when GitHub cannot be read.
+ */
+export async function readFeedback(pi: ExtensionAPI, root: string, url: string, gh: string, ignored: string[], escalated: string[]): Promise<PrFeedback | undefined> {
+	const res = await pi.exec(gh, ["api", "graphql", "-f", `query=${FEEDBACK_QUERY}`, "-f", `url=${url}`], { cwd: root, timeout: GH_TIMEOUT_MS });
+	if (res.code !== 0) return undefined;
+	let doc: unknown;
+	try {
+		doc = JSON.parse(res.stdout);
+	} catch {
+		return undefined;
+	}
+	const data = isObject(doc) && isObject(doc.data) ? doc.data : undefined;
+	const pr = data && isObject(data.resource) ? data.resource : undefined;
+	if (!data || !pr) return undefined;
+	const viewer = isObject(data.viewer) ? String(data.viewer.login) : "";
+	const nodes = (value: unknown): Record<string, unknown>[] => (isObject(value) && Array.isArray(value.nodes) ? value.nodes.filter(isObject) : []);
+	const login = (node: Record<string, unknown>): string => (isObject(node.author) ? String(node.author.login) : "");
+	const head = String(pr.headRefOid ?? "");
+
+	const out: PrFeedback = { url, gh, failed: [], threads: [], changes: [], conflict: pr.mergeable === "CONFLICTING", pending: false };
+	const commit = nodes(pr.commits)[0]?.commit;
+	const rollup = isObject(commit) && isObject(commit.statusCheckRollup) ? commit.statusCheckRollup : undefined;
+	for (const check of nodes(rollup?.contexts)) {
+		const run = check.__typename === "CheckRun";
+		const name = String(run ? check.name : check.context);
+		if (ignored.includes(name)) continue;
+		const result = String(run ? (check.status === "COMPLETED" ? check.conclusion : "PENDING") : check.state);
+		if (FAILED.includes(result)) out.failed.push({ key: `check:${name}@${head}`, name, url: String((run ? check.detailsUrl : check.targetUrl) ?? "") });
+		else if (result === "PENDING" || result === "EXPECTED" || result === "QUEUED" || result === "IN_PROGRESS") out.pending = true;
+	}
+	for (const thread of nodes(pr.reviewThreads)) {
+		const last = nodes(thread.comments)[0];
+		if (thread.isResolved || !last || login(last) === viewer) continue;
+		const key = `thread:${thread.id}#${last.databaseId}`;
+		if (escalated.includes(key)) continue;
+		out.threads.push({ key, id: String(thread.id), where: `${thread.path}${thread.line ? `:${thread.line}` : ""}`, author: login(last), body: clip(String(last.body ?? "")), url: String(last.url ?? "") });
+	}
+	for (const review of nodes(pr.reviews)) {
+		if (review.state !== "CHANGES_REQUESTED" || login(review) === viewer || !String(review.body ?? "").trim()) continue;
+		if (!isObject(review.commit) || review.commit.oid !== head) continue;
+		const key = `review:${review.id}`;
+		if (!escalated.includes(key)) out.changes.push({ key, author: login(review), body: clip(String(review.body)) });
+	}
+	return out;
+}
+
+/** The item keys of a feedback step, as one comparable string: a new string is a new round. */
+export const feedbackItems = (prs: PrFeedback[]): string =>
+	prs
+		.flatMap(pr => [...pr.failed.map(f => f.key), ...pr.threads.map(t => t.key), ...pr.changes.map(c => c.key), ...(pr.conflict ? [`conflict:${pr.url}`] : [])])
+		.sort()
+		.join(",");
+
+function feedbackInstruction(prs: PrFeedback[], round: number, rounds: number): string {
+	const lines = [`[lead loop] PR feedback, round ${round} of ${rounds}. Items (each with its key):`];
+	for (const pr of prs) {
+		lines.push(`${pr.url}:`);
+		if (pr.conflict) lines.push(`- conflict:${pr.url} — merge conflicts with the base branch: merge the base in, resolve, commit.`);
+		for (const f of pr.failed) lines.push(`- ${f.key} — CI check "${f.name}" failed: ${f.url}`);
+		for (const t of pr.threads) lines.push(`- ${t.key} — thread ${t.id} at ${t.where} by @${t.author}: "${t.body}" (${t.url})`);
+		for (const c of pr.changes) lines.push(`- ${c.key} — changes requested by @${c.author}: "${c.body}"`);
+	}
+	const gh = prs[0]?.gh ?? "gh";
+	lines.push(
+		"For each item:",
+		'- If it questions the design, an invariant, a boundary or the scope, do not change code for it: call the lead tool with op "escalate", artifact = its key, summary = one line. The lead decides it.',
+		`- If a failed check looks unrelated to the change (infrastructure, flaky), rerun it once with \`${gh} run rerun <run id> --failed\` (the run id is in its URL) instead of changing code.`,
+		"- Otherwise fix it and commit. The loop then checks, reviews and pushes the fix.",
+		`- Once a thread's fix is pushed, reply on that thread with "Fixed in <short sha>: <what changed>" via \`${gh} api graphql\` (mutation addPullRequestReviewThreadReply, pullRequestReviewThreadId = the thread id). Never resolve threads; the reviewer does.`,
+		"Then end your turn: the loop watches the PR.",
+	);
+	return lines.join("\n");
 }
 
 /** The message the controller sends the agent for `step`. */
-export function instruction(step: Exclude<Step, { kind: "done" }>, story: ActiveStory): string {
+export function instruction(step: Exclude<Step, { kind: "done" | "waiting" | "merged" | "closed" }>, story: ActiveStory, round = 1, rounds = 5): string {
 	const prefix = "[lead loop] ";
 	switch (step.kind) {
 		case "commit":
@@ -341,7 +476,9 @@ export function instruction(step: Exclude<Step, { kind: "done" }>, story: Active
 		case "push":
 			return `${prefix}Review is clean at HEAD. Push ${step.repos.join(", ")} with git push -u origin ${step.branch}, then continue.`;
 		case "pr":
-			return `${prefix}Everything is proven at HEAD. Open the PR for ${step.repos.join(", ")} following /ship (body per pr-format.md, including ## Evidence and ## Unproven), then stop.`;
+			return `${prefix}Everything is proven at HEAD. Open the PR for ${step.repos.join(", ")} following /ship (body per pr-format.md, including ## Evidence and ## Unproven), then end your turn: the loop watches the PR for CI and review feedback.`;
+		case "feedback":
+			return feedbackInstruction(step.prs, round, rounds);
 	}
 }
 
@@ -355,11 +492,13 @@ export function stuckInstruction(stage: string, story: ActiveStory, logs: string
 // ── The controller ───────────────────────────────────────────────────────────
 
 /**
- * Decides at the end of a main-session turn: block it with the next instruction, or let it rest. Rests (undefined)
- * when the loop is off, nothing is being built, gates wait for the lead, the budget is spent, or all is done.
+ * Decides at the end of a main-session turn, or when the PR poller finds the session idle: block it with the next
+ * instruction, or let it rest. Rests (undefined) when the loop is off, nothing is being built, gates wait for the lead,
+ * the budget is spent, the PRs wait for CI or the lead, or all is merged. A merged or closed PR ends the build.
  */
 export async function loopStop(pi: ExtensionAPI, ctx: ExtensionContext): Promise<{ decision: "block"; reason: string } | undefined> {
 	if (ctx.agent?.kind === "sub" || process.env.OMP_STARTER_LEAD_LOOP === "off") return undefined;
+	lead().watching = false;
 	const story = lead().story;
 	if (!story || !lead().building || !planApproved(story).approved) return undefined;
 	const { plan } = readPlan(story.dir);
@@ -379,7 +518,7 @@ export async function loopStop(pi: ExtensionAPI, ctx: ExtensionContext): Promise
 			await updateStoryState(story.dir, s => {
 				if (s.loop.stuck) s.loop.stuck.prompted = true;
 			});
-			return { decision: "block", reason: stuckInstruction(at.stage, story, at.stage === "review" || at.stage === "loop" ? [] : failingLogs(state, at.stage)) };
+			return { decision: "block", reason: stuckInstruction(at.stage, story, at.stage === "review" || at.stage === "loop" || at.stage === "feedback" ? [] : failingLogs(state, at.stage)) };
 		}
 		if (!at.notified) {
 			await updateStoryState(story.dir, s => {
@@ -398,7 +537,15 @@ export async function loopStop(pi: ExtensionAPI, ctx: ExtensionContext): Promise
 		return stuck();
 	}
 
-	const step = await nextStep(pi, plan, state);
+	const limits = readHardGates(story.layout.policy).gates;
+	const step = await nextStep(pi, plan, state, limits?.checks);
+	if (step.kind === "waiting" || step.kind === "done") lead().watching = true;
+	if (step.kind === "waiting") return undefined;
+	if (step.kind === "merged" || step.kind === "closed") {
+		lead().building = false;
+		leadNotify(ctx, `omp lead · ${story.id} · ${step.kind}: ${step.prs.join(" ")}`);
+		return undefined;
+	}
 	if (step.kind === "done") {
 		const key = Object.values(heads(plan.repos))
 			.map(h => h.head)
@@ -411,10 +558,22 @@ export async function loopStop(pi: ExtensionAPI, ctx: ExtensionContext): Promise
 		}
 		return undefined;
 	}
+	const rounds = limits?.limits.prRounds ?? 5;
+	if (step.kind === "feedback") {
+		const items = feedbackItems(step.prs);
+		if (items !== state.loop.feedback.items) {
+			state = await updateStoryState(story.dir, s => {
+				s.loop.feedback.items = items;
+				s.loop.feedback.rounds += 1;
+				if (s.loop.feedback.rounds > rounds && !s.loop.stuck) s.loop.stuck = { stage: "feedback", at: new Date().toISOString(), prompted: false, notified: false };
+			});
+			if (state.loop.stuck) return stuck();
+		}
+	}
 	await updateStoryState(story.dir, s => {
 		s.loop.continuations += 1;
 	});
-	return { decision: "block", reason: instruction(step, story) };
+	return { decision: "block", reason: instruction(step, story, state.loop.feedback.rounds, rounds) };
 }
 
 // ── Review ───────────────────────────────────────────────────────────────────

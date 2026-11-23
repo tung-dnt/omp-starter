@@ -6,7 +6,7 @@ import { readStoryState, today } from "./lib/lead/artifacts";
 import { lead } from "./lib/lead/registry";
 import { BRIEF_TEMPLATE, HARD_GATES_TEMPLATE, PR_FORMAT, PROJECT_NOTE_BLOCK } from "./lib/lead/templates";
 import { HOME } from "./lib/state";
-import { type FakeExec, type FakePi, fakeContext, fakePi, initGitRepo, resetHome, scriptedUi, seedKb, seedState, type UiScript, writeFiles } from "./test-harness";
+import { type FakeExec, type FakePi, fakeContext, fakeModes, fakePi, initGitRepo, resetHome, scriptedUi, seedKb, seedState, type UiScript, writeFiles } from "./test-harness";
 
 beforeEach(resetHome);
 
@@ -175,7 +175,7 @@ describe("the single plan approval", () => {
 		await s.input("/story S1", s.main().ctx);
 		s.writePlan();
 		const { ui, ctx } = s.main({ confirm: [true] });
-		expect((await s.fake.callTool("lead", { op: "approve" }, ctx)).text).toBe("plan approved; building may start (/build S1)");
+		expect((await s.fake.callTool("lead", { op: "approve" }, ctx)).text).toBe("plan approved; /build S1 starts when you end this turn");
 		expect(ui.prompts).toEqual([
 			{
 				kind: "confirm",
@@ -213,7 +213,7 @@ describe("the single plan approval", () => {
 		expect(ui.prompts).toEqual([]);
 
 		fs.writeFileSync(s.note, NOTE);
-		expect((await approve()).text).toBe("plan approved; building may start (/build S1)");
+		expect((await approve()).text).toBe("plan approved; /build S1 starts when you end this turn");
 		fs.rmSync(s.note);
 		expect(await s.input("/build", ctx)).toEqual({ handled: true });
 		expect(ui.notifications.at(-1)?.message).toBe("lead: /build needs a project note with a services block for every repository in the plan: project note missing: ~/kb/projects/shop.md.");
@@ -276,6 +276,73 @@ describe("/build", () => {
 		]);
 		expect(await s.input("/build S1", ctx)).toBeUndefined();
 		expect(lead().story?.id).toBe("S1");
+	});
+});
+
+describe("/story in plan mode, then /build on its own", () => {
+	const turnEnd = (fake: FakePi, ctx: object, stopReason = "stop") =>
+		fake.emit("agent_end", { type: "agent_end", messages: [{ role: "assistant", content: [], stopReason }] }, ctx) as Promise<void>;
+	const start = (fake: FakePi, ctx: object) =>
+		fake.emit("before_agent_start", { type: "before_agent_start", reason: "prompt", prompt: "", systemPrompt: ["base"] }, ctx) as { systemPrompt: string[] } | undefined;
+
+	test("/story grills in plan mode; the end of a finished turn leaves it and tells the agent to write the plan", async () => {
+		const s = setup();
+		const modes = fakeModes();
+		const ctx = fakeContext({ cwd: s.shop, sessionModes: modes });
+		await s.input("/story S1", ctx);
+		expect(modes.requests).toEqual([{ mode: "plan", action: "enter" }]);
+		expect(start(s.fake, ctx)?.systemPrompt.at(-1)).toStartWith("# Lead planning · S1\nPlan mode is on");
+
+		await turnEnd(s.fake, ctx, "aborted");
+		await turnEnd(s.fake, s.sub("task"));
+		expect(modes.plan).toBe("active");
+		expect(s.fake.sent).toEqual([]);
+
+		await turnEnd(s.fake, ctx);
+		expect(modes.plan).toBe("inactive");
+		expect(s.fake.sent).toEqual([
+			'[lead] Plan mode is off. Continue /story S1 from step 3: write the brief draft if there is none, the plan and any missing project-note services block, then call the lead tool with op "approve".',
+		]);
+		expect(start(s.fake, ctx)?.systemPrompt.some(block => block.startsWith("# Lead planning"))).toBe(false);
+	});
+
+	test("plan mode that cannot be entered is reported and /story goes on without it; an approved story skips it", async () => {
+		const s = setup();
+		const modes = fakeModes();
+		modes.refuse = { code: "disabled", message: "Extension mode control is disabled in settings." };
+		const ui = scriptedUi();
+		const ctx = fakeContext({ cwd: s.shop, ui, sessionModes: modes });
+		expect(await s.input("/story S1", ctx)).toBeUndefined();
+		expect(ui.notifications).toEqual([{ type: "warning", message: "lead: plan mode not entered for S1 (disabled): Extension mode control is disabled in settings." }]);
+		expect(lead().planning).toBe(false);
+
+		resetHome();
+		const approved = await approvedStory();
+		const fresh = fakeModes();
+		await approved.input("/story S1", fakeContext({ cwd: approved.shop, sessionModes: fresh }));
+		expect(fresh.requests).toEqual([]);
+	});
+
+	test("the end of the approval turn runs the installed /build for the story and starts the loop", async () => {
+		const s = await approvedStory();
+		const file = path.join(HOME, "commands", "build.md");
+		writeFiles(path.dirname(file), { "build.md": "---\ndescription: build it\n---\n\nBuild the approved plan.\n" });
+		s.fake.slashCommands.push({ name: "agent-skills:build", source: "prompt", path: file });
+		await turnEnd(s.fake, s.main().ctx);
+		expect(s.fake.sent).toEqual(["Build the approved plan.\n\nS1"]);
+		expect(lead().building).toBe(true);
+
+		await turnEnd(s.fake, s.main().ctx);
+		expect(s.fake.sent).toHaveLength(1);
+	});
+
+	test("without an installed /build the lead is told to run it; nothing starts", async () => {
+		const s = await approvedStory();
+		const { ui, ctx } = s.main();
+		await turnEnd(s.fake, ctx);
+		expect(ui.notifications).toEqual([{ type: "error", message: "lead: no /build command is installed (agent-skills); run /build S1 once it is." }]);
+		expect(s.fake.sent).toEqual([]);
+		expect(lead().building).toBe(false);
 	});
 });
 

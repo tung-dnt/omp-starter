@@ -84,8 +84,17 @@ export function bashDir(command: string, cwd: unknown, sessionCwd: string): stri
 // `git [global opts] commit`, not commit-tree or "commit" as an argument of another subcommand.
 export const GIT_COMMIT = /\bgit(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+commit(?=[\s;&|)]|$)/;
 const GIT_DASH_C = /\s-C\s+("[^"]*"|'[^']*'|\S+)/g;
-/** `gh pr create` or `gh pr edit`: the commands that set a pull request's body. */
-export const GH_PR = /\bgh\s+pr\s+(create|edit)\b/;
+const regexEscape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
+
+/**
+ * `<gh> pr create` or `<gh> pr edit`, the commands that set a pull request's body. `<gh>` is `gh`, any `gh-<name>`
+ * wrapper, and each of `commands` (the `gh:` of the repositories in hard-gates.md), so a repository's own GitHub CLI
+ * cannot be used to open a pull request around the check.
+ */
+export function ghPr(commands: readonly string[] = []): RegExp {
+	const names = [...new Set(commands)].map(regexEscape);
+	return new RegExp(`(?<![\\w.-])(?:${["gh", "gh-[\\w.-]+", ...names].join("|")})\\s+pr\\s+(?:create|edit)\\b`);
+}
 
 /** Directory a matched `git …` command runs in: bash `cwd`, a leading `cd <p> &&`, then each `git -C <p>` of the match. */
 export function gitCommandDir(command: string, match: RegExpExecArray, cwd: unknown, sessionCwd: string): string {

@@ -99,15 +99,22 @@ export interface RepoChecks {
 	worktreeSetup?: string;
 	timeoutSeconds: number;
 	acceptance?: { deployWait: string; env: Record<string, string>; timeoutSeconds: number };
+	/** The GitHub CLI for this repository's PRs (`gh-blinx` for blinx repos). */
+	gh: string;
+	/** CI checks the PR feedback step ignores, such as manual deployment approvals that never finish. */
+	ignoredChecks: string[];
 }
 
 export interface HardGates {
 	gates: Gate[];
 	concurrencyTriggers: { paths: string[]; patterns: RegExp[] };
-	limits: { builders: number };
+	limits: { builders: number; prRounds: number; prPollMinutes: number };
 	/** Check commands by repository (origin basename). */
 	checks: Record<string, RepoChecks>;
 }
+
+/** The GitHub CLI commands of the repositories in hard-gates.md. */
+export const ghCommands = (gates: HardGates | undefined): string[] => Object.values(gates?.checks ?? {}).map(repo => repo.gh);
 
 function seconds(value: unknown, where: string, fallback: number): number {
 	if (value === undefined) return fallback;
@@ -127,7 +134,17 @@ function parseChecks(raw: unknown): Record<string, RepoChecks> {
 			if (!list.length || list.some(command => !command.trim())) throw new Error(`${at}.${key}: expected at least one command`);
 			return list;
 		};
-		const entry: RepoChecks = { verify: commands("verify"), test: commands("test"), timeoutSeconds: seconds(value.timeout_seconds, `${at}.timeout_seconds`, 900) };
+		const entry: RepoChecks = {
+			verify: commands("verify"),
+			test: commands("test"),
+			timeoutSeconds: seconds(value.timeout_seconds, `${at}.timeout_seconds`, 900),
+			gh: "gh",
+			ignoredChecks: strings(value.ignored_checks, `${at}.ignored_checks`, []),
+		};
+		if (value.gh !== undefined) {
+			if (typeof value.gh !== "string" || !/^[\w.-]+$/.test(value.gh)) throw new Error(`${at}.gh: expected a command name`);
+			entry.gh = value.gh;
+		}
 		if (value.worktree_setup !== undefined) {
 			if (typeof value.worktree_setup !== "string" || !value.worktree_setup.trim()) throw new Error(`${at}.worktree_setup: expected a command`);
 			entry.worktreeSetup = value.worktree_setup;
@@ -174,12 +191,15 @@ function parseHardGates(text: string): HardGates {
 	});
 	const limits = doc.limits === undefined ? {} : doc.limits;
 	if (!isObject(limits)) throw new Error("limits: expected a mapping");
-	const builders = limits.builders ?? 2;
-	if (typeof builders !== "number" || !Number.isInteger(builders) || builders < 1) throw new Error("limits.builders: expected an integer of 1 or more");
+	const count = (key: string, fallback: number): number => {
+		const value = limits[key] ?? fallback;
+		if (typeof value !== "number" || !Number.isInteger(value) || value < 1) throw new Error(`limits.${key}: expected an integer of 1 or more`);
+		return value;
+	};
 	return {
 		gates,
 		concurrencyTriggers: { paths: strings(triggers.paths, "concurrency_triggers.paths", []), patterns },
-		limits: { builders },
+		limits: { builders: count("builders", 2), prRounds: count("pr_rounds", 5), prPollMinutes: count("pr_poll_minutes", 5) },
 		checks: parseChecks(doc.checks),
 	};
 }
@@ -611,9 +631,11 @@ export interface LoopState {
 	reviewRounds: number;
 	review: Verdict | null;
 	continuations: number;
-	stuck: { stage: Stage | "review" | "loop"; at: string; prompted: boolean; notified: boolean } | null;
+	stuck: { stage: Stage | "review" | "loop" | "feedback"; at: string; prompted: boolean; notified: boolean } | null;
 	/** The heads (joined) for which "ready to merge" was announced. */
 	readyNotified: string | null;
+	/** PR feedback rounds: `items` is the item set of the last counted round; `escalated` the items handed to the lead. */
+	feedback: { rounds: number; items: string; escalated: string[] };
 }
 
 export interface StoryState {
@@ -626,7 +648,17 @@ export interface StoryState {
 	loop: LoopState;
 }
 
-const emptyLoop = (): LoopState => ({ base: {}, receipts: {}, failures: {}, reviewRounds: 0, review: null, continuations: 0, stuck: null, readyNotified: null });
+const emptyLoop = (): LoopState => ({
+	base: {},
+	receipts: {},
+	failures: {},
+	reviewRounds: 0,
+	review: null,
+	continuations: 0,
+	stuck: null,
+	readyNotified: null,
+	feedback: { rounds: 0, items: "", escalated: [] },
+});
 
 export function readStoryState(storyDir: string): StoryState {
 	let text: string;

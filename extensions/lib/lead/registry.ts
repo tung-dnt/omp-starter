@@ -38,6 +38,16 @@ export interface LeadRegistry {
 	editedNotes: Set<string>;
 	/** `/build` started the lead loop for the active story; `/story` ends it. */
 	building: boolean;
+	/** `/story` put the session in plan mode for the grilling; the end of the next finished main turn takes it out. */
+	planning: boolean;
+	/** The lead approved the plan in this turn; its end starts `/build`. */
+	buildOnRest: boolean;
+	/** The loop last rested on PRs waiting for CI or reviewers: the poller keeps watching them. */
+	watching: boolean;
+	/** The PR poller's interval, while it runs. */
+	prTimer?: Timer;
+	/** A poll is running; the next tick skips. */
+	polling: boolean;
 }
 
 const KEY = Symbol.for("omp-starter.lead");
@@ -52,6 +62,10 @@ const empty = (sessionId?: string): LeadRegistry => ({
 	noteBefore: new Map(),
 	editedNotes: new Set(),
 	building: false,
+	planning: false,
+	buildOnRest: false,
+	watching: false,
+	polling: false,
 });
 
 export function lead(): LeadRegistry {

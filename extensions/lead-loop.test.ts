@@ -20,6 +20,35 @@ const PR_URL = "https://x/pr/1";
 const git = (cwd: string, ...args: string[]): string =>
 	execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
 
+interface PrShape {
+	checks?: object[];
+	threads?: object[];
+	reviews?: object[];
+	mergeable?: string;
+}
+
+/** The reply of the feedback GraphQL query, viewer `tony`, head `h1`; by default green with no reviews. */
+const prDoc = (shape: PrShape = {}) => ({
+	data: {
+		viewer: { login: "tony" },
+		resource: {
+			mergeable: shape.mergeable ?? "MERGEABLE",
+			headRefOid: "h1",
+			commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: shape.checks ?? [] } } } }] },
+			reviewThreads: { nodes: shape.threads ?? [] },
+			reviews: { nodes: shape.reviews ?? [] },
+		},
+	},
+});
+const checkRun = (name: string, status: string, conclusion: string | null) => ({ __typename: "CheckRun", name, status, conclusion, detailsUrl: "https://github.com/o/shop/actions/runs/9/job/1" });
+const thread = (id: string, author: string, commentId = 1) => ({
+	id,
+	isResolved: false,
+	path: "src.txt",
+	line: 1,
+	comments: { nodes: [{ databaseId: commentId, body: "rename this", url: `https://x/pr/1#${id}`, author: { login: author } }] },
+});
+
 interface Options {
 	/** The yaml mapping of `checks.shop` in hard-gates.md; undefined: no entry. */
 	checks?: string | null;
@@ -60,8 +89,11 @@ function setup(options: Options = {}) {
 	git(shop, "add", "-A");
 	git(shop, "commit", "-m", "base", "--quiet");
 
+	/** What `gh` answers: `pulls` for `gh pr list`, `pr` for the feedback query (null: GitHub cannot be read). */
+	const github: { pulls: string; pr: object | null } = { pulls, pr: prDoc() };
 	const exec: FakeExec = (command, args, o) => {
-		if (command === "gh") return { stdout: pulls, code: 0 };
+		if (command === "gh" && args[0] === "api") return github.pr ? { stdout: JSON.stringify(github.pr), code: 0 } : { stdout: "", stderr: "HTTP 502", code: 1 };
+		if (command === "gh") return { stdout: github.pulls, code: 0 };
 		const run = Bun.spawnSync([command, ...args], { cwd: o?.cwd });
 		return { stdout: run.stdout.toString(), stderr: run.stderr.toString(), code: run.exitCode ?? -1 };
 	};
@@ -116,7 +148,7 @@ function setup(options: Options = {}) {
 		git(shop, "push", "-u", "origin", "HEAD", "--quiet");
 		return { ctx, ui, fixed };
 	};
-	return { fake, gates, shop, remote, storyDir, kbRoot: kb.root, main, input, writePlan, approve, check, commit, fix, stop, build, ready, state, head, verdict, reviewEnd, reviewer };
+	return { fake, gates, github, shop, remote, storyDir, kbRoot: kb.root, main, input, writePlan, approve, check, commit, fix, stop, build, ready, state, head, verdict, reviewEnd, reviewer };
 }
 
 describe("plan approval", () => {
@@ -389,5 +421,98 @@ describe("ready to merge", () => {
 		});
 		fs.writeFileSync(bodyFile, body(true));
 		expect(open()?.reason).toContain("review verdict is not clean at HEAD");
+	});
+});
+
+describe("PR feedback", () => {
+	test("failed CI and reviewer threads become one round; the agent's own replies, ignored checks and an unchanged item set do not", async () => {
+		const s = setup({ checks: '{ verify: ["true"], test: ["true"], ignored_checks: ["Approve Deployment"] }' });
+		const { ctx } = await s.ready();
+		s.github.pr = prDoc({ checks: [checkRun("ci", "COMPLETED", "FAILURE"), checkRun("Approve Deployment", "IN_PROGRESS", null)], threads: [thread("T1", "rev"), thread("T2", "tony")] });
+		const first = (await s.stop(ctx))?.reason ?? "";
+		expect(first).toStartWith("[lead loop] PR feedback, round 1 of 5.");
+		expect(first).toContain('- check:ci@h1 — CI check "ci" failed: https://github.com/o/shop/actions/runs/9/job/1');
+		expect(first).toContain('- thread:T1#1 — thread T1 at src.txt:1 by @rev: "rename this"');
+		expect(first).not.toContain("T2");
+		expect(first).not.toContain("Approve Deployment");
+		expect(first).toContain("Never resolve threads");
+
+		expect((await s.stop(ctx))?.reason).toStartWith("[lead loop] PR feedback, round 1 of 5.");
+		s.github.pr = prDoc({ threads: [thread("T1", "rev", 2)] });
+		expect((await s.stop(ctx))?.reason).toStartWith("[lead loop] PR feedback, round 2 of 5.");
+	});
+
+	test("running CI rests and keeps the poller; a green PR with no feedback is ready to merge", async () => {
+		const s = setup();
+		const { ctx, ui } = await s.ready();
+		s.github.pr = prDoc({ checks: [checkRun("ci", "IN_PROGRESS", null)] });
+		expect(await s.stop(ctx)).toBeUndefined();
+		expect(ui.notifications).toEqual([]);
+		expect(ctx.timers.size).toBe(1);
+
+		s.github.pr = null;
+		expect(await s.stop(ctx)).toBeUndefined();
+		expect(ui.notifications).toEqual([]);
+
+		s.github.pr = prDoc();
+		expect(await s.stop(ctx)).toBeUndefined();
+		expect(ui.notifications.map(n => n.message)).toEqual([`omp lead · S1 · ready to merge: ${PR_URL}`]);
+		expect(ctx.timers.size).toBe(1);
+	});
+
+	test("the poller prompts the agent with new feedback only while the session is idle", async () => {
+		const s = setup();
+		const { ctx } = await s.ready();
+		await s.stop(ctx);
+		s.github.pr = prDoc({ threads: [thread("T1", "rev")] });
+		ctx.idle = false;
+		await ctx.tick();
+		expect(s.fake.sent).toEqual([]);
+
+		ctx.idle = true;
+		await ctx.tick();
+		expect(s.fake.sent[0]).toStartWith("[lead loop] PR feedback, round 1 of 5.");
+		expect(ctx.timers.size).toBe(0);
+	});
+
+	test("an item that questions the design goes to the lead and stays theirs until it gets a new comment", async () => {
+		const s = setup();
+		const { ctx, ui } = await s.ready();
+		s.github.pr = prDoc({ threads: [thread("T1", "rev")] });
+		await expect(s.fake.callTool("lead", { op: "escalate", artifact: "src.txt", summary: "x" }, ctx)).rejects.toThrow("lead: escalate needs artifact");
+		expect((await s.fake.callTool("lead", { op: "escalate", artifact: "thread:T1#1", summary: "reviewer wants a queue instead of a cron" }, ctx)).text).toBe(
+			"escalated thread:T1#1; the loop leaves it to the lead",
+		);
+		expect(fs.readFileSync(path.join(s.storyDir, "stuck.md"), "utf8")).toBe(`- ${today()} · PR question for the lead · thread:T1#1 · reviewer wants a queue instead of a cron\n`);
+		expect(ui.notifications.map(n => n.message)).toEqual([`omp lead · S1 · PR question for you: ${path.join(s.storyDir, "stuck.md")}`]);
+
+		expect(await s.stop(ctx)).toBeUndefined();
+		s.github.pr = prDoc({ threads: [thread("T1", "rev", 2)] });
+		expect((await s.stop(ctx))?.reason).toContain("- thread:T1#2 —");
+	});
+
+	test("more rounds than limits.pr_rounds stop the loop for a deep diagnosis", async () => {
+		const s = setup();
+		const { ctx } = await s.ready();
+		await updateStoryState(s.storyDir, state => {
+			state.loop.feedback.rounds = 5;
+		});
+		s.github.pr = prDoc({ mergeable: "CONFLICTING" });
+		expect((await s.stop(ctx))?.reason).toStartWith('[lead loop] Budget spent at "feedback".');
+		expect(s.state().loop.stuck?.stage).toBe("feedback");
+	});
+
+	test("a merged PR ends the build and the story, and stops the poller", async () => {
+		const s = setup();
+		const { ctx, ui } = await s.ready();
+		s.github.pr = prDoc({ checks: [checkRun("ci", "IN_PROGRESS", null)] });
+		await s.stop(ctx);
+		expect(ctx.timers.size).toBe(1);
+		s.github.pulls = `[{"url":"${PR_URL}","state":"MERGED"}]`;
+		expect(await s.stop(ctx)).toBeUndefined();
+		expect(ui.notifications.map(n => n.message)).toEqual([`omp lead · S1 · merged: ${PR_URL}`]);
+		expect(s.state().status?.value).toBe("done");
+		expect(lead().story).toBeUndefined();
+		expect(ctx.timers.size).toBe(0);
 	});
 });

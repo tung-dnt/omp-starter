@@ -44,14 +44,21 @@ describe("readHardGates", () => {
 
 	test("checks: per-repository commands with defaults; a wrong type names its key and falls back to the last good copy", () => {
 		const withChecks = (checks: string) => HARD_GATES_TEMPLATE.replace("checks: {}", checks);
-		writeFiles(leadDir(), { "hard-gates.md": withChecks('checks:\n  shop:\n    verify: ["bun run lint"]\n    test: ["bun test"]\n    acceptance: { deploy_wait: "wait-for-stack {branch}", env: { STACK: "https://{story}.example" } }') });
+		writeFiles(leadDir(), {
+			"hard-gates.md": withChecks(
+				'checks:\n  shop:\n    verify: ["bun run lint"]\n    test: ["bun test"]\n    gh: gh-blinx\n    ignored_checks: ["Approve Deployment"]\n    acceptance: { deploy_wait: "wait-for-stack {branch}", env: { STACK: "https://{story}.example" } }\n  cart: { verify: ["true"], test: ["true"] }',
+			),
+		});
 		expect(readHardGates(leadDir()).gates?.checks).toEqual({
 			shop: {
 				verify: ["bun run lint"],
 				test: ["bun test"],
 				timeoutSeconds: 900,
+				gh: "gh-blinx",
+				ignoredChecks: ["Approve Deployment"],
 				acceptance: { deployWait: "wait-for-stack {branch}", env: { STACK: "https://{story}.example" }, timeoutSeconds: 1800 },
 			},
+			cart: { verify: ["true"], test: ["true"], timeoutSeconds: 900, gh: "gh", ignoredChecks: [] },
 		});
 
 		writeFiles(leadDir(), { "hard-gates.md": withChecks('checks:\n  shop: { verify: [], test: ["bun test"] }') });

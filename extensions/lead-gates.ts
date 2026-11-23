@@ -4,12 +4,12 @@
 // Also keeps agents from editing the lead's own files. Active once `/starter lead` created hard-gates.md; off with
 // OMP_STARTER_LEAD=off.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { draftableBrief, leadLayoutFor, protectedLeadPath, readHardGates } from "./lib/lead/artifacts";
+import { draftableBrief, ghCommands, leadLayoutFor, protectedLeadPath, readHardGates } from "./lib/lead/artifacts";
 import { matchGates, matchRepoFiles, resolveGate } from "./lib/lead/gates";
 import { checkStructure } from "./lib/lead/structure";
 import { changedFiles, repoRoot, stagedFiles } from "./lib/repo";
 import { tildify } from "./lib/state";
-import { bashDir, GH_PR, GIT_COMMIT, gitCommandDir, resolveFrom, targetPaths } from "./lib/tool-input";
+import { bashDir, GIT_COMMIT, ghPr, gitCommandDir, resolveFrom, targetPaths } from "./lib/tool-input";
 
 const WRITE_TOOLS: Record<string, true> = { write: true, edit: true };
 const GIT_PUSH = /\bgit(?:\s+-C\s+\S+)*\s+push\b/;
@@ -25,7 +25,7 @@ interface Published {
 }
 
 /** What a commit, push or PR call would publish, per repository; undefined when the call is none of those. */
-function published(toolName: string, input: Record<string, unknown>, sessionCwd: string): Published[] | undefined {
+function published(toolName: string, input: Record<string, unknown>, sessionCwd: string, ghPrCommand: RegExp): Published[] | undefined {
 	if (toolName === "github") {
 		if (input.op !== "pr_create") return undefined;
 		const repo = repoRoot(sessionCwd);
@@ -35,7 +35,7 @@ function published(toolName: string, input: Record<string, unknown>, sessionCwd:
 	const command = String(input.command ?? "");
 	const commit = GIT_COMMIT.exec(command);
 	const push = GIT_PUSH.exec(command);
-	const pr = GH_PR.test(command);
+	const pr = ghPrCommand.test(command);
 	if (!commit && !push && !pr) return undefined;
 	const out: Published[] = [];
 	const commitRepo = commit && repoRoot(gitCommandDir(command, commit, input.cwd, sessionCwd));
@@ -65,7 +65,7 @@ export default function leadGates(pi: ExtensionAPI): void {
 
 		const { gates, error } = readHardGates(layout.policy);
 		if (!gates && !error) return;
-		const publishing = published(event.toolName, input, ctx.cwd);
+		const publishing = published(event.toolName, input, ctx.cwd, ghPr(ghCommands(gates)));
 		if (!gates) {
 			if (!publishing && !writes.some(p => repoRoot(p))) return;
 			return { block: true, reason: `lead: hard-gates.md unreadable (${error}); gates fail closed until it can be read.` };

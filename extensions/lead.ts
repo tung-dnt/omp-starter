@@ -2,6 +2,8 @@
 // by default; see LeadLayout); the agent plans from it, the lead approves the plan once, and code keeps the build
 // inside what was approved:
 //  - `/story <id>` and `/build [id]` are checked before they expand: no brief, no planning; no approved plan, no build.
+//  - `/story` puts the session in plan mode while the agent reads and grills the lead; the end of that turn takes it
+//    out so the agent can write the plan. The end of the turn in which the lead approved it starts `/build`.
 //  - The active story's brief, hard gates and the project notes of the plan's repositories are added to the system prompt of the main session and of the subagents that build or review.
 //  - A plan is approved only when each of its repositories has a project note with a services block; an agent's change to such a block is announced to the lead.
 //  - Repository edits are blocked until the plan is approved; afterwards reads and writes outside the plan's repositories are blocked.
@@ -58,7 +60,7 @@ const BUILDERS: Record<string, true> = { task: true, "task-builder": true, "test
 const STATUS_TIMEOUT_MS = 10_000;
 
 interface LeadParams {
-	op: "approve" | "gate" | "status" | "retro" | "check";
+	op: "approve" | "gate" | "status" | "retro" | "check" | "escalate";
 	story?: string;
 	summary?: string;
 	artifact?: string;
@@ -202,7 +204,8 @@ async function approvePlan(ctx: ExtensionContext): Promise<string> {
 	story.invariants = brief.invariants;
 	story.mode = brief.mode;
 	lead().notifiedPlanChange = false;
-	return `plan approved; building may start (/build ${story.id})`;
+	lead().buildOnRest = true;
+	return `plan approved; /build ${story.id} starts when you end this turn`;
 }
 
 /** Starts the loop for the story: new budgets, and the commit each repository is at as the base the proof tests must fail on. */
@@ -211,12 +214,97 @@ async function startLoop(story: ActiveStory): Promise<void> {
 	const { plan } = readPlan(story.dir);
 	await updateStoryState(story.dir, state => {
 		Object.assign(state.loop, { failures: {}, reviewRounds: 0, continuations: 0, stuck: null, readyNotified: null });
+		state.loop.feedback = { ...state.loop.feedback, rounds: 0, items: "" };
 		for (const root of plan?.repos ?? []) {
 			const name = noteNames([root])[0];
 			const head = headSha(root);
 			if (head && !state.loop.base[name]) state.loop.base[name] = head;
 		}
 	});
+}
+
+const PLANNING_HEADER = "# Lead planning";
+
+/** Told to the main session while `/story` keeps it in plan mode. */
+function planningBlock(story: ActiveStory): string {
+	return [
+		`${PLANNING_HEADER} · ${story.id}`,
+		"Plan mode is on for /story steps 1–2: read the brief, the ticket and the project notes, then put every question to the lead in one ask form.",
+		"Write nothing yet: no brief.md draft, plan.md, project note or plan-mode plan file, and do not submit a plan for plan review.",
+		'When the lead has answered, end your turn. The harness then turns plan mode off and tells you to write the files and call the lead tool with op "approve".',
+	].join("\n");
+}
+
+/** `/story` for a plan not approved yet: plan mode while the agent reads and grills the lead. */
+async function startPlanning(story: ActiveStory, ctx: ExtensionContext): Promise<void> {
+	if (planApproved(story).approved || !ctx.sessionModes) return;
+	const result = await ctx.sessionModes.set({ mode: "plan", action: "enter" });
+	if (!result.ok) {
+		ctx.ui.notify(`lead: plan mode not entered for ${story.id} (${result.code}): ${result.message}`, "warning");
+		return;
+	}
+	lead().planning = true;
+}
+
+/** Sends `text` as the lead's next prompt without holding the event that sends it; a dropped prompt is reported. */
+function prompt(pi: ExtensionAPI, ctx: ExtensionContext, text: string): void {
+	pi.sendUserMessage(text).catch((error: unknown) => ctx.ui.notify(`lead: prompt not sent: ${error instanceof Error ? error.message : String(error)}`, "error"));
+}
+
+/** The end of the grilling turn: plan mode off, then the agent writes its files and asks for the approval. */
+async function endPlanning(pi: ExtensionAPI, story: ActiveStory, ctx: ExtensionContext): Promise<void> {
+	const modes = ctx.sessionModes;
+	if (modes?.getState().plan.status === "active") {
+		const result = await modes.set({ mode: "plan", action: "exit" });
+		if (!result.ok) {
+			ctx.ui.notify(`lead: plan mode could not be turned off (${result.code}): ${result.message}. Leave it with /plan, then tell the agent to write the plan.`, "warning");
+			return;
+		}
+	}
+	lead().planning = false;
+	prompt(
+		pi,
+		ctx,
+		`[lead] Plan mode is off. Continue /story ${story.id} from step 3: write the brief draft if there is none, the plan and any missing project-note services block, then call the lead tool with op "approve".`,
+	);
+}
+
+const BUILD_COMMAND = /^(?:[\w-]+:)?build$/;
+
+/** `/build <id>` as omp expands the typed command, read from the installed command file. */
+function buildPrompt(pi: ExtensionAPI, id: string): string | undefined {
+	const file = pi.getCommands().find(command => command.source === "prompt" && BUILD_COMMAND.test(command.name) && command.path)?.path;
+	if (!file) return undefined;
+	let body: string;
+	try {
+		body = fs.readFileSync(file, "utf8");
+	} catch {
+		return undefined;
+	}
+	body = body.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "").trim();
+	return /\$ARGUMENTS\b/.test(body) ? body.replaceAll("$ARGUMENTS", id) : `${body}\n\n${id}`;
+}
+
+/** After the approval turn: `/build <id>` as if the lead typed it: the same checks, a fresh loop, the command's prompt. */
+async function buildAfterApproval(pi: ExtensionAPI, story: ActiveStory, ctx: ExtensionContext): Promise<void> {
+	lead().buildOnRest = false;
+	const problem = refusal("build", undefined, story.layout, ctx);
+	const text = problem ? undefined : buildPrompt(pi, story.id);
+	if (!text) {
+		ctx.ui.notify(problem ?? `lead: no /build command is installed (agent-skills); run /build ${story.id} once it is.`, "error");
+		return;
+	}
+	await startLoop(story);
+	prompt(pi, ctx, text);
+}
+
+/** How the last assistant message stopped. */
+function lastStopReason(messages: readonly unknown[]): unknown {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (isObject(message) && message.role === "assistant") return message.stopReason;
+	}
+	return undefined;
 }
 
 /** The text parts of the last assistant message. */
@@ -307,6 +395,59 @@ async function recordRetro(p: LeadParams, policyDir: string, ctx: ExtensionConte
 	return line.trimEnd();
 }
 
+/** Hands a PR review item to the lead: a line in stuck.md, a notification, and the loop leaves the item alone until it gets a new comment. */
+async function escalate(p: LeadParams, ctx: ExtensionContext): Promise<string> {
+	const story = activeStory();
+	const key = p.artifact?.trim() ?? "";
+	const summary = p.summary?.replace(/\s+/g, " ").trim();
+	if (!/^(thread|review):\S+$/.test(key) || !summary) throw new Error("lead: escalate needs artifact (a thread:… or review:… key from the PR feedback) and summary");
+	await updateStoryState(story.dir, state => {
+		if (!state.loop.feedback.escalated.includes(key)) state.loop.feedback.escalated.push(key);
+	});
+	fs.appendFileSync(path.join(story.dir, "stuck.md"), `- ${today()} · PR question for the lead · ${key} · ${summary}\n`);
+	leadNotify(ctx, `omp lead · ${story.id} · PR question for you: ${path.join(story.dir, "stuck.md")}`);
+	return `escalated ${key}; the loop leaves it to the lead`;
+}
+
+/**
+ * The loop controller, at a turn end or a PR poll: the next instruction, or rest. A merged or closed PR ends the build
+ * and records the story's status; resting while the PRs wait for CI or reviewers keeps the poller running.
+ */
+async function controller(pi: ExtensionAPI, ctx: ExtensionContext): Promise<{ decision: "block"; reason: string } | undefined> {
+	if (ctx.agent?.kind === "sub") return undefined;
+	const story = lead().story;
+	const building = lead().building;
+	const result = await loopStop(pi, ctx);
+	if (story && building && !lead().building) await recordStatus(pi, story, true).catch(() => undefined);
+	if (lead().watching && !result) watchPrs(pi, ctx);
+	else stopWatching(ctx);
+	return result;
+}
+
+function stopWatching(ctx: ExtensionContext): void {
+	const timer = lead().prTimer;
+	if (timer !== undefined) ctx.clearTimer(timer);
+	lead().prTimer = undefined;
+}
+
+/** Polls the story's PRs every `limits.pr_poll_minutes` while the session is idle; feedback becomes the agent's next prompt. */
+function watchPrs(pi: ExtensionAPI, ctx: ExtensionContext): void {
+	const story = lead().story;
+	if (!story || lead().prTimer !== undefined) return;
+	const minutes = readHardGates(story.layout.policy).gates?.limits.prPollMinutes ?? 5;
+	lead().prTimer = ctx.setInterval(async () => {
+		if (lead().story?.id !== story.id || !lead().building) return stopWatching(ctx);
+		if (lead().polling || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+		lead().polling = true;
+		try {
+			const next = await controller(pi, ctx);
+			if (next) prompt(pi, ctx, next.reason);
+		} finally {
+			lead().polling = false;
+		}
+	}, minutes * 60_000);
+}
+
 export default function leadExtension(pi: ExtensionAPI): void {
 	if (process.env.OMP_STARTER_LEAD === "off") return;
 	const z = pi.zod;
@@ -338,8 +479,13 @@ export default function leadExtension(pi: ExtensionAPI): void {
 			return { handled: true };
 		}
 		const story = lead().story;
+		lead().planning = false;
+		lead().buildOnRest = false;
 		if (command[1] === "build" && story) await startLoop(story);
-		else lead().building = false;
+		else {
+			lead().building = false;
+			if (story) await startPlanning(story, ctx);
+		}
 		// Returning to a story with an approved plan: bring status.md up to date; a failing gh must not hold the command.
 		if (story && readStoryState(story.dir).plan) await recordStatus(pi, story, false).catch(() => undefined);
 	});
@@ -351,6 +497,7 @@ export default function leadExtension(pi: ExtensionAPI): void {
 		if (agent && agent.kind !== "main" && !LEAD_SUBAGENTS[agent.name.toLowerCase()]) return;
 		const blocks: string[] = [];
 		if (!event.systemPrompt.some(s => s.includes(STORY_BLOCK_HEADER))) blocks.push(storyBlock(story));
+		if (lead().planning && agent?.kind !== "sub" && !event.systemPrompt.some(s => s.includes(PLANNING_HEADER))) blocks.push(planningBlock(story));
 		if (agent?.kind === "sub" && agent.name.toLowerCase() === "code-reviewer" && !event.systemPrompt.some(s => s.includes(REVIEW_BLOCK_HEADER))) {
 			const review = reviewBlockFor(story);
 			if (review) blocks.push(review);
@@ -446,6 +593,12 @@ export default function leadExtension(pi: ExtensionAPI): void {
 		if (story && ctx.agent?.kind === "sub" && ctx.agent.name.toLowerCase() === "code-reviewer" && !event.willContinue) {
 			await recordVerdict(story, lastAssistantText(event.messages));
 		}
+		// The end of a finished main turn moves /story on: out of plan mode after the grilling, into /build after the approval.
+		// An aborted or failed turn moves nothing: the lead is steering.
+		if (story && ctx.agent?.kind !== "sub" && !event.willContinue && !["aborted", "error"].includes(String(lastStopReason(event.messages)))) {
+			if (lead().planning) return endPlanning(pi, story, ctx);
+			if (lead().buildOnRest) return buildAfterApproval(pi, story, ctx);
+		}
 		// In async mode the lead is away: tell them when the main session comes to rest, and how many gates wait for them. While the loop builds, its controller tells them instead.
 		if (story?.mode !== "async" || ctx.agent?.kind === "sub" || event.willContinue || lead().building) return;
 		const queued = lead().pending.size;
@@ -465,7 +618,7 @@ export default function leadExtension(pi: ExtensionAPI): void {
 	});
 
 	// The loop controller: at the end of a main-session turn it either sends the next step or lets the session rest.
-	pi.on("session_stop", (_event, ctx) => loopStop(pi, ctx));
+	pi.on("session_stop", (_event, ctx) => controller(pi, ctx));
 
 	pi.registerTool({
 		name: "lead",
@@ -475,12 +628,13 @@ export default function leadExtension(pi: ExtensionAPI): void {
 			"to the lead for the single approval. gate: let the lead decide pending hard gates. status: compute the story's status from " +
 			"GitHub and write status.md. retro: record an escaped bug in retro-log.md; the lead picks the cause. " +
 			"No argument approves anything: every decision is a dialog only the user can answer. " +
-			"check: run the lead's commands for a stage (verify, test, proof, acceptance) and record receipts keyed by HEAD; the loop and the PR check read them.",
+			"check: run the lead's commands for a stage (verify, test, proof, acceptance) and record receipts keyed by HEAD; the loop and the PR check read them. " +
+			"escalate: hand a PR review item that questions the design, an invariant, a boundary or the scope to the lead instead of changing code.",
 		parameters: z.object({
-			op: z.enum(["approve", "gate", "status", "retro", "check"]),
+			op: z.enum(["approve", "gate", "status", "retro", "check", "escalate"]),
 			story: z.string().optional().describe("retro: story id or PR"),
-			summary: z.string().optional().describe("retro: what escaped, one line"),
-			artifact: z.string().optional().describe("retro: root artifact that was fixed, a path"),
+			summary: z.string().optional().describe("retro: what escaped, one line; escalate: the question for the lead, one line"),
+			artifact: z.string().optional().describe("retro: root artifact that was fixed, a path; escalate: the item key from the PR feedback (thread:… or review:…)"),
 			stage: z.enum(["verify", "test", "proof", "acceptance"]).optional().describe("check: which stage to run"),
 		}),
 		async execute(_id, params, signal, _onUpdate, ctx) {
@@ -495,7 +649,8 @@ export default function leadExtension(pi: ExtensionAPI): void {
 			else if (p.op === "check") {
 				if (!p.stage) throw new Error("lead: check needs a stage");
 				text = await runCheck(pi, activeStory(), p.stage, signal);
-			} else text = await recordRetro(p, layout.policy, ctx);
+			} else if (p.op === "escalate") text = await escalate(p, ctx);
+			else text = await recordRetro(p, layout.policy, ctx);
 			return { content: [{ type: "text", text }] };
 		},
 	});

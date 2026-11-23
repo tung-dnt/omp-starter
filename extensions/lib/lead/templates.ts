@@ -23,6 +23,8 @@ concurrency_triggers:
   patterns: ["\\bFOR UPDATE\\b", "\\btransaction\\(", "SendMessage(Batch)?Command", "\\bpublish\\(", "\\bretr(y|ies)\\b", "\\bredis\\b", "\\bcache\\b", "idempoten"]
 limits:
   builders: 2
+  pr_rounds: 5
+  pr_poll_minutes: 5
 checks: {}
 ${FENCE}
 
@@ -30,6 +32,8 @@ Globs are matched against paths relative to the repository root, so each starts 
 A gate may add ${"`repos: [name, …]`"} (origin basenames) to apply to those repositories only.
 
 ${"`checks:`"} lists, per repository (origin basename), the commands the lead loop runs: ${"`verify`"} (lint, typecheck), ${"`test`"} (full suite), optional ${"`worktree_setup`"} (run in a fresh worktree of the base commit; default: link the repository's node_modules), optional ${"`acceptance: { deploy_wait, env }`"} for checks against the deployed feature stack. ${"`{branch}`"}, ${"`{sha}`"} and ${"`{story}`"} are replaced in commands and env values. A plan cannot be approved while one of its repositories has no entry.
+
+After the PR opens the loop works its feedback: optional ${"`gh`"} names the GitHub CLI for the repository (default ${"`gh`"}; ${"`gh-blinx`"} for blinx repositories) and ${"`ignored_checks`"} lists CI checks it never waits on or fixes, such as manual deployment approvals. ${"`limits.pr_rounds`"} caps the feedback rounds before the loop stops for a diagnosis; ${"`limits.pr_poll_minutes`"} is how often an idle session polls the PR.
 `;
 
 /** The machine block of a project note (`<kb>/projects/<repo>.md`), shown where a note lacks one. */

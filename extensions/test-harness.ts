@@ -140,6 +140,10 @@ export interface FakePi {
 	commands: Map<string, FakeCommand>;
 	/** Every `pi.exec` call, in order. */
 	execCalls: { command: string; args: string[] }[];
+	/** Every `pi.sendUserMessage` text, in order. */
+	sent: string[];
+	/** What `pi.getCommands` returns. */
+	slashCommands: { name: string; source: "extension" | "prompt" | "skill"; path?: string }[];
 	/** Calls the handler registered for `event` (one handler per event: extensions register each once) and returns its result. */
 	emit(event: string, payload: object, ctx: object): unknown;
 	/** Runs a registered tool the way the host does and returns its text. */
@@ -155,6 +159,8 @@ export function fakePi(exec?: FakeExec): FakePi {
 	const tools = new Map<string, FakeTool>();
 	const commands = new Map<string, FakeCommand>();
 	const execCalls: { command: string; args: string[] }[] = [];
+	const sent: string[] = [];
+	const slashCommands: FakePi["slashCommands"] = [];
 	const host = {
 		zod,
 		on: (event: string, handler: Handler) => void handlers.set(event, handler),
@@ -164,6 +170,8 @@ export function fakePi(exec?: FakeExec): FakePi {
 			execCalls.push({ command, args });
 			return (await exec?.(command, args, options)) ?? { stdout: "", stderr: "", code: 0 };
 		},
+		sendUserMessage: async (text: string) => void sent.push(text),
+		getCommands: () => slashCommands,
 	};
 	return {
 		pi: host as unknown as ExtensionAPI,
@@ -171,6 +179,8 @@ export function fakePi(exec?: FakeExec): FakePi {
 		tools,
 		commands,
 		execCalls,
+		sent,
+		slashCommands,
 		emit(event, payload, ctx) {
 			const handler = handlers.get(event);
 			if (!handler) throw new Error(`no handler registered for "${event}"`);
@@ -253,12 +263,41 @@ export interface FakeContext {
 	model?: { provider: string };
 	ui: ScriptedUi;
 	sessionManager: { getSessionId(): string };
-	setInterval(callback: () => void, ms: number): number;
+	setInterval(callback: () => unknown, ms: number): number;
 	clearTimer(timer: number): void;
 	/** Intervals still registered through `setInterval`. */
-	timers: Map<number, () => void>;
-	/** Runs every registered interval callback once. */
-	tick(): void;
+	timers: Map<number, () => unknown>;
+	/** Runs every registered interval callback once; resolves when async callbacks settle. */
+	tick(): Promise<unknown[]>;
+	sessionModes?: FakeModes;
+	/** What `isIdle()` answers; tests flip it to model a running turn. */
+	idle: boolean;
+	isIdle(): boolean;
+	hasPendingMessages(): boolean;
+}
+
+/** `ctx.sessionModes` for plan mode only: records each request; `refuse` answers the next ones with that failure. */
+export interface FakeModes {
+	plan: "inactive" | "active";
+	requests: { mode: string; action: string }[];
+	refuse?: { code: string; message: string };
+	getState(): { plan: { status: "inactive" | "active" } };
+	set(request: { mode: string; action: string }): Promise<{ ok: boolean; code?: string; message?: string }>;
+}
+
+export function fakeModes(): FakeModes {
+	const modes: FakeModes = {
+		plan: "inactive",
+		requests: [],
+		getState: () => ({ plan: { status: modes.plan } }),
+		async set(request) {
+			modes.requests.push(request);
+			if (modes.refuse) return { ok: false, ...modes.refuse };
+			modes.plan = request.action === "enter" ? "active" : "inactive";
+			return { ok: true };
+		},
+	};
+	return modes;
 }
 
 export interface ContextOptions {
@@ -269,18 +308,20 @@ export interface ContextOptions {
 	mode?: string;
 	hasUI?: boolean;
 	ui?: ScriptedUi;
+	sessionModes?: FakeModes;
 }
 
 export function fakeContext(options: ContextOptions): FakeContext {
-	const timers = new Map<number, () => void>();
+	const timers = new Map<number, () => unknown>();
 	let nextTimer = 1;
-	return {
+	const ctx: FakeContext = {
 		cwd: options.cwd,
 		mode: options.mode ?? "tui",
 		hasUI: options.hasUI ?? true,
 		...(options.agent ? { agent: options.agent } : {}),
 		...(options.model ? { model: options.model } : {}),
 		ui: options.ui ?? scriptedUi(),
+		...(options.sessionModes ? { sessionModes: options.sessionModes } : {}),
 		sessionManager: { getSessionId: () => options.sessionId ?? "session-1" },
 		setInterval(callback) {
 			const id = nextTimer++;
@@ -289,8 +330,12 @@ export function fakeContext(options: ContextOptions): FakeContext {
 		},
 		clearTimer: timer => void timers.delete(timer),
 		timers,
-		tick: () => [...timers.values()].forEach(callback => callback()),
+		tick: () => Promise.all([...timers.values()].map(callback => callback())),
+		idle: true,
+		isIdle: () => ctx.idle,
+		hasPendingMessages: () => false,
 	};
+	return ctx;
 }
 
 // ── Child process ────────────────────────────────────────────────────────────
