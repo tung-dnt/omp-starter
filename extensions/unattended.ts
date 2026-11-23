@@ -118,9 +118,11 @@ export default function unattended(pi: ExtensionAPI): void {
 	if (!story) return;
 	let refused = 0;
 
-	pi.on("session_start", (_event, ctx) => {
+	const reset = (ctx: { agent?: { kind: string } }): void => {
 		if (ctx.agent?.kind !== "sub") refused = 0;
-	});
+	};
+	pi.on("session_start", (_event, ctx) => reset(ctx));
+	pi.on("session_switch", (_event, ctx) => reset(ctx));
 
 	pi.on("tool_call", (event, ctx) => {
 		if (event.toolName !== "ask") return;

@@ -45,7 +45,7 @@ interface Session {
 	stuck: string;
 	stop(agent?: "main" | "sub"): Promise<Verdict | undefined>;
 	tool(toolName: string, agent?: "main" | "sub"): Refusal | undefined;
-	start(agent: "main" | "sub"): void;
+	start(event: "session_start" | "session_switch", agent: "main" | "sub"): void;
 }
 
 interface Build {
@@ -79,7 +79,7 @@ function session({ plan = planText([API, WORK]), prs = {}, story = STORY }: Buil
 		stuck: path.join(dir, "stuck.md"),
 		stop: async (agent = "main") => (await fake.emit("session_stop", {}, context(agent))) as Verdict | undefined,
 		tool: (toolName, agent = "main") => fake.emit("tool_call", { toolName, input: {} }, context(agent)) as Refusal | undefined,
-		start: agent => void fake.emit("session_start", {}, context(agent)),
+		start: (event, agent) => void fake.emit(event, {}, context(agent)),
 	};
 }
 
@@ -98,7 +98,7 @@ describe("which sessions it applies to", () => {
 		expect(registered({ OMP_STARTER_UNATTENDED: "1" })).toEqual([]);
 		expect(registered({ OMP_STARTER_UNATTENDED: "1", OMP_STARTER_STORY: "  " })).toEqual([]);
 		expect(registered({ OMP_STARTER_UNATTENDED: "true", OMP_STARTER_STORY: STORY })).toEqual([]);
-		expect(registered({ OMP_STARTER_UNATTENDED: "1", OMP_STARTER_STORY: STORY })).toEqual(["session_start", "session_stop", "tool_call"]);
+		expect(registered({ OMP_STARTER_UNATTENDED: "1", OMP_STARTER_STORY: STORY })).toEqual(["session_start", "session_stop", "session_switch", "tool_call"]);
 	});
 });
 
@@ -219,18 +219,21 @@ describe("the stop rule", () => {
 		expect(fs.readFileSync(s.stuck, "utf8")).toMatch(/^stop budget spent: .* acme\/api \(feat\/api\) \[.*HTTP 404: Not Found\]\.\n$/);
 	});
 
-	test("a new main session starts the count over; a subagent starting does not", async () => {
-		const s = session();
-		for (let n = 0; n < STOP_BUDGET; n++) await s.stop();
+	test("a new main session or a session switch starts the count over; a subagent starting does not", async () => {
+		for (const event of ["session_start", "session_switch"] as const) {
+			resetHome();
+			const s = session();
+			for (let n = 0; n < STOP_BUDGET; n++) await s.stop();
 
-		s.start("sub");
-		expect(await s.stop()).toBeUndefined();
-		fs.rmSync(s.stuck);
+			s.start(event, "sub");
+			expect(await s.stop()).toBeUndefined();
+			fs.rmSync(s.stuck);
 
-		s.start("main");
-		const verdict = await s.stop();
-		expect(verdict?.decision).toBe("block");
-		expect(verdict?.reason).toContain(`stop 1 of ${STOP_BUDGET}`);
+			s.start(event, "main");
+			const verdict = await s.stop();
+			expect(verdict?.decision).toBe("block");
+			expect(verdict?.reason).toContain(`stop 1 of ${STOP_BUDGET}`);
+		}
 	});
 
 	test("a subagent's stop is never refused", async () => {
