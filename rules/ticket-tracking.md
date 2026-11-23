@@ -1,7 +1,7 @@
 ---
 description: Keep mutable work progress in one native session checklist; touch issue trackers only when the user asks.
 alwaysApply: true
-agents: [main, task-builder]
+agents: [main, task]
 ---
 
 # Keep native progress current
