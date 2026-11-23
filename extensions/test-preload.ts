@@ -39,7 +39,6 @@ process.env.XDG_STATE_HOME = path.join(home, ".local", "state");
 process.env.OMP_STARTER_TEST_HOME = home;
 // Unattended-build switches (extensions/unattended.ts, kb-commit-gate.ts) must not leak in from whoever runs the tests.
 delete process.env.OMP_STARTER_UNATTENDED;
-delete process.env.OMP_STARTER_STORY;
 
 // lib/state.ts reads the home through the module namespace; if that still answers with the real
 // home the override did not take, and tests must stop instead of running against it.

@@ -234,17 +234,14 @@ The `ask`-based rules load in the main session only, except `ticket-tracking`, w
 
 ## Unattended builds
 
-A build nobody watches is an omp session started with `OMP_STARTER_UNATTENDED=1` and `OMP_STARTER_STORY=<id>` (a Jira key such as `PAC2-1234`, or a kebab-case name); the dispatcher that starts it sets both. With both set, `extensions/unattended.ts` adds the rules below. In any other session it registers nothing. Only the exact value `OMP_STARTER_UNATTENDED=1` switches the commit gate off.
+A build nobody watches is an omp session started with `OMP_STARTER_UNATTENDED=1`; the dispatcher that starts it sets it. With exactly that value, `extensions/unattended.ts` registers one hook. In any other session it registers nothing. The same value switches the commit gate off.
 
-- **Stop rule.** The main session cannot stop until every repository in the plan has an open pull request whose head is its branch, or `stuck.md` exists beside the plan. The plan is `<kb>/projects/<id>/plan.md` in the knowledge base serving the session's folder (another configured knowledge base is searched when that one holds no such plan). Its frontmatter lists the repositories: `repos: [{ repo: tung-dnt/lean-ts, clone: ~/projects/lean-ts, base: main, branch: feat/my-change }]`, one entry per repository. Each pull request is looked up with `gh pr list -R <repo> --head <branch> --state open --json url` (`gh-blinx` for `blinxsolutions/*` when it is on `PATH`, plain `gh` otherwise). A refused stop names each repository with no open pull request, gives its `gh pr create --draft` command, and offers the other way out: write why to `stuck.md`. A `gh` that fails counts as no pull request, with its error in the message.
-- **Stop budget.** After 20 refused stops the next one goes through and `stuck.md` gets a `stop budget spent` line. A plan that cannot be read (missing, no frontmatter, no `repos:`, an entry without `repo: <owner/name>` and `branch`) lets the stop through at once and `stuck.md` says so. With no knowledge base serving the folder, or a story id that is not a plain folder name, there is no plan to check and the stop goes through.
-- **No questions.** The `ask` tool is refused: the agent decides and records the choice, with the alternative it rejected, in the plan's `## Decision log`, or writes `stuck.md` when the work cannot meet the plan.
+- **No questions.** The `ask` tool is refused: the agent decides and records the choice, with the alternative it rejected, in the pull request's `## Decision log`, or writes `stuck.md` in the spec folder and stops when the work cannot continue.
 - **No commit gate.** `kb-commit-gate` lets every commit through, so a build needs no memory write to commit.
 
 | Do | Don't |
 |---|---|
-| Delete an old `stuck.md` before starting another build of the same story: any `stuck.md` lets the stop through. | Start a build in a story folder that still holds the last attempt's `stuck.md`. |
-| Put the branch the agent really pushes in `repos:`: the rule matches the pull request's head branch. | List a branch, or a repository the `gh` account cannot read: every stop is refused until `stuck.md` exists or the budget is spent. |
+| Record each decision, with the rejected alternative, in the PR's `## Decision log`. | Wait for an answer: nobody reads the session. |
 
 **Verify:** `bun test extensions/unattended.test.ts extensions/kb-commit-gate.test.ts`.
 
@@ -279,6 +276,11 @@ It prints one markdown table per metric, for main sessions and subagents separat
 Limits: M3 and M1's scope check use today's vault, so notes moved later are judged at their new place. A session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names, tool names and note slugs; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder or the vault; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.38.1 — 2026-11-23
+
+- **Changed:** unattended builds only refuse `ask`, switched on by `OMP_STARTER_UNATTENDED=1` alone. The agent records each decision in the pull request's `## Decision log`, or writes `stuck.md` in the spec folder and stops.
+- **Removed:** the unattended stop rule and its stop budget, and `OMP_STARTER_STORY`. Plans now live in each repository (spec-kit), so the vault `projects/<id>/plan.md` is no longer read. Existing installs: nothing to do; a dispatcher still setting `OMP_STARTER_STORY` is ignored.
 
 ### 0.38.0 — 2026-11-23
 
