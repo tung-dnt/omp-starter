@@ -6,7 +6,7 @@ agents: main
 
 # Asking the user questions
 
-**Ask on the lead's decisions; own the rest.** The lead (the user) owns framing, high-level design (architecture, data model, API contracts, cross-system boundaries), invariants, risk and acceptance. Ask about those: gaps in the brief, invariants, contracts, scope and anything a hard gate stops. You own low-level design, code structure, test design and mechanics: decide them, and record each non-trivial choice with the rejected alternative in the PR's `## Decision log`. Don't ask to confirm what tools, code or docs can answer.
+**Ask on the lead's decisions; own the rest.** The lead (the user) owns framing, high-level design (architecture, data model, API contracts, cross-system boundaries), invariants, risk and acceptance. Ask about those: gaps in the brief, invariants, contracts and scope. You own low-level design, code structure, test design and mechanics: decide them, and record each non-trivial choice with the rejected alternative in the PR's `## Decision log`. Don't ask to confirm what tools, code or docs can answer.
 
 Every question goes through the `ask` tool, never only in prose:
 

@@ -16,11 +16,6 @@ export interface KbSource {
 	contextFile: string;
 	/** Commit gate applies to `git commit` run at or below this directory; absent = gate off. */
 	gateDir?: string;
-	/**
-	 * Folders for the lead-driven workflow's files, relative to the knowledge base; each defaults to `lead/`
-	 * (`lead/stories` for stories). Set by hand in omp-starter.json; see lib/lead/artifacts (LeadLayout).
-	 */
-	lead?: { stories?: string; policy?: string; templates?: string };
 }
 
 export interface KbState {

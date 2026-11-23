@@ -84,8 +84,6 @@ export function bashDir(command: string, cwd: unknown, sessionCwd: string): stri
 // `git [global opts] commit`, not commit-tree or "commit" as an argument of another subcommand.
 export const GIT_COMMIT = /\bgit(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+commit(?=[\s;&|)]|$)/;
 const GIT_DASH_C = /\s-C\s+("[^"]*"|'[^']*'|\S+)/g;
-/** `gh pr create` or `gh pr edit`: the commands that set a pull request's body. */
-export const GH_PR = /\bgh\s+pr\s+(create|edit)\b/;
 
 /** Directory a matched `git …` command runs in: bash `cwd`, a leading `cd <p> &&`, then each `git -C <p>` of the match. */
 export function gitCommandDir(command: string, match: RegExpExecArray, cwd: unknown, sessionCwd: string): string {
@@ -112,24 +110,3 @@ export function targetPaths(toolName: string, input: Record<string, unknown>): s
 export const PRINTERS: Record<string, true> = { cat: true, head: true, tail: true, sed: true, nl: true, less: true, bat: true };
 /** A read selector after the path: `:50-80`, `:raw`, `:-5`. */
 export const SELECTOR = /:(?:raw\b|-?\d).*$/;
-
-/**
- * Absolute paths a tool call reads, searches or writes: the `read`/`glob` path, `write`/`edit` targets, and for
- * `bash` its start folder plus what its unpiped `rg`/`grep` and file-printing commands name. Internal URLs are skipped.
- */
-export function touchedPaths(toolName: string, input: Record<string, unknown>, sessionCwd: string): string[] {
-	const local = (paths: string[]) => paths.filter(p => p && !p.includes("://")).map(p => resolveFrom(sessionCwd, p));
-	if (toolName === "read") return local(typeof input.path === "string" ? [input.path.replace(SELECTOR, "")] : []);
-	if (toolName === "glob") return local(typeof input.path === "string" ? input.path.split(";") : ["."]);
-	if (toolName === "write" || toolName === "edit") return local(targetPaths(toolName, input));
-	if (toolName !== "bash" || typeof input.command !== "string") return [];
-	const dir = bashDir(input.command, input.cwd, sessionCwd);
-	const out = [dir];
-	for (const { words, piped } of simpleCommands(input.command)) {
-		if (piped) continue;
-		const searched = searchPaths(words);
-		if (searched) out.push(...(searched.length ? searched : ["."]).map(p => resolveFrom(dir, p)));
-		else if (PRINTERS[words[0]]) out.push(...words.slice(1).filter(w => !w.startsWith("-")).map(w => resolveFrom(dir, w)));
-	}
-	return out;
-}

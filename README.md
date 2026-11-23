@@ -6,7 +6,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 |---|---|
 | **agent-skills** *(optional)* | Installs [tung-dnt/agent-skills](https://github.com/tung-dnt/agent-skills): engineering-workflow skills, agents and `/spec` `/plan` `/build` `/review` `/ship` commands. Once installed, `/starter skills` offers to update it. |
 | **Model routing** *(Claude-first)* | Saves `claude` and `codex` subscription presets without requiring a login. When the required Claude models are available, also routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels; otherwise keeps the current routing. Using a preset requires its provider login. |
-| **TypeSafe Jev judge** *(optional)* | Routes omp's `judge` role to TypeSafe Jev after checking your API key, and stores the key in `~/.omp/agent/.env` (mode 600). Jev then answers `question` rules such as the LSP-over-grep reminder and picks the thinking level per prompt. Offered on a brand-new install; existing installs run `/starter jev`. See [TypeSafe Jev judge](#typesafe-jev-judge-starter-jev). |
+| **TypeSafe Jev judge** *(optional)* | Routes omp's `judge` role to TypeSafe Jev after checking your API key, and stores the key in `~/.omp/agent/.env` (mode 600). Jev then answers `question` rules and picks the thinking level per prompt. Offered on a brand-new install; existing installs run `/starter jev`. See [TypeSafe Jev judge](#typesafe-jev-judge-starter-jev). |
 | **Knowledge base** | Uses Obsidian vaults as omp's knowledge base and long-term memory, one per folder if you like (e.g. `~/work` and `~/personal`). Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that points sessions at the knowledge base, injects the part of the memory index that applies to the current repo, adds `kb_remember`/`kb_recall` memory tools, and optionally adds a commit gate. |
 | **Developer tools** *(optional)* | Sets up a language server (LSP) and a debugger (DAP) for JavaScript/TypeScript, Python, Go, Rust and C/C++ with the SDKs you already have. Offered on a brand-new install; existing installs run `/starter tools`. See [Language tooling](#language-tooling-starter-tools). |
 
@@ -99,10 +99,9 @@ Optional. It sends judged tool calls and your prompts to TypeSafe (processed in 
 1. If `TYPESAFE_API_KEY` is already in the environment it is used and never written to disk. Otherwise the step asks for the key (the input is not masked) and saves it to `~/.omp/agent/.env` with mode 600, replacing an earlier `TYPESAFE_API_KEY` line and keeping the rest. omp loads that file into its process, so bash and eval children (for example agent-skills' `jev.sh`) see the key too.
 2. The key is checked with one tiny Jev request. A rejected or unreachable key stops the step with nothing changed.
 3. `modelRoles.judge` and the `judge` of the saved `claude`/`codex` presets become `typesafe/jev-1.14.0`, with `@tiny` as fallback; `ttsr.judge` stays `auto`. `/starter models` keeps Jev as the judge while this step is on.
-4. `lsp-symbol-search` (regex) goes into `ttsr.disabledRules` and `rules/lsp-symbol-judged.md` takes over: Jev reads every non-piped `rg`/`grep` and decides whether it searches for a code symbol. Over 45 real commands it caught 24/24 symbol searches (the regex caught 7) with 2 of 21 other searches flagged, both containing an identifier.
-5. The step asks whether to set `find.enabled: off`. Choose it for repositories whose data rules don't cover sending source to TypeSafe; any other answer leaves `find` as it is.
+4. The step asks whether to set `find.enabled: off`. Choose it for repositories whose data rules don't cover sending source to TypeSafe; any other answer leaves `find` as it is.
 
-Rerunning `/starter jev` offers to turn Jev off: the presets' own judges and the regex rule come back, and the key stays in `~/.omp/agent/.env`. While Jev is on and unreachable, no LSP reminder fires.
+Rerunning `/starter jev` offers to turn Jev off: the presets' own judges come back, and the key stays in `~/.omp/agent/.env`.
 
 ## Knowledge base
 
@@ -151,7 +150,7 @@ It needs no provider login, never installs or changes an SDK, and never changes 
 
 **What gets installed.** Tools that already work (on `PATH` or in your config) are reused, never replaced. Otherwise the step installs, under `~/.omp/agent/tooling/` (one immutable folder per tool and version): typescript-language-server 6.0.2 (run on Bun), js-debug 1.140.0 (its adapter runs on Bun, the Node programs it debugs on Node), the Bun debugger (Bun's own debug adapter from oven-sh/bun commit `38afee6c`, vendored in this plugin), python-lsp-server 1.15.0 and debugpy 1.8.22 (private venv), gopls v0.24.0, Delve 1.27.2, rust-analyzer 2026-10-19, clangd 23.1.0 and one CodeLLDB 1.12.3 shared by Rust and C/C++. Entries are merged into your native `lsp.json` and `dap.json` (`~/.omp/agent`, following omp's profile and `PI_CONFIG_DIR` rules).
 
-**Which JavaScript debugger.** One `dap.json` serves every project, so both JavaScript debuggers are installed. omp picks `js-debug-adapter` for JavaScript and TypeScript whenever no adapter is named, even in a project whose only lockfile is `bun.lock` (checked with omp 18.12.5). So in Bun projects (`bun.lock`, `bun.lockb` or `bunfig.toml`) pass `adapter: "bun-debug-adapter"` to the `debug` tool; `rules/dap-over-print.md` tells agents to. The Bun debugger starts paused (`stopOnEntry` on by default) because Bun 1.4.4 ignores its own pause-at-start setting: set breakpoints, then continue.
+**Which JavaScript debugger.** One `dap.json` serves every project, so both JavaScript debuggers are installed. omp picks `js-debug-adapter` for JavaScript and TypeScript whenever no adapter is named, even in a project whose only lockfile is `bun.lock` (checked with omp 18.12.5). So in Bun projects (`bun.lock`, `bun.lockb` or `bunfig.toml`) pass `adapter: "bun-debug-adapter"` to the `debug` tool. The Bun debugger starts paused (`stopOnEntry` on by default) because Bun 1.4.4 ignores its own pause-at-start setting: set breakpoints, then continue.
 
 **Integrity and trust.** GitHub release assets are pinned by SHA-256 and checked before extraction. The language server installs with `bun install --frozen-lockfile --ignore-scripts` from a committed `bun.lock` (an install without a matching lock is refused), Python uses a committed hash lock with binary wheels only, and gopls is built with pinned module versions checked against the public Go checksum database. The Bun debugger is not a release asset: Bun publishes no standalone adapter, so its source is vendored under `vendor/bun-dap/` at one pinned upstream commit with a per-file SHA-256 list, the upstream licence statement and the exact upstream paths in `vendor/bun-dap/PROVENANCE.md` (a test checks the list against the files); its three dependencies (`semver`, `source-map-js`, `ws`) come from the vendored lock the same way. No upstream signature verification is performed, and Go-built binaries are not claimed to be bit-identical across compilers. js-debug listens on a loopback TCP port while a debug session runs.
 
@@ -164,7 +163,6 @@ It needs no provider login, never installs or changes an SDK, and never changes 
 ## Commands
 
 - `/starter`: rerun every step.
-- `/starter lead`: create the lead files in the knowledge base serving this folder: in `lead/`, or in the folders the knowledge base sets (see [Lead-driven workflow](#lead-driven-workflow)).
 - `/starter skills`, `/starter models`, `/starter jev`, `/starter kb`, `/starter tools`: rerun one step (`/starter skills` offers to update an installed agent-skills and reports the old and new version; `/starter kb` manages several knowledge bases once one exists; `/starter jev` turns Jev off when it is on).
 - `/starter updates`: check installed/published versions of both `agent-skills@tung-agent-skills` and `starter@omp-starter`; confirm each plugin/scope before updating.
 
@@ -192,11 +190,11 @@ Keep plans, acceptance criteria, designs and decisions as static artifacts, and 
 
 ## Asking questions
 
-The plugin ships an always-on rule (`rules/ask-user.md`): the lead's decisions go to you instead of being decided for you. You own framing, high-level design (architecture, data model, API contracts, cross-system boundaries), invariants, risk and acceptance, so gaps in those, scope, and anything a hard gate stops are asked. The agent owns low-level design, code structure, test design and mechanics, and records each non-trivial choice with the rejected alternative in the PR's decision log. Facts that tools, code or docs can answer are settled by the agent. Every question goes through omp's `ask` tool as one HTML form per turn, never only in prose; a round's independent questions share the form. Each question is a fieldset whose legend names the decision and the concrete thing it concerns, followed by context (what is decided, why now, what it hinges on). Each option gives its main pro and con and whether it is easy to reverse, and the recommended option is preselected. Paths you may want to open also go in chat, since many clients make nothing inside the form clickable.
+The plugin ships an always-on rule (`rules/ask-user.md`): the lead's decisions go to you instead of being decided for you. You own framing, high-level design (architecture, data model, API contracts, cross-system boundaries), invariants, risk and acceptance, so gaps in those, and in scope, are asked. The agent owns low-level design, code structure, test design and mechanics, and records each non-trivial choice with the rejected alternative in the PR's decision log. Facts that tools, code or docs can answer are settled by the agent. Every question goes through omp's `ask` tool as one HTML form per turn, never only in prose; a round's independent questions share the form. Each question is a fieldset whose legend names the decision and the concrete thing it concerns, followed by context (what is decided, why now, what it hinges on). Each option gives its main pro and con and whether it is easy to reverse, and the recommended option is preselected. Paths you may want to open also go in chat, since many clients make nothing inside the form clickable.
 
 A second always-on rule (`rules/how-means-plan.md`): a request that is itself a how-question ("how do I …", or in Vietnamese "làm sao …", "như thế nào …", "cách nào …") is treated as planning and discussion. The agent investigates read-only, presents options, trade-offs and a recommendation, and asks before building anything. An instruction that merely mentions "how" ("fix X and show me how") is carried out.
 
-There is no per-task design approval: the agent owns low-level design and records its choices in the PR's decision log; you approve one plan per story, and that approval also covers the story's hard gates (see [Lead-driven workflow](#lead-driven-workflow)).
+There is no per-task design approval: the agent owns low-level design and records its choices in the PR's decision log.
 
 A fourth always-on rule (`rules/ticket-tracking.md`): native todo is the sole mutable progress checklist for the active session. Plans and decisions remain in static artifacts; native execution is not test proof. Issue trackers such as Jira are never commented on unless you ask, and any status transition is asked first.
 
@@ -208,111 +206,11 @@ A seventh always-on rule (`rules/cross-repo-investigation.md`): an investigation
 
 An eighth always-on rule (`rules/subagent-absolute-paths.md`) loads in every subagent and never in the main session: `read`, `edit`, `write`, `glob` and `lsp` resolve relative paths from the session's directory, not from where `bash` `cd`'ed, so subagents pass them absolute paths. Before it, subagents of a session started in a parent folder of the repo lost a turn on each relative `read`/`lsp` call that came back "not found".
 
-Two tool-use rules (`rules/lsp-symbol-search.md`, `rules/dap-over-print.md`) are omp TTSR rules: the harness checks each tool call as it streams and adds a reminder after the result, so they work however long the session gets and survive compaction. When the agent greps for a code symbol (camelCase/PascalCase anywhere; snake_case when the command targets Rust or C/C++), it is pointed to `xd://lsp` `definition`/`references`/`symbols`/`rename`. When it adds `console.log`, `fmt.Print*`, `println!`/`dbg!`, `printf` or `std::cerr` to TS/JS, Go, Rust or C/C++ code, it is pointed to `xd://debug`. Both only remind and never block or interrupt; string, SQL-column and config-key searches don't trigger the LSP rule. They load in the main session and `task-builder`.
-
 `extensions/cross-repo-reads.ts` reminds the main session of the cross-repo scout fan-out once it has read source from a second repository: a `read` of a source file, `rg`/`grep` over a repo folder, or `cat`/`head`/`sed`… of a source file, with relative paths resolved from the session's folder or the command's `cd`. It reminds again only when a further repo appears. A session working in one repo never sees it. Docs, `node_modules`, hidden folders (`~/.omp`, a vault), files outside any git repo (such as `/tmp` scratch files) and system folders don't count, nor do subagents' reads.
-
-With the Jev step on, `rules/lsp-symbol-judged.md` replaces the regex LSP rule (which goes into `ttsr.disabledRules`) in the main session: it prefilters every non-piped `rg`/`grep` and asks Jev whether the command looks up a code symbol, so forms the regex misses (`export function X`, `^func Test`, `a|b|X`, `X(`) also get the reminder. Coding subagents get `lsp-guard` (below) instead, so each grep is judged once. Without a TypeSafe judge (`ttsr.judge: auto`) the judged rule never runs and costs nothing.
-
-The same Jev step turns on `extensions/lsp-guard.ts`, which blocks instead of reminding, in coding subagents only (`task-builder`, `task`, `code-reviewer`, `test-engineer`). Before an `rg`/`grep` runs, code drops what is text by construction: a grep reading another command's output, and searches whose every path is `/tmp`, an artifact, `node_modules`, docs, SQL/migrations, data or logs. Jev then judges the rest with the judged rule's own question. At p ≥ 0.85 the call is blocked with the exact `lsp`/`xd://lsp` call to make instead. Appending `# text-search` to the command lets it run, for a language with no server or a real text search. No key, a timeout or a bad answer lets the command run. On 94 labelled greps from real subagent sessions it blocked 27 of 36 symbol lookups and 3 of 58 other searches (two of those three also grepped identifiers).
 
 `extensions/blast-radius.ts` appends a short **Blast radius** block to an `edit` or `write` result when the change alters an exported symbol in a TS/JS or Go file. A symbol counts as changed when its signature does: the parameters and return type of a function or method (including an exported arrow-function `const`), or the whole declaration of an `interface`/`type`/`enum`/Go `type`. The block lists that symbol's references in other files, from the language server the `lsp` tool already runs, so no second server starts. A removed or renamed export can no longer be asked about, so its uses come from `git grep -w` over tracked files and are labelled `text matches`. Body-only edits, reformatting and new exports add nothing. Limits: 3 changed and 3 removed symbols per call, 8 locations per symbol, 700 characters, 6 s. A slow or missing server, or any error, adds nothing and never changes the edit's own result. The block holds paths and line numbers only, never code. It runs in every agent. Turn it off with omp's extension toggle.
 
 The `ask`-based rules load in the main session only, except `ticket-tracking`, which also loads in agent-skills' `task-builder`. Other subagents can't use the `ask` tool, so they don't carry these rules.
-
-## Lead-driven workflow
-
-You are the tech lead; agents are contractors with no context beyond what you give them. Work flows brief → one batch of questions → one plan approval → build inside fences → PR outputs you read before any code. After the approval you are out of the loop: the agent keeps the plan and the system map current, the approval covers the hard gates, and you are notified instead of asked. The commands (`/story`, `/build`, `/task`, `/ship`) come from agent-skills; this plugin makes the rules binding in code. Everything lives in the `lead/` folder of the knowledge base serving the session's folder, unless the knowledge base names [other folders](#lead-folders); `/starter lead` creates the files. Nothing is enforced until `hard-gates.md` exists, and `OMP_STARTER_LEAD=off` turns every part off.
-
-| File (default folder `<kb>/lead/`) | Written by | Kept current by |
-|---|---|---|
-| `hard-gates.md` | you | You. Read on every tool call; an invalid edit falls back to the last good copy and tells you once. Besides the gates it holds `checks:` per repository (see [The loop](#the-loop)). |
-| `<kb>/projects/<repo>.md` (always this folder) | you, then agents | Agents keep its `services:` block true as the structure changes. Each change to the block notifies you and must be described in the PR's `## System-map diff`. See [Project notes](#project-notes). |
-| `stories/<id>/brief.md` | you; the agent drafts it for a Jira-keyed story until its plan is approved | You. Goal, success criteria (`- AC1: …`), boundaries, invariants (`- I1: …`), must-never-break, out of scope; `mode: async\|sync`. |
-| `stories/<id>/plan.md` | the agent | The agent replaces it as the approach changes: it states the current plan only, never a history. `repos:` plus a `## Summary` of at most 15 lines, a `## Proof` (a yaml `proof:` list with one row per AC), then `## Tasks` and `## Decision log`. |
-| `stories/<id>/state.json` | the harness | On approval, each gate decision, each map edit, each status, and each check run and review of the loop. |
-| `stories/<id>/status.md` | the harness | On `lead` with `op: "status"`, and whenever `/story` or `/build` returns to a story with an approved plan. |
-| `retro-log.md` | the harness | On `lead` with `op: "retro"`. |
-| `pr-format.md` | `/starter lead` | Rewritten at session start when it differs from this plugin version's text. |
-| `brief-template.md` | `/starter lead` | Never overwritten; a difference from the shipped template is reported once per plugin version. |
-
-What is enforced:
-
-- **Input check.** `/story <id>` is refused without a complete brief (an id that is a Jira key, such as `PAC2-1234`, may start without one until its plan is approved: the agent drafts `brief.md` from the ticket and you approve it with the plan); `/build` is refused without an approved plan, or when a repository in the plan has lost its project note.
-- **Context.** The brief, the hard gates and the project notes of the plan's repositories are added to the system prompt of the main session and of building and reviewing subagents.
-- **One approval.** The agent calls the `lead` tool (`op: "approve"`). It is refused until every repository in the plan has a project note with a `services:` block, every brief AC has a proof row, and `hard-gates.md` has a `checks:` entry for every repository. You then answer one confirm dialog showing the plan's summary, each AC with how it is proven (or `UNPROVABLE: <reason>`), the invariants, the boundaries, the repositories and how fresh the notes are. Subagents cannot call it and no argument approves anything. The approval covers the plan's `repos:`, the brief's criteria, invariants and boundaries, and what each AC is proven by (test, acceptance, unprovable): a change to any of them needs approval again. The plan's summary, tasks and proof commands are the agent's to replace.
-- **Loop.** After `/build`, see [The loop](#the-loop).
-- **Fence.** No repository edits before approval; afterwards reads and writes outside the plan's repositories are blocked.
-- **Hard gates.** Before a story's plan is approved, a write, commit, push or PR touching a gated path needs your decision. In `mode: sync` the main session asks you in a dialog (`Approve for story` / `Reject`). In `mode: async` (the template's default) nothing is asked mid-work: that one write is refused and queued, you are notified, and the agent carries on with other work; you decide the queue in one sitting when the agent calls `lead` with `op: "gate"`. A blocked subagent reports the gate to its parent in both modes. Once you approve the plan, that approval covers the story's hard gates: each gated path is recorded as approved in the story's `state.json` and nobody is asked, unless you had already rejected that path. Outside a story every gated path is still asked. An unreadable `hard-gates.md` fails closed. Agents cannot edit `hard-gates.md`, briefs, or the harness's files.
-- **PR check.** `gh pr create|edit` and the github tool's `pr_create` are blocked unless the body has the decision log, an invariant checklist whose proving tests exist, and a risk summary with `file:line` pointers, plus the concurrency note, DDIA checklist, system-map diff and structural changes the diff calls for (`pr-format.md`). In an approved story the body also needs `## Evidence` (a line per AC the repository proves) and `## Unproven` (a line per unprovable AC), and the loop's receipts and a clean review must be recorded at HEAD.
-- **Structure.** `scripts/arch-graph.ts generate|check|diff` writes `docs/arch/` (code, cross-service, Serverless infra and table-write edges). A commit in a repo with `docs/arch/services.json` is blocked while it is stale against the code or against the services in the repository's project note. Undeclared cross-service calls or writes to tables another service owns become a `structure` gate. `templates/arch-graph.yml` is the matching CI check.
-- **Builders and notifications.** At most `limits.builders` task/task-builder/test-engineer agents run at once while a story is active. Gate stops, changes to a project note's services, and in `async` mode every stop of the main session (with the number of queued gates) notify you through the UI, `OMP_STARTER_NOTIFY_CMD` (`sh -c`, text in `OMP_STARTER_NOTIFY_TEXT`) or a macOS notification; texts carry metadata only.
-- **Status and retro.** `lead` with `op: "status"` computes the story's state from `gh pr list`; `op: "retro"` logs an escaped bug with the cause you pick.
-
-Because agents may edit project notes, the structural gate checks code against services the agent can change. What tells you is the notification on each change, the mark in the approval dialog and the required `## System-map diff` in the PR.
-
-`bun scripts/lead-replay.ts <tasks.yml> [--runs 3] [--out file.md] --yes` replays real tasks in fresh worktrees with the harness on and off and tabulates pass rate, wall time and gate stops; without `--yes` it only prints how many runs it would spend.
-
-### The loop
-
-After `/build`, code, not the agent, decides what happens next. At the end of each main-session turn the harness reads the git state, the check receipts and the reviewer's verdict, and either sends the agent the next `[lead loop]` instruction or lets the session rest. The order: commit; `verify`; `test`; `proof`; an independent review; push; `acceptance` (when a repository has acceptance rows); open the PR. You are asked only at the plan approval, at queued hard gates, when a budget is spent, and at the merge.
-
-- **Checks.** `hard-gates.md` lists per repository (origin basename) `checks: { verify: [...], test: [...] }`, optionally `worktree_setup` and `acceptance: { deploy_wait, env }` (`{branch}`, `{sha}`, `{story}` are replaced). The agent runs them only through the `lead` tool (`op: "check"`, `stage: verify|test|proof|acceptance`); each run records a receipt keyed by HEAD in `state.json`. Logs are written to `~/.omp/agent/lead-logs/<story>/`, outside the vault.
-- **Proof.** A proof test must fail on the commit `/build` started from and pass on HEAD: the harness copies the test files onto a throwaway worktree of that commit and runs the command there. A test that also passes on the base does not prove its AC.
-- **Review.** The `code-reviewer` subagent runs on the `slow` role, not on the builders' model, and its prompt carries the proof rows, the base commits and the receipts' log paths. Its `lead-verdict` block counts only when it names the current HEAD of every repository; blockers, or an AC it judges unproven, send the agent back to fix and re-check.
-- **Budgets.** Three failed runs of a stage, three non-clean reviews, or 60 continuations stop the loop: the agent has the `deep` agent write a diagnosis to `<story>/stuck.md`, then you are notified. `/build` starts the budgets again.
-- **The lead is out of the loop.** While `/build` runs, the main session's `ask` is blocked: the agent decides and records it in the plan's `## Decision log`.
-- **Off switch.** `OMP_STARTER_LEAD_LOOP=off` turns the controller off; the checks and the PR check stay.
-
-### Project notes
-
-The system map is not one file. Each repository has a note, `<kb>/projects/<repo>.md` (`<repo>` is the basename of its origin URL, so worktrees share it), and the harness reads the first `yaml` block in it that has `services:`:
-
-```yaml
-services:
-  - { name: orders-api, path: apps/api, owns_tables: [orders], publishes: [], consumes: [], calls: [billing] }
-invariants:
-  - Orders are never deleted
-```
-
-`path` is the service's folder in the repository (`""` for the root). `invariants` are the project's standing "must never break" lines: the agent sees them in every story that touches the repository, but nothing checks them. Put what must be proven in the brief's `## Invariants`.
-
-| Check | When | Effect |
-|---|---|---|
-| Every repository in the plan has a note with a `services:` block | plan approval, `/build` | Refused; the message names the notes and shows the block |
-| `docs/arch/` matches the code and the note's services | commit, in repositories that keep `docs/arch/` | Blocked while stale |
-| The PR describes a changed `services:` block | `gh pr create\|edit` | Blocked without `## System-map diff` |
-| An agent changed a `services:` block | after its write | You are notified; prose edits are silent |
-| A note's `updated:` date and its `(inferred — verify)` markers | approval dialog, story prompt | Shown, one line per note, for the plan's repositories and for your own notes in the policy folder |
-| An agent edited a note and left an old `updated:` date | after its write | The agent is told to set today's date |
-
-| Do | Don't |
-|---|---|
-| Let the agent draft a missing note while it plans; read it when the approval dialog marks it as changed. | Approve a plan whose note line says "changed in this session" without opening the note. |
-| Bump `updated:` when you have checked a note, and delete `(inferred — verify)` once a line is confirmed. | Treat the date as proof: only `docs/arch/` is compared with the code. |
-| Give a gate that applies to one repository `repos: [name]` in `hard-gates.md`. | Put gates in a project note: agents can edit it. |
-
-### Lead folders
-
-A knowledge base that already has folders for this material can keep using them. Add `lead` to its entry under `kb.sources` in `~/.omp/agent/omp-starter.json`, then run `/starter lead`:
-
-```json
-{ "kbRef": "~/vault/KnowledgeBase", "lead": { "stories": "projects", "policy": "company", "templates": "_templates" } }
-```
-
-| Key | Holds | Default |
-|---|---|---|
-| `stories` | One folder per story: `<id>/brief.md`, `plan.md`, `state.json`, `status.md` | `lead/stories` |
-| `policy` | `hard-gates.md`, `pr-format.md`, `retro-log.md` | `lead` |
-| `templates` | `brief-template.md` | `lead` |
-
-Folders are relative to the knowledge base, and a key you leave out keeps its default. In a folder shared with other notes, agents are kept from writing only the lead's files (`hard-gates.md`, `pr-format.md`, `retro-log.md`, `brief-template.md`, a story's `state.json` and `status.md`, and its `brief.md` once the plan is approved); the other notes stay writable. `/starter kb` keeps the setting when you set the same knowledge base up again.
-
-| Do | Don't |
-|---|---|
-| Set the folders before the first `/starter lead`, and check the paths it reports. | Misspell a folder: no `hard-gates.md` is found there, so nothing is enforced and nothing warns you. |
-| Move the files yourself when you change the setting later. | Expect the files to follow the setting: `/starter lead` writes fresh templates into the new folders. |
-| Keep `brief.md`, `state.json` and `status.md` in a story folder for the workflow. | Point `stories` at a folder where agents already write files with those names. |
 
 ## Usage report
 
@@ -348,7 +246,7 @@ Limits: M3 and M1's scope check use today's vault, so notes moved later are judg
 
 ### 0.37.0 — 2026-11-21
 
-- **Added:** the lead loop (see [The loop](#the-loop)): after `/build` the harness drives verify → test → proof → independent review → push → acceptance → PR from check receipts keyed by HEAD, stops after three failed runs of a stage or three non-clean reviews with a `deep` diagnosis and a notification, and blocks the main session's `ask` while it runs.
+- **Added:** the lead loop: after `/build` the harness drives verify → test → proof → independent review → push → acceptance → PR from check receipts keyed by HEAD, stops after three failed runs of a stage or three non-clean reviews with a `deep` diagnosis and a notification, and blocks the main session's `ask` while it runs.
 - **Added:** briefs carry `- AC1: …` criteria and plans a `## Proof` list; one approval dialog shows each AC with how it is proven or why it is unprovable. A proof test must fail on the base commit and pass on HEAD.
 - **Added:** `checks:` per repository in `hard-gates.md`, a `check` op on the `lead` tool, `## Evidence` and `## Unproven` in the PR body, and PR checks for receipts and a clean review at HEAD.
 - **Added:** `/story <jira-key>` without a brief: the agent drafts `brief.md` from the ticket and you approve it with the plan.
@@ -356,19 +254,19 @@ Limits: M3 and M1's scope check use today's vault, so notes moved later are judg
 
 ### 0.36.0 — 2026-11-18
 
-- **Changed:** the system map moved from one `system-map.md` into each repository's project note, `<kb>/projects/<repo>.md` (see [Project notes](#project-notes)). `/starter lead` no longer creates `system-map.md`, and `/story` no longer needs one. Existing installs: move each service into its repository's note, drop the `repo:` field, and delete `system-map.md`. Use agent-skills 0.8.2.
+- **Changed:** the system map moved from one `system-map.md` into each repository's project note, `<kb>/projects/<repo>.md`. `/starter lead` no longer creates `system-map.md`, and `/story` no longer needs one. Existing installs: move each service into its repository's note, drop the `repo:` field, and delete `system-map.md`. Use agent-skills 0.8.2.
 - **Added:** a plan is approved, and built, only when every repository in it has a project note with a `services:` block.
 - **Added:** the approval dialog and the story prompt show how fresh the notes are: the `updated:` date and the count of `(inferred — verify)` markers, for the plan's project notes and for your own notes in the policy folder.
 - **Changed:** you are notified when an agent changes a note's `services:` block, not on every edit of the file; an agent that leaves an old `updated:` date is told to set it.
 
 ### 0.35.0 — 2026-11-18
 
-- **Added:** a knowledge base can keep the lead files in folders it already has: `lead: { stories, policy, templates }` on its entry in `omp-starter.json` (see [Lead folders](#lead-folders)). Without the setting nothing moves.
+- **Added:** a knowledge base can keep the lead files in folders it already has: `lead: { stories, policy, templates }` on its entry in `omp-starter.json`. Without the setting nothing moves.
 - **Changed:** the workflow is on once `hard-gates.md` exists, the file the hard gates and the PR check already looked for. A `lead/` folder without it no longer has `/story` and `/build` checked.
 
 ### 0.34.0 — 2026-11-18
 
-- **Added:** the lead-driven workflow (see [Lead-driven workflow](#lead-driven-workflow)). `/starter lead` creates `lead/` in the knowledge base; nothing is enforced before that, and `OMP_STARTER_LEAD=off` turns it off. It needs agent-skills 0.8.0 for the matching `/story`, `/build`, `/task` and `/ship` commands.
+- **Added:** the lead-driven workflow. `/starter lead` creates `lead/` in the knowledge base; nothing is enforced before that, and `OMP_STARTER_LEAD=off` turns it off. It needs agent-skills 0.8.0 for the matching `/story`, `/build`, `/task` and `/ship` commands.
   - `/story <id>` and `/build [id]` are checked before they run: brief and system map first, approved plan before building.
   - The `lead` tool: one plan approval (`approve`), queued hard gates (`gate`), PR status (`status`), escaped bugs (`retro`). Every decision is a dialog only you can answer.
   - Hard gates on writes, commits, pushes and PRs; a repository fence; a PR body check; a builder cap; notifications (`OMP_STARTER_NOTIFY_CMD` or macOS).

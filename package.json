@@ -18,12 +18,8 @@
       "./extensions/kb-memory-tools.ts",
       "./extensions/kb-command.ts",
       "./extensions/fable-router.ts",
-      "./extensions/lsp-guard.ts",
       "./extensions/cross-repo-reads.ts",
-      "./extensions/blast-radius.ts",
-      "./extensions/lead-gates.ts",
-      "./extensions/lead.ts",
-      "./extensions/lead-pr-check.ts"
+      "./extensions/blast-radius.ts"
     ]
   },
   "devDependencies": {

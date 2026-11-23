@@ -66,7 +66,7 @@ test("an accepted key is stored 600 beside other entries and routes every judge 
 	expect(env.TYPESAFE_API_KEY).toBe("ts-new");
 	expect(await config("get", "modelRoles")).toEqual({ default: "anthropic/claude-opus-5-5:auto", judge: JEV_MODEL });
 	expect(await config("get", "modelPresets")).toEqual({ claude: { modelRoles: { judge: JEV_MODEL, tiny: "x" } }, custom: { modelRoles: { judge: "keep" } } });
-	expect((await config("get", "ttsr.disabledRules") as string[]).sort()).toEqual(["lsp-symbol-search", "other-rule"]);
+	expect(await config("get", "ttsr.disabledRules")).toEqual(["other-rule"]);
 	expect((await config("get", "retry.fallbackChains") as Record<string, unknown>).judge).toEqual(["@tiny"]);
 }, 60_000);
 
@@ -91,7 +91,7 @@ test("the find question turns find off only when chosen", async () => {
 	expect(await kept.config("get", "find.enabled")).toBe("auto");
 }, 90_000);
 
-test("turning Jev off restores the presets' judges and the regex LSP rule", async () => {
+test("turning Jev off restores the presets' judges, leaves the ttsr rules alone and keeps the key", async () => {
 	const { exec, config, ui, envFile } = client({ input: "ts-key", select: "Turn Jev off" });
 	await setupModels(ui, exec);
 	await setupJev(ui, exec, { verify: accept, envFile, env: {} });

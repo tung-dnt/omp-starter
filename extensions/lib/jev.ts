@@ -10,8 +10,6 @@ export const JEV_MODEL = "typesafe/jev-1.14.0";
 /** omp loads this file into its process environment, so bash/eval children (agent-skills `jev.sh`) see the key too. */
 export const ENV_FILE = path.join(HOME, ".omp", "agent", ".env");
 const KEY_VAR = "TYPESAFE_API_KEY";
-/** The regex rule `rules/lsp-symbol-judged.md` replaces while Jev judges; both at once would remind twice. */
-const REGEX_LSP_RULE = "lsp-symbol-search";
 const API = "https://api.typesafe.ai/v1/systemone";
 /** Choices of the `find` question: with a native judge, `find.enabled: auto` sends source windows to the judge. */
 export const FIND_OFF = "Turn find off";
@@ -55,19 +53,16 @@ export function writeEnvKey(file: string, key: string): void {
 	fs.chmodSync(file, 0o600);
 }
 
-async function routeJudge(exec: Exec, judge: (preset: keyof typeof MODEL_PRESETS) => string, disableRegexRule: boolean): Promise<void> {
+/** Points `modelRoles.judge` and the saved presets' judges at Jev (`on`), or back at the presets' own models and `@tiny`. */
+async function routeJudge(exec: Exec, judge: (preset: keyof typeof MODEL_PRESETS) => string, on: boolean): Promise<void> {
 	const presets = ((await readSetting(exec, "modelPresets")) ?? {}) as Record<string, { modelRoles?: Record<string, string> }>;
 	for (const name of Object.keys(MODEL_PRESETS) as (keyof typeof MODEL_PRESETS)[]) {
 		const preset = presets[name];
 		if (preset) presets[name] = { ...preset, modelRoles: { ...preset.modelRoles, judge: judge(name) } };
 	}
-	const disabled = new Set(((await readSetting(exec, "ttsr.disabledRules")) ?? []) as string[]);
-	if (disableRegexRule) disabled.add(REGEX_LSP_RULE);
-	else disabled.delete(REGEX_LSP_RULE);
 	await applySettings(exec, [
-		{ key: "modelRoles", merge: true, value: { judge: disableRegexRule ? JEV_MODEL : "@tiny" } },
+		{ key: "modelRoles", merge: true, value: { judge: on ? JEV_MODEL : "@tiny" } },
 		{ key: "modelPresets", value: presets },
-		{ key: "ttsr.disabledRules", value: [...disabled] },
 	]);
 }
 
@@ -81,7 +76,7 @@ export interface JevOptions {
 
 /**
  * Optional: routes the `judge` role to TypeSafe Jev. Nothing is written until TypeSafe accepts the key.
- * Turning it off restores the presets' own judge models and the regex LSP rule; the stored key stays.
+ * Turning it off restores the presets' own judge models; the stored key stays.
  */
 export async function setupJev(ui: WizardUi, exec: Exec, options: JevOptions = {}): Promise<"done" | "skipped"> {
 	const { verify = verifyKey, envFile = ENV_FILE, env = process.env, current } = options;
@@ -90,13 +85,12 @@ export async function setupJev(ui: WizardUi, exec: Exec, options: JevOptions = {
 		const off = "Turn Jev off";
 		if ((await ui.select("TypeSafe Jev is the judge model", [keep, off])) !== off) return "done";
 		await routeJudge(exec, preset => MODEL_PRESETS[preset].modelRoles.judge, false);
-		ui.notify(`Jev turned off: judge back to the presets' models, regex LSP reminder back on. ${KEY_VAR} stays in ${envFile}; delete it if unwanted.`, "info");
+		ui.notify(`Jev turned off: judge back to the presets' models. ${KEY_VAR} stays in ${envFile}; delete it if unwanted.`, "info");
 		return "skipped";
 	}
 	const ok = await ui.confirm(
 		"TypeSafe Jev judge (optional)",
-		"Route the `judge` role to TypeSafe Jev (jev-1.14.0): it answers `question` rules such as the LSP-over-grep reminder " +
-			"(24/24 symbol searches caught vs 7/24 by regex) and picks the thinking level for each prompt. " +
+		"Route the `judge` role to TypeSafe Jev (jev-1.14.0): it answers `question` rules and picks the thinking level for each prompt. " +
 			"Judged tool calls and your prompts are sent to TypeSafe (processed in the US), and omp's `find` tool turns on with a Jev judge and sends source excerpts too; " +
 			"skip this if your data rules don't allow that. " +
 			`Needs an API key from typesafe.ai, stored in ${envFile} (mode 600).`,

@@ -5,7 +5,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { JEV_MODEL, setupJev } from "./lib/jev";
-import { initLead, leadLayoutFor } from "./lib/lead/artifacts";
 import { setupModels } from "./lib/routing";
 import { EVERY_SESSION_DIR, doneSources, overlapProblem, servesEverySession, sourceFolder } from "./lib/kb-sources";
 import { HOME, STATE_FILE, expandHome, readState, readTooling, saveTooling, tildify, updateState, type KbSource, type KbState, type SetupState } from "./lib/state";
@@ -244,8 +243,6 @@ async function addSource(ui: WizardUi, sources: KbSource[]): Promise<KbSource | 
 		kbPaths: [...new Set([kbRootAbs, kbAbs])],
 		contextFile,
 		...(gate ? { gateDir } : {}),
-		// Setting the same knowledge base up again must not move its lead files back to `lead/`.
-		...(replaced?.kbRef === kbRef && replaced.lead ? { lead: replaced.lead } : {}),
 	};
 }
 
@@ -403,7 +400,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 
 
 	pi.registerCommand("starter", {
-		description: "Setup or confirmed plugin updates. Args: updates | skills | models | jev | kb | tools | lead (default: setup all)",
+		description: "Setup or confirmed plugin updates. Args: updates | skills | models | jev | kb | tools (default: setup all)",
 		handler: async (args, ctx) => {
 			const which = args.trim();
 			if (which === "updates") {
@@ -416,17 +413,6 @@ export default function ompStarter(pi: ExtensionAPI): void {
 				} catch (error) {
 					ctx.ui.notify(error instanceof Error ? error.message : "Plugin update check failed.", "error");
 				}
-				return;
-			}
-			if (which === "lead") {
-				const layout = leadLayoutFor(ctx.cwd);
-				if (!layout) {
-					ctx.ui.notify("lead: no knowledge base serves this folder; run /starter kb first", "error");
-					return;
-				}
-				const { created, kept } = initLead(layout);
-				const list = (paths: string[]) => paths.map(tildify).join(", ") || "none";
-				ctx.ui.notify(`lead: created ${list(created)}; kept ${list(kept)} (pr-format.md is regenerated on every run)`, "info");
 				return;
 			}
 			await run(
