@@ -123,8 +123,8 @@ describe("git commit under a gated folder", () => {
 });
 
 describe("saving a memory", () => {
-	test("a successful retain, learn or memory_edit result lets the commit through", () => {
-		for (const tool of ["retain", "learn", "memory_edit"]) {
+	test("a successful retain or learn result lets the commit through", () => {
+		for (const tool of ["retain", "learn"]) {
 			resetHome();
 			const g = gate();
 			expect(g.commit("git commit -m wip")?.block).toBe(true);

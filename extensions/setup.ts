@@ -71,7 +71,7 @@ export function renderContextFile(kbRef: string, kbAbs: string, pinned: string[]
 		? `\n## Always-loaded notes\n\n${pinned.map(rel => `@${kbRef}/${rel}`).join("\n\n")}\n`
 		: "";
 	const commitGate = gate
-		? `\n### Commit gate\n\n\`git commit\` is blocked until a \`${kbRef}/\` file has been written in the session (\`write\` or \`edit\`); a successful \`retain\`, \`learn\` or \`memory_edit\` also satisfies it. Save the relevant facts first; for commits with no new facts (typos, formatting) put \`[skip-mem]\` in the commit message.\n`
+		? `\n### Commit gate\n\n\`git commit\` is blocked until a \`${kbRef}/\` file has been written in the session (\`write\` or \`edit\`); a successful \`retain\` or \`learn\` also satisfies it. Save the relevant facts first; for commits with no new facts (typos, formatting) put \`[skip-mem]\` in the commit message.\n`
 		: "";
 	return `# Knowledge base (Obsidian)
 

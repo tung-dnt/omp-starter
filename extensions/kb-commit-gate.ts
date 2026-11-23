@@ -1,5 +1,5 @@
 // Blocks agent `git commit` under a knowledge-base source's gate folder until this session saved a memory
-// or wrote that source's KB: a successful `retain`, `learn` or `memory_edit` (the Hindsight bank serves every
+// or wrote that source's KB: a successful `retain` or `learn` (the Hindsight bank serves every
 // source), or a `write`/`edit` into the KB. `[skip-mem]` in the command bypasses it, and an unattended build
 // (OMP_STARTER_UNATTENDED=1, see unattended.ts) is never gated: nobody could answer it.
 // Configured by the setup wizard (`kb.sources[].gateDir` / `kbPaths` in ~/.omp/agent/omp-starter.json).
@@ -19,7 +19,6 @@ const WRITE_TOOLS: Record<string, "files" | "bank"> = {
 	edit: "files",
 	retain: "bank",
 	learn: "bank",
-	memory_edit: "bank",
 };
 
 export default function kbCommitGate(pi: ExtensionAPI): void {
