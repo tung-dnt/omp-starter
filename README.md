@@ -260,6 +260,14 @@ Limits: M3 and M1's scope check use today's vault, so notes moved later are judg
 
 ## Release notes
 
+### 0.38.0 — 2026-11-23
+
+- **Removed:** the lead harness: the `lead` tool and `/starter lead`, hard gates, the repository fence, the input check on `/story` and `/build`, the loop controller, the PR body check, the builder cap and the lead notifications (`OMP_STARTER_LEAD`, `OMP_STARTER_LEAD_LOOP`, `OMP_STARTER_NOTIFY_CMD`), with `scripts/arch-graph.ts`, `templates/arch-graph.yml` and `scripts/lead-replay.ts`. Verification moves to a PR-stage panel outside this plugin.
+- **Removed:** `lsp-guard` and the rules `lsp-symbol-search`, `lsp-symbol-judged` and `dap-over-print`. The Jev step now only routes the `judge` role; it no longer touches `ttsr.disabledRules`.
+- **Added:** unattended builds (see [Unattended builds](#unattended-builds)). With `OMP_STARTER_UNATTENDED=1` and `OMP_STARTER_STORY=<id>`, `ask` is refused and the main session cannot stop until every repository in `<kb>/projects/<id>/plan.md` has an open pull request on its branch or `stuck.md` exists; after 20 refused stops the stop goes through and `stuck.md` says so.
+- **Changed:** the commit gate lets every commit through while `OMP_STARTER_UNATTENDED=1`. `rules/ask-user.md` no longer mentions hard gates.
+- Existing installs: the `lead/` folders in your knowledge base (hard gates, stories, templates), a `lead:` entry in `omp-starter.json` and `lsp-symbol-search` in `ttsr.disabledRules` are left alone and are no longer read. Use agent-skills 0.10.0.
+
 ### 0.37.0 — 2026-11-21
 
 - **Added:** the lead loop: after `/build` the harness drives verify → test → proof → independent review → push → acceptance → PR from check receipts keyed by HEAD, stops after three failed runs of a stage or three non-clean reviews with a `deep` diagnosis and a notification, and blocks the main session's `ask` while it runs.
