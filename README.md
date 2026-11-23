@@ -4,7 +4,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 
 | Step | What it does |
 |---|---|
-| **agent-skills** *(optional)* | Installs [tung-dnt/agent-skills](https://github.com/tung-dnt/agent-skills): engineering-workflow skills, agents and `/spec` `/plan` `/build` `/review` `/ship` commands. Once installed, `/starter skills` offers to update it. |
+| **Skill kits** *(optional)* | A checkbox picker for any combination of [pstack](https://github.com/cursor/plugins/tree/main/pstack), [Matt Pocock's skills](https://github.com/mattpocock/skills), [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) and [spec-kit](https://github.com/github/spec-kit), with a warning when the chosen kits cover the same job. See [Skill kits](#skill-kits-starter-skills). |
 | **Model routing** *(Claude-first)* | Saves `claude` and `codex` subscription presets without requiring a login. When the required Claude models are available, also routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels; otherwise keeps the current routing. Using a preset requires its provider login. |
 | **TypeSafe Jev judge** *(optional)* | Routes omp's `judge` role to TypeSafe Jev after checking your API key, and stores the key in `~/.omp/agent/.env` (mode 600). Jev then answers `question` rules and picks the thinking level per prompt. Offered on a brand-new install; existing installs run `/starter jev`. See [TypeSafe Jev judge](#typesafe-jev-judge-starter-jev). |
 | **Knowledge base** | Uses Obsidian vaults as omp's knowledge base and long-term memory, one per folder if you like (e.g. `~/work` and `~/personal`). Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that points sessions at the knowledge base, injects the part of the memory index that applies to the current repo, adds `kb_remember`/`kb_recall` memory tools, and optionally adds a commit gate. |
@@ -163,14 +163,14 @@ It needs no provider login, never installs or changes an SDK, and never changes 
 ## Commands
 
 - `/starter`: rerun every step.
-- `/starter skills`, `/starter models`, `/starter jev`, `/starter kb`, `/starter tools`: rerun one step (`/starter skills` offers to update an installed agent-skills and reports the old and new version; `/starter kb` manages several knowledge bases once one exists; `/starter jev` turns Jev off when it is on).
-- `/starter updates`: check installed/published versions of both `agent-skills@tung-agent-skills` and `starter@omp-starter`; confirm each plugin/scope before updating.
+- `/starter skills`, `/starter models`, `/starter jev`, `/starter kb`, `/starter tools`: rerun one step (`/starter skills` reopens the kit picker and offers updates for kept kits; `/starter kb` manages several knowledge bases once one exists; `/starter jev` turns Jev off when it is on).
+- `/starter updates`: check installed/published versions of the installed skill kits and `starter@omp-starter`; confirm each plugin/scope before updating. pstack and Matt Pocock publish no version in their catalogs, so for them it prints the upgrade command instead.
 
 Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p` or subagents.
 
 ### Confirmed plugin updates
 
-Run `/starter updates` when you want to check. There is no added startup version request, polling timer, or background updater. `/starter skills` uses the same version-check/update helper for agent-skills and retains its existing confirmed installation flow when skills are missing.
+Run `/starter updates` when you want to check. There is no added startup version request, polling timer, or background updater. `/starter skills` uses the same version-check/update helper for the kits you keep checked.
 
 The updater reads structured native installation metadata and the two official public catalogs. A newer semantic version is offered with its `user` or `project` scope; equal/older versions are not reinstalled. Only confirmation permits refreshing that named marketplace and invoking native upgrade for that exact plugin/scope. Missing plugins and unmanaged npm/link/Git copies are not converted or overwritten.
 
@@ -182,9 +182,29 @@ The updater reads structured native installation metadata and the two official p
 
 Native OMP remains responsible for configured marketplace sources and installation. Its version caches can be shared across scopes; a targeted scope does not guarantee a physically separate cache. Its independent `marketplace.autoUpdate` preference is not changed by this feature.
 
-## agent-skills and task tracking
+## Skill kits (`/starter skills`)
 
-agent-skills' planning and build workflows use the native session todo and task tools for mutable progress. The active session is the single progress owner; a task run is execution, not proof that code is verified.
+One form with a checkbox per kit. Checked kits get installed; an installed kit you uncheck is uninstalled after a confirm that names it. On a fresh install addy is preselected; after that the picker shows what is installed. At startup the step only records a kit you already have and never asks. Hosts that cannot draw a form get one yes/no question per kit.
+
+| Kit | Installs | Notes |
+|---|---|---|
+| pstack | `pstack@cursor-plugins` (marketplace `cursor/plugins`) | omp's plugin loader skips 57 of pstack's 58 skills (their `disable-model-invocation` field), so the step adds `<plugins>/node_modules/pstack/skills` to `skills.customDirectories`. That link follows pstack upgrades. Uninstalling removes the entry. |
+| Matt Pocock | `mattpocock-skills@mattpocock` (marketplace `mattpocock/skills`) | All 27 promoted skills load. |
+| addy | `agent-skills@addy-agent-skills` (marketplace `addyosmani/agent-skills`) | All 26 skills load. |
+| spec-kit | `uv tool install specify-cli` | A CLI, no skills: run `specify init --here --integration omp` in a repo to add `/speckit.*` commands, `.specify/` and `specs/`. Needs [uv](https://docs.astral.sh/uv/); without it the step says so and installs nothing. |
+
+**Overlap warning.** Before anything changes, kits that cover the same job are listed with their skills, and you choose **Install anyway** or **Change selection** (the picker reopens with your choice). Jobs checked: spec/requirements, plan/tasks, implementation, TDD, code review, debugging, stress-testing a plan, skill router, architecture and prototyping. Two names also clash: `tdd` and `teach` exist in pstack and Matt Pocock's kit; omp keeps pstack's as `/skill:tdd` and `/skill:teach` and namespaces Matt's as `mattpocock-skills/tdd` and `mattpocock-skills/teach`.
+
+| Do | Don't |
+|---|---|
+| Pick one kit per job, or keep the overlap on purpose and say in your prompt which skill to use. | Install every kit and expect the model to choose consistently between four TDD skills. |
+| Restart the session after the step: new plugins load at startup. | Remove a kit's files by hand: uncheck it so its `customDirectories` entry goes too. |
+
+Unmanaged copies (npm, link, Git) and project-scope installs count as installed but are never converted or uninstalled; the step tells you to remove them where they were installed.
+
+## Task tracking
+
+Native session todo and task tools hold mutable progress. The active session is the single progress owner; a task run is execution, not proof that code is verified.
 
 Keep plans, acceptance criteria, designs and decisions as static artifacts, and pass workers their approved artifact paths. Native todo/task state is session-local: it does not provide a shared project board, cross-session claims or automatic dependency scheduling. For durable cross-session project coordination, choose and maintain an external tracker deliberately; do not mirror native task status into KB notes.
 
@@ -210,7 +230,7 @@ An eighth always-on rule (`rules/subagent-absolute-paths.md`) loads in every sub
 
 `extensions/blast-radius.ts` appends a short **Blast radius** block to an `edit` or `write` result when the change alters an exported symbol in a TS/JS or Go file. A symbol counts as changed when its signature does: the parameters and return type of a function or method (including an exported arrow-function `const`), or the whole declaration of an `interface`/`type`/`enum`/Go `type`. The block lists that symbol's references in other files, from the language server the `lsp` tool already runs, so no second server starts. A removed or renamed export can no longer be asked about, so its uses come from `git grep -w` over tracked files and are labelled `text matches`. Body-only edits, reformatting and new exports add nothing. Limits: 3 changed and 3 removed symbols per call, 8 locations per symbol, 700 characters, 6 s. A slow or missing server, or any error, adds nothing and never changes the edit's own result. The block holds paths and line numbers only, never code. It runs in every agent. Turn it off with omp's extension toggle.
 
-The `ask`-based rules load in the main session only, except `ticket-tracking`, which also loads in agent-skills' `task-builder`. Other subagents can't use the `ask` tool, so they don't carry these rules.
+The `ask`-based rules load in the main session only, except `ticket-tracking`, which also loads in `task` subagents. Other subagents can't use the `ask` tool, so they don't carry these rules.
 
 ## Unattended builds
 
@@ -262,6 +282,8 @@ Limits: M3 and M1's scope check use today's vault, so notes moved later are judg
 
 ### 0.38.0 — 2026-11-23
 
+- **Added:** the skill-kit picker in `/starter skills`: checkboxes for pstack, Matt Pocock's skills, addyosmani/agent-skills and spec-kit, a warning listing the jobs and skill names the chosen kits share, and uninstall of an installed kit you uncheck (after a confirm). pstack's skills load through `skills.customDirectories`, which the step manages. See [Skill kits](#skill-kits-starter-skills).
+- **Changed:** the addy kit is upstream `agent-skills@addy-agent-skills`; the fork `agent-skills@tung-agent-skills` is no longer installed or updated by `/starter`. `ticket-tracking` loads in `task` subagents instead of `task-builder`.
 - **Removed:** the lead harness: the `lead` tool and `/starter lead`, hard gates, the repository fence, the input check on `/story` and `/build`, the loop controller, the PR body check, the builder cap and the lead notifications (`OMP_STARTER_LEAD`, `OMP_STARTER_LEAD_LOOP`, `OMP_STARTER_NOTIFY_CMD`), with `scripts/arch-graph.ts`, `templates/arch-graph.yml` and `scripts/lead-replay.ts`. Verification moves to a PR-stage panel outside this plugin.
 - **Removed:** `lsp-guard` and the rules `lsp-symbol-search`, `lsp-symbol-judged` and `dap-over-print`. The Jev step now only routes the `judge` role; it no longer touches `ttsr.disabledRules`.
 - **Added:** unattended builds (see [Unattended builds](#unattended-builds)). With `OMP_STARTER_UNATTENDED=1` and `OMP_STARTER_STORY=<id>`, `ask` is refused and the main session cannot stop until every repository in `<kb>/projects/<id>/plan.md` has an open pull request on its branch or `stuck.md` exists; after 20 refused stops the stop goes through and `stuck.md` says so.

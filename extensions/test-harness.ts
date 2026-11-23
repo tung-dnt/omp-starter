@@ -194,9 +194,9 @@ export interface Notification {
 }
 
 export interface Prompt {
-	kind: "confirm" | "select" | "input";
+	kind: "confirm" | "select" | "input" | "form";
 	title: string;
-	/** `confirm`: the message; `select`: the options; `input`: the placeholder. */
+	/** `confirm`: the message; `select`: the options; `input`: the placeholder; `form`: the HTML. */
 	detail: string | string[] | undefined;
 }
 
@@ -206,6 +206,8 @@ export interface UiScript {
 	confirm?: Answer<boolean>[];
 	select?: Answer<string | undefined>[];
 	input?: Answer<string | undefined>[];
+	/** Form submissions (`data`), or `undefined` for cancel. Without this key the UI has no `formDialog`, like a host that cannot draw one. */
+	form?: Answer<Record<string, unknown> | undefined>[];
 }
 
 export interface ScriptedUi {
@@ -215,6 +217,7 @@ export interface ScriptedUi {
 	confirm(title: string, message: string): Promise<boolean>;
 	select(title: string, options: string[]): Promise<string | undefined>;
 	input(title: string, placeholder?: string): Promise<string | undefined>;
+	formDialog?(html: string): Promise<{ data: Record<string, unknown> } | undefined>;
 }
 
 /**
@@ -222,7 +225,7 @@ export interface ScriptedUi {
  * answer throws, so a flow that asks more than the test expects fails instead of hanging or defaulting.
  */
 export function scriptedUi(script: UiScript = {}): ScriptedUi {
-	const queues = { confirm: [...(script.confirm ?? [])], select: [...(script.select ?? [])], input: [...(script.input ?? [])] };
+	const queues = { confirm: [...(script.confirm ?? [])], select: [...(script.select ?? [])], input: [...(script.input ?? [])], form: [...(script.form ?? [])] };
 	const notifications: Notification[] = [];
 	const prompts: Prompt[] = [];
 	function ask<T>(kind: Prompt["kind"], title: string, detail: Prompt["detail"]): T {
@@ -233,7 +236,7 @@ export function scriptedUi(script: UiScript = {}): ScriptedUi {
 		const next = queue.shift();
 		return (typeof next === "function" ? (next as (p: Prompt) => T)(prompt) : next) as T;
 	}
-	return {
+	const ui: ScriptedUi = {
 		notifications,
 		prompts,
 		notify: (message, type) => void notifications.push({ message, type }),
@@ -241,6 +244,13 @@ export function scriptedUi(script: UiScript = {}): ScriptedUi {
 		select: async (title, options) => ask<string | undefined>("select", title, options),
 		input: async (title, placeholder) => ask<string | undefined>("input", title, placeholder),
 	};
+	if (script.form) {
+		ui.formDialog = async html => {
+			const data = ask<Record<string, unknown> | undefined>("form", "form", html);
+			return data ? { data } : undefined;
+		};
+	}
+	return ui;
 }
 
 export interface FakeContext {

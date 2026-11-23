@@ -1,5 +1,5 @@
-// First-run setup wizard: optional agent-skills install, Claude-first subscription presets, an optional
-// TypeSafe Jev judge, and an Obsidian vault as omp's knowledge base and memory.
+// First-run setup wizard: a skill-kit picker (pstack, Matt Pocock, addy, spec-kit), Claude-first subscription presets,
+// an optional TypeSafe Jev judge, and an Obsidian vault as omp's knowledge base and memory.
 // Runs automatically in the TUI until each step is done or skipped; `/starter` reruns it.
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -9,13 +9,16 @@ import { setupModels } from "./lib/routing";
 import { EVERY_SESSION_DIR, doneSources, overlapProblem, servesEverySession, sourceFolder } from "./lib/kb-sources";
 import { HOME, STATE_FILE, expandHome, readState, readTooling, saveTooling, tildify, updateState, type KbSource, type KbState, type SetupState } from "./lib/state";
 import type { ToolsUi } from "./lib/tooling";
-import { AGENT_SKILLS_PLUGIN, checkPluginUpdates, readPluginInstallations } from "./lib/plugin-updates";
+import { checkPluginUpdates } from "./lib/plugin-updates";
+import { setupSkillKits } from "./lib/skill-kits";
 
 export interface WizardUi {
 	notify(message: string, type?: "info" | "warning" | "error"): void;
 	confirm(title: string, message: string): Promise<boolean>;
 	select(title: string, options: string[]): Promise<string | undefined>;
 	input(title: string, placeholder?: string): Promise<string | undefined>;
+	/** HTML `<form>` dialog; absent on hosts that cannot draw one, which then get field-by-field prompts. */
+	formDialog?(html: string): Promise<{ data: Record<string, unknown> } | undefined>;
 }
 
 export type Exec = (
@@ -28,30 +31,6 @@ const OBSIDIAN_REGISTRY = path.join(HOME, "Library/Application Support/obsidian/
 const ICLOUD_OBSIDIAN = path.join(HOME, "Library/Mobile Documents/iCloud~md~obsidian/Documents");
 const KB_LINK = path.join(HOME, ".omp-kb");
 const OTHER_FOLDER = "Other folder…";
-
-// ── agent-skills ────────────────────────────────────────────────────────────
-
-/** Startup only detects presence; explicit commands may offer a confirmed update. */
-export async function setupAgentSkills(ui: WizardUi, exec: Exec, offerUpgrade = false): Promise<"done" | "skipped"> {
-	const installations = await readPluginInstallations(exec);
-	if (installations.some(row => row.key === "agent-skills")) {
-		if (offerUpgrade) await checkPluginUpdates(ui, exec, { keys: ["agent-skills"], installations });
-		return "done";
-	}
-	const ok = await ui.confirm(
-		"agent-skills",
-		`Install ${AGENT_SKILLS_PLUGIN.repo}? Engineering-workflow skills, agents and commands (/spec, /plan, /build, /review, /ship).`,
-	);
-	if (!ok) return "skipped";
-	const add = await exec("omp", ["plugin", "marketplace", "add", AGENT_SKILLS_PLUGIN.repo], { timeout: 120_000 });
-	if (add.code !== 0 && !/already exists/.test(add.stdout + add.stderr)) throw new Error(`Cannot add the agent-skills marketplace (native exit ${add.code}).`);
-	const install = await exec("omp", ["plugin", "install", "--scope", "user", AGENT_SKILLS_PLUGIN.id], { timeout: 300_000 });
-	if (install.code !== 0) throw new Error(`Cannot install agent-skills (native exit ${install.code}); installed state may have changed.`);
-	const after = await readPluginInstallations(exec);
-	if (!after.some(row => row.key === "agent-skills" && row.kind === "marketplace" && row.scope === "user")) throw new Error("Native installation finished, but agent-skills could not be verified.");
-	ui.notify(`Installed ${AGENT_SKILLS_PLUGIN.repo}. Restart your OMP session to load its extensions.`, "info");
-	return "done";
-}
 
 // ── Obsidian knowledge base ─────────────────────────────────────────────────
 
@@ -336,7 +315,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 	/** `fromCommand`: run by `/starter`, so installed steps may offer updates; the startup wizard never does. */
 	async function run(ui: ToolsUi, steps: Steps, cwd: string, fromCommand = false): Promise<void> {
 		if (steps.skills) {
-			const next = await setupAgentSkills(ui, exec, fromCommand);
+			const next = await setupSkillKits(ui, exec, fromCommand);
 			updateState({ agentSkills: readState().agentSkills === "done" && next === "skipped" ? "done" : next });
 		}
 		if (steps.models) {

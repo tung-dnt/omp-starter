@@ -1,30 +1,38 @@
 import { semver } from "bun";
 import type { Exec, WizardUi } from "../setup";
 
-export type PluginKey = "agent-skills" | "starter";
+export type PluginKey = "agent-skills" | "pstack" | "mattpocock-skills" | "starter";
 type Scope = "user" | "project";
-interface PluginTarget {
+export interface PluginTarget {
+	/** The plugin's name in its marketplace catalog. */
 	readonly key: PluginKey;
 	readonly id: string;
 	readonly marketplace: string;
 	readonly repo: string;
-	readonly catalog: string;
+	/** Catalog path in `repo`; absent when the catalog publishes no version, so no version check is possible. */
+	readonly catalog?: string;
 	readonly packageNames: readonly string[];
 }
 
-export const AGENT_SKILLS_PLUGIN: PluginTarget = {
-	key: "agent-skills", id: "agent-skills@tung-agent-skills", marketplace: "tung-agent-skills",
-	repo: "tung-dnt/agent-skills", catalog: ".claude-plugin/marketplace.json", packageNames: ["agent-skills"],
+export const ADDY_PLUGIN: PluginTarget = {
+	key: "agent-skills", id: "agent-skills@addy-agent-skills", marketplace: "addy-agent-skills",
+	repo: "addyosmani/agent-skills", catalog: ".claude-plugin/marketplace.json", packageNames: ["agent-skills"],
+};
+export const PSTACK_PLUGIN: PluginTarget = {
+	key: "pstack", id: "pstack@cursor-plugins", marketplace: "cursor-plugins", repo: "cursor/plugins", packageNames: ["pstack"],
+};
+export const MATT_PLUGIN: PluginTarget = {
+	key: "mattpocock-skills", id: "mattpocock-skills@mattpocock", marketplace: "mattpocock", repo: "mattpocock/skills", packageNames: ["mattpocock-skills"],
 };
 const STARTER_PLUGIN: PluginTarget = {
 	key: "starter", id: "starter@omp-starter", marketplace: "omp-starter",
 	repo: "tung-dnt/omp-starter", catalog: ".omp-plugin/marketplace.json", packageNames: ["omp-starter", "starter"],
 };
 // Update the updater last; all targets and code are loaded before installation changes.
-const TARGETS = [AGENT_SKILLS_PLUGIN, STARTER_PLUGIN];
+const TARGETS = [ADDY_PLUGIN, PSTACK_PLUGIN, MATT_PLUGIN, STARTER_PLUGIN];
 
 export type PluginInstallation =
-	{ readonly key: PluginKey; readonly kind: "marketplace"; readonly scope: Scope; readonly version: string }
+	{ readonly key: PluginKey; readonly kind: "marketplace"; readonly scope: Scope; readonly version: string; readonly installPath?: string }
 	| { readonly key: PluginKey; readonly kind: "unmanaged"; readonly version: string };
 export type CatalogFetch = (url: string, init: { signal: AbortSignal }) => Promise<Response>;
 interface UpdateOptions {
@@ -57,7 +65,7 @@ export async function readPluginInstallations(exec: Exec): Promise<readonly Plug
 			const identity = `${target.key}:${entry.scope}`;
 			if (scopes.has(identity)) throw new Error(`Ambiguous installed metadata for ${target.id} (${entry.scope}).`);
 			scopes.add(identity);
-			rows.push({ key: target.key, kind: "marketplace", scope: entry.scope, version: entry.version });
+			rows.push({ key: target.key, kind: "marketplace", scope: entry.scope, version: entry.version, ...(typeof entry.installPath === "string" ? { installPath: entry.installPath } : {}) });
 		}
 	}
 	for (const entry of value.npm) {
@@ -73,7 +81,7 @@ function validVersion(version: string): boolean {
 	return semver.satisfies(version, version);
 }
 
-async function latestVersion(target: PluginTarget, fetchCatalog: CatalogFetch): Promise<string> {
+async function latestVersion(target: PluginTarget & { catalog: string }, fetchCatalog: CatalogFetch): Promise<string> {
 	let response: Response;
 	try {
 		response = await fetchCatalog(`https://raw.githubusercontent.com/${target.repo}/main/${target.catalog}`, { signal: AbortSignal.timeout(5_000) });
@@ -106,7 +114,11 @@ export async function checkPluginUpdates(
 			ui.notify(matching.length ? `${target.key} uses an unmanaged npm/link/Git installation; update it through its original installation method.` : `${target.key} is not installed; no update was attempted.`, "info");
 			continue;
 		}
-		const latest = await latestVersion(target, fetchCatalog);
+		if (!target.catalog) {
+			ui.notify(`${target.key} publishes no version in its catalog, so it cannot be compared. To refresh it: omp plugin marketplace update ${target.marketplace}, then omp plugin upgrade ${target.id}.`, "info");
+			continue;
+		}
+		const latest = await latestVersion({ ...target, catalog: target.catalog }, fetchCatalog);
 		let refreshed = false;
 		for (const installation of managed) {
 			if (!validVersion(installation.version)) throw new Error(`Cannot compare the installed ${target.key} version format; no update was attempted.`);

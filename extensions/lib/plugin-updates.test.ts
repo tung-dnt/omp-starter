@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { checkPluginUpdates, readPluginInstallations, type CatalogFetch } from "./plugin-updates";
 import type { Exec, WizardUi } from "../setup";
 
-const SKILLS = "agent-skills@tung-agent-skills";
+const SKILLS = "agent-skills@addy-agent-skills";
 const STARTER = "starter@omp-starter";
 
 type Scope = "user" | "project";
@@ -63,7 +63,7 @@ function fixture(options: {
 	const fetchCatalog: CatalogFetch = async url => {
 		if (options.catalog !== undefined) return new Response(JSON.stringify(options.catalog));
 		const skills = url.includes("agent-skills");
-		return new Response(JSON.stringify({ name: skills ? "tung-agent-skills" : "omp-starter", plugins: [{ name: skills ? "agent-skills" : "starter", version: latest }] }));
+		return new Response(JSON.stringify({ name: skills ? "addy-agent-skills" : "omp-starter", plugins: [{ name: skills ? "agent-skills" : "starter", version: latest }] }));
 	};
 	return { installed, ui, exec, fetchCatalog, prompts, notes, catalogEpoch: () => catalogEpoch };
 }

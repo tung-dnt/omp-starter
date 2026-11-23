@@ -310,7 +310,7 @@ describe("setupKnowledgeBase, existing knowledge bases", () => {
 // ── The extension: /starter and the startup wizard ───────────────────────────
 
 const NO_PLUGINS = JSON.stringify({ npm: [], marketplace: [] });
-const AGENT_SKILLS_INSTALLED = JSON.stringify({ npm: [], marketplace: [{ id: "agent-skills@tung-agent-skills", entries: [{ scope: "user", version: "1.0.0" }] }] });
+const ADDY_INSTALLED = JSON.stringify({ npm: [], marketplace: [{ id: "agent-skills@addy-agent-skills", entries: [{ scope: "user", version: "1.0.0" }] }] });
 
 /** omp CLI that reports `plugins`, answers every setting as unset, and accepts writes; `onCall` sees each call first. */
 function omp(plugins = NO_PLUGINS, onCall?: (args: string[]) => ReturnType<FakeExec> | undefined): FakeExec {
@@ -347,24 +347,24 @@ async function starterCommand(fake: FakePi, args: string, script: UiScript, opti
 }
 
 describe("/starter skills", () => {
-	test("records agent-skills as done when it is already installed, without asking", async () => {
-		const ui = await starterCommand(starter(omp(AGENT_SKILLS_INSTALLED)), "skills", {});
+	test("records the step as done when a kit is already installed and the picker is cancelled", async () => {
+		const ui = await starterCommand(starter(omp(ADDY_INSTALLED)), "skills", { form: [undefined] });
 		expect(readState().agentSkills).toBe("done");
-		expect(ui.prompts).toEqual([]);
+		expect(ui.prompts.map(p => p.kind)).toEqual(["form"]);
 	});
 
-	test("records a declined install as skipped, but a rerun never downgrades an earlier done", async () => {
-		await starterCommand(starter(), "skills", { confirm: [false] });
+	test("records a cancelled picker as skipped, but a rerun never downgrades an earlier done", async () => {
+		await starterCommand(starter(), "skills", { form: [undefined] });
 		expect(readState().agentSkills).toBe("skipped");
 
 		seedState({ agentSkills: "done" });
-		await starterCommand(starter(), "skills", { confirm: [false] });
+		await starterCommand(starter(), "skills", { form: [undefined] });
 		expect(readState().agentSkills).toBe("done");
 	});
 
 	test("only the named step runs and the other answers are left alone", async () => {
 		seedState({ models: "done", kb: { status: "skipped" } });
-		await starterCommand(starter(), "skills", { confirm: [false] });
+		await starterCommand(starter(), "skills", { form: [undefined] });
 		expect(readState()).toEqual({ models: "done", kb: { status: "skipped" }, agentSkills: "skipped" });
 	});
 });
@@ -474,7 +474,7 @@ describe("/starter updates", () => {
 
 	test("reports plugins that are not installed without contacting anything", async () => {
 		const ui = await starterCommand(starter(), "updates", {});
-		expect(ui.notifications.map(n => n.type)).toEqual(["info", "info"]);
+		expect(ui.notifications.every(n => n.type === "info")).toBe(true);
 		expect(ui.notifications.map(n => n.message).join("\n")).toContain("agent-skills is not installed");
 	});
 
@@ -497,7 +497,7 @@ describe("the startup wizard", () => {
 
 	test("a brand-new install is offered every step, and each answer is saved", async () => {
 		ompSetupDone();
-		const ui = scriptedUi({ confirm: [false, false, false, false, false] });
+		const ui = scriptedUi({ form: [undefined], confirm: [false, false, false, false] });
 		start(starter(), ui);
 		await settled(() => readState().tooling !== undefined);
 		expect(ui.prompts.map(p => p.title).length).toBe(5);
@@ -544,7 +544,7 @@ describe("the startup wizard", () => {
 	});
 
 	test("while omp's own setup is unfinished it waits, then starts once that setup is recorded", async () => {
-		const ui = scriptedUi({ confirm: [false, false, false, false, false] });
+		const ui = scriptedUi({ form: [undefined], confirm: [false, false, false, false] });
 		const ctx = start(starter(), ui);
 		expect(ctx.timers.size).toBe(1);
 		ctx.tick();
@@ -560,7 +560,7 @@ describe("the startup wizard", () => {
 
 	test("the first prompt submitted starts a waiting wizard immediately, once", async () => {
 		const fake = starter();
-		const ui = scriptedUi({ confirm: [false, false, false, false, false] });
+		const ui = scriptedUi({ form: [undefined], confirm: [false, false, false, false] });
 		const ctx = start(fake, ui);
 		expect(ui.prompts).toEqual([]);
 		await fake.emit("input", {}, ctx);
