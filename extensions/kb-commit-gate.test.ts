@@ -22,6 +22,8 @@ interface Gate {
 	/** Outcome of running `command` as an agent bash call; undefined = allowed. */
 	commit(command: string, options?: { cwd?: string; input?: Record<string, unknown> }): Verdict | undefined;
 	write(toolName: "write" | "edit", input: Record<string, unknown>, options?: { cwd?: string; isError?: boolean }): void;
+	/** The result of a tool call whose input names no file, as a memory tool's does. */
+	result(toolName: string, options?: { isError?: boolean }): void;
 }
 
 /** Two gated knowledge bases: `work-kb` serves ~/work, `personal-kb` serves ~/personal. */
@@ -44,6 +46,9 @@ function gate(sources?: (work: SeededKb, personal: SeededKb) => KbSource[]): Gat
 		write(toolName, input, { cwd = path.join(work.folder, "repo"), isError = false } = {}) {
 			fake.emit("tool_result", { toolName, isError, input }, fakeContext({ cwd }));
 		},
+		result(toolName, { isError = false } = {}) {
+			fake.emit("tool_result", { toolName, isError, input: { items: [{ content: "a durable fact" }] } }, fakeContext({ cwd: path.join(work.folder, "repo") }));
+		},
 	};
 }
 
@@ -54,6 +59,7 @@ describe("git commit under a gated folder", () => {
 		expect(blocked?.block).toBe(true);
 		expect(blocked?.reason).toContain(g.work.source.kbRef);
 		expect(blocked?.reason).toContain("[skip-mem]");
+		expect(blocked?.reason).toContain("retain");
 
 		g.write("write", { path: note(g.work) });
 		expect(g.commit('git commit -m "feat: add thing"')).toBeUndefined();
@@ -113,6 +119,45 @@ describe("git commit under a gated folder", () => {
 		const g = gate();
 		g.write("write", { path: "vault://projects/fact.md" }, { isError: true });
 		expect(g.commit("git commit -m wip")?.block).toBe(true);
+	});
+});
+
+describe("saving a memory", () => {
+	test("a successful retain, learn or memory_edit result lets the commit through", () => {
+		for (const tool of ["retain", "learn", "memory_edit"]) {
+			resetHome();
+			const g = gate();
+			expect(g.commit("git commit -m wip")?.block).toBe(true);
+			g.result(tool);
+			expect(g.commit("git commit -m wip")).toBeUndefined();
+		}
+	});
+
+	test("one memory write satisfies every gated knowledge base, since they share one bank", () => {
+		const g = gate();
+		g.result("retain");
+		expect(g.commit("git commit -m wip")).toBeUndefined();
+		expect(g.commit("git commit -m wip", { cwd: g.personal.folder })).toBeUndefined();
+	});
+
+	test("a retain that failed does not count", () => {
+		const g = gate();
+		g.result("retain", { isError: true });
+		expect(g.commit("git commit -m wip")?.block).toBe(true);
+	});
+
+	test("other tools do not count, nor do the memory tools that only read", () => {
+		const g = gate();
+		for (const tool of ["recall", "reflect", "read", "bash", "todo", "task"]) g.result(tool);
+		expect(g.commit("git commit -m wip")?.block).toBe(true);
+	});
+
+	test("a retain called through xd:// counts by its own result: the outer write names no knowledge-base file", () => {
+		const g = gate();
+		g.write("write", { path: "xd://retain", content: JSON.stringify({ items: [{ content: "a durable fact" }] }) });
+		expect(g.commit("git commit -m wip")?.block).toBe(true);
+		g.result("retain");
+		expect(g.commit("git commit -m wip")).toBeUndefined();
 	});
 });
 
@@ -215,6 +260,14 @@ describe("when the write flag resets", () => {
 			g.fake.emit(event, {}, fakeContext({ cwd: g.work.folder, agent: { kind: "main", name: "main" } }));
 			expect(g.commit("git commit -m wip")?.block).toBe(true);
 		}
+	});
+
+	test("a saved memory is forgotten at a new main session, like a knowledge-base write", () => {
+		const g = gate();
+		g.result("retain");
+		expect(g.commit("git commit -m wip")).toBeUndefined();
+		g.fake.emit("session_start", {}, fakeContext({ cwd: g.work.folder, agent: { kind: "main", name: "main" } }));
+		expect(g.commit("git commit -m wip")?.block).toBe(true);
 	});
 
 	test("a subagent starting does not reset what its parent already wrote", () => {

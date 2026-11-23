@@ -71,7 +71,7 @@ export function renderContextFile(kbRef: string, kbAbs: string, pinned: string[]
 		? `\n## Always-loaded notes\n\n${pinned.map(rel => `@${kbRef}/${rel}`).join("\n\n")}\n`
 		: "";
 	const commitGate = gate
-		? `\n### Commit gate\n\n\`git commit\` is blocked until a \`${kbRef}/\` file has been written in the session (\`write\` or \`edit\`). Save the relevant facts first; for commits with no new facts (typos, formatting) put \`[skip-mem]\` in the commit message.\n`
+		? `\n### Commit gate\n\n\`git commit\` is blocked until a \`${kbRef}/\` file has been written in the session (\`write\` or \`edit\`); a successful \`retain\`, \`learn\` or \`memory_edit\` also satisfies it. Save the relevant facts first; for commits with no new facts (typos, formatting) put \`[skip-mem]\` in the commit message.\n`
 		: "";
 	return `# Knowledge base (Obsidian)
 
@@ -187,7 +187,7 @@ async function addSource(ui: WizardUi, sources: KbSource[]): Promise<KbSource | 
 	}
 	const gate = await ui.confirm(
 		"Commit gate",
-		`Block agent \`git commit\` under ${tildify(gateDir)} until a note in this knowledge base was written in the session ([skip-mem] bypasses)?`,
+		`Block agent \`git commit\` under ${tildify(gateDir)} until a note in this knowledge base was written or a memory was saved in the session ([skip-mem] bypasses)?`,
 	);
 	const kbRef = tildify(kbRootAbs);
 	if (!(await writeWithBackup(ui, contextFile, renderContextFile(kbRef, kbAbs, pinned, gate)))) return undefined;

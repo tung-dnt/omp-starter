@@ -1,6 +1,7 @@
-// Blocks agent `git commit` under a knowledge-base source's gate folder until that source's KB was
-// written in this session via write/edit. `[skip-mem]` in the command bypasses it, and
-// an unattended build (OMP_STARTER_UNATTENDED=1, see unattended.ts) is never gated: nobody could answer it.
+// Blocks agent `git commit` under a knowledge-base source's gate folder until this session saved a memory
+// or wrote that source's KB: a successful `retain`, `learn` or `memory_edit` (the Hindsight bank serves every
+// source), or a `write`/`edit` into the KB. `[skip-mem]` in the command bypasses it, and an unattended build
+// (OMP_STARTER_UNATTENDED=1, see unattended.ts) is never gated: nobody could answer it.
 // Configured by the setup wizard (`kb.sources[].gateDir` / `kbPaths` in ~/.omp/agent/omp-starter.json).
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -9,7 +10,17 @@ import { kbWritten, markKbWritten, resetKbWritten } from "./lib/kb-write-flag";
 import { expandHome, readState } from "./lib/state";
 import { GIT_COMMIT, gitCommandDir, resolveFrom, targetPaths, unquote } from "./lib/tool-input";
 
-const WRITE_TOOLS: Record<string, true> = { write: true, edit: true };
+/**
+ * The tools whose successful result counts as a knowledge-base write, and what each one writes to: the files it
+ * names (counted only inside a knowledge base), or the Hindsight bank, which every knowledge base shares.
+ */
+const WRITE_TOOLS: Record<string, "files" | "bank"> = {
+	write: "files",
+	edit: "files",
+	retain: "bank",
+	learn: "bank",
+	memory_edit: "bank",
+};
 
 export default function kbCommitGate(pi: ExtensionAPI): void {
 	const reset = (ctx: { agent?: { kind: string } }) => {
@@ -19,8 +30,13 @@ export default function kbCommitGate(pi: ExtensionAPI): void {
 	pi.on("session_switch", (_event, ctx) => reset(ctx));
 
 	pi.on("tool_result", (event, ctx) => {
-		if (event.isError || !WRITE_TOOLS[event.toolName]) return;
+		const target = WRITE_TOOLS[event.toolName];
+		if (event.isError || !target) return;
 		const kb = readState().kb;
+		if (target === "bank") {
+			for (const source of doneSources(kb)) markKbWritten(source.kbRef);
+			return;
+		}
 		for (const raw of targetPaths(event.toolName, (event.input ?? {}) as Record<string, unknown>)) {
 			const p = unquote(raw.trim());
 			// `vault://` addresses the Obsidian vault, taken as the one serving this session's folder.
@@ -43,9 +59,9 @@ export default function kbCommitGate(pi: ExtensionAPI): void {
 		return {
 			block: true,
 			reason:
-				`memory-before-code: commit blocked. Write the relevant facts under ${source.kbRef}/ ` +
-				"(e.g. projects/) with the write/edit tools first, " +
-				"or add [skip-mem] to the commit message if the commit carries no new facts.",
+				"memory-before-code: commit blocked. Save the relevant facts first: retain or learn a memory, " +
+				`or write a note under ${source.kbRef}/ (e.g. projects/) with the write/edit tools. ` +
+				"Add [skip-mem] to the commit message if the commit carries no new facts.",
 		};
 	});
 }

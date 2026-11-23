@@ -84,7 +84,10 @@ describe("renderContextFile", () => {
 		const gated = renderContextFile("~/kb", kb, [], true);
 		expect(gated).toContain("Commit gate");
 		expect(gated).toContain("[skip-mem]");
-		expect(renderContextFile("~/kb", kb, [], false)).not.toContain("[skip-mem]");
+		expect(gated).toContain("`retain`, `learn` or `memory_edit` also satisfies it");
+		const ungated = renderContextFile("~/kb", kb, [], false);
+		expect(ungated).not.toContain("[skip-mem]");
+		expect(ungated).not.toContain("memory_edit");
 	});
 
 	test("memory points at the Hindsight tools, not at vault notes, and keeps the data rule", () => {
