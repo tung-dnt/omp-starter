@@ -5,8 +5,8 @@
   "plugins": [
     {
       "name": "starter",
-      "description": "First-run wizard: Claude-first routing with Codex/Claude subscription presets and capped Fable/Astra escalation, Obsidian vaults as knowledge base + memory per folder with kb_remember/kb_recall tools, optional agent-skills, unattended build sessions that stop only at an open PR or a stuck.md, optional guided LSP/debugger tooling (JavaScript/TypeScript, Python, Go, Rust, C/C++)",
-      "version": "0.38.0",
+      "description": "First-run wizard: Claude-first routing with Codex/Claude subscription presets and capped Fable/Astra escalation, Obsidian vaults as knowledge base + memory per folder with kb_remember/kb_recall tools, optional agent-skills, unattended build sessions that refuse questions, optional guided LSP/debugger tooling (JavaScript/TypeScript, Python, Go, Rust, C/C++)",
+      "version": "0.38.1",
       "license": "MIT",
       "source": "./"
     }
