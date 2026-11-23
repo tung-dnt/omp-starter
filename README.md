@@ -266,7 +266,7 @@ Limits: M3 and M1's scope check use today's vault, so notes moved later are judg
 - **Removed:** `lsp-guard` and the rules `lsp-symbol-search`, `lsp-symbol-judged` and `dap-over-print`. The Jev step now only routes the `judge` role; it no longer touches `ttsr.disabledRules`.
 - **Added:** unattended builds (see [Unattended builds](#unattended-builds)). With `OMP_STARTER_UNATTENDED=1` and `OMP_STARTER_STORY=<id>`, `ask` is refused and the main session cannot stop until every repository in `<kb>/projects/<id>/plan.md` has an open pull request on its branch or `stuck.md` exists; after 20 refused stops the stop goes through and `stuck.md` says so.
 - **Changed:** the commit gate lets every commit through while `OMP_STARTER_UNATTENDED=1`. `rules/ask-user.md` no longer mentions hard gates.
-- Existing installs: the `lead/` folders in your knowledge base (hard gates, stories, templates), a `lead:` entry in `omp-starter.json` and `lsp-symbol-search` in `ttsr.disabledRules` are left alone and are no longer read. Use agent-skills 0.10.0.
+- Existing installs: nothing is deleted. The `lead/` folders in your knowledge base (hard gates, stories, templates) stay where they are and are no longer read; so is a `lead:` entry in `omp-starter.json`, which `/starter kb` drops when it rewrites that source. `lsp-symbol-search` may stay in `ttsr.disabledRules`, where it does nothing. Use agent-skills 0.10.0.
 
 ### 0.37.0 — 2026-11-21
 
