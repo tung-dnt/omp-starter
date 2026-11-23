@@ -16,7 +16,6 @@ import * as zod from "@oh-my-pi/omptype/zod";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { EVERY_SESSION_DIR } from "./lib/kb-sources";
 import { resetKbWritten } from "./lib/kb-write-flag";
-import { memorySnapshots } from "./lib/kb-store";
 import { HOME, tildify, writeState, type KbSource, type SetupState } from "./lib/state";
 
 // ── Private HOME ─────────────────────────────────────────────────────────────
@@ -41,7 +40,6 @@ export function resetHome(): void {
 	const home = privateHome();
 	for (const entry of fs.readdirSync(home)) fs.rmSync(path.join(home, entry), { recursive: true, force: true });
 	resetKbWritten();
-	memorySnapshots.clear();
 }
 
 /** Writes `files` (paths relative to `root`, parents created). */
@@ -67,11 +65,6 @@ export function seedState(state: SetupState): void {
 
 // ── Knowledge bases ──────────────────────────────────────────────────────────
 
-/** A memory note file the way kb_remember writes it. */
-export function memoryNote(slug: string, description: string, body: string, type = "project"): string {
-	return `---\nname: ${slug}\ndescription: ${description}\nmetadata:\n  node_type: memory\n  type: ${type}\n  modified: 2026-01-01T00:00:00.000Z\n---\n\n${body}\n`;
-}
-
 export interface KbSpec {
 	/** Folder name under the private home holding the vault root; also the vault's name. */
 	name: string;
@@ -79,18 +72,12 @@ export interface KbSpec {
 	folder?: string;
 	/** Turns the commit gate on for `folder` (every-session sources gate the whole home). */
 	gate?: boolean;
-	/** Text of `_memory/MEMORY.md`; omitted = no index file. */
-	index?: string;
-	/** Note files under `_memory/`, by file name. */
-	notes?: Record<string, string>;
 }
 
 export interface SeededKb {
 	source: KbSource;
 	/** Absolute knowledge-base root (the folder `kbRef` points at). */
 	root: string;
-	memoryDir: string;
-	indexPath: string;
 	/** Session folder served; created. */
 	folder: string;
 }
@@ -99,19 +86,16 @@ export interface SeededKb {
 export function seedKb(spec: KbSpec): SeededKb {
 	const home = privateHome();
 	const root = path.join(home, spec.name);
-	const memoryDir = path.join(root, "_memory");
 	const folder = spec.folder ?? EVERY_SESSION_DIR;
-	fs.mkdirSync(memoryDir, { recursive: true });
+	fs.mkdirSync(root, { recursive: true });
 	fs.mkdirSync(folder, { recursive: true });
-	if (spec.index !== undefined) fs.writeFileSync(path.join(memoryDir, "MEMORY.md"), spec.index);
-	writeFiles(memoryDir, spec.notes ?? {});
 	const source: KbSource = {
 		kbRef: tildify(root),
 		kbPaths: [root],
 		contextFile: path.join(folder, "AGENTS.md"),
 		...(spec.gate ? { gateDir: spec.folder ?? home } : {}),
 	};
-	return { source, root, memoryDir, indexPath: path.join(memoryDir, "MEMORY.md"), folder };
+	return { source, root, folder };
 }
 
 // ── Fake host ────────────────────────────────────────────────────────────────

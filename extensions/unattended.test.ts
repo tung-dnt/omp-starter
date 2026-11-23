@@ -44,6 +44,6 @@ describe("ask", () => {
 
 	test("every other tool is left alone", () => {
 		const s = session("1");
-		for (const toolName of ["bash", "read", "write", "edit", "todo", "task", "kb_remember"]) expect(s.tool(toolName)).toBeUndefined();
+		for (const toolName of ["bash", "read", "write", "edit", "todo", "task", "retain"]) expect(s.tool(toolName)).toBeUndefined();
 	});
 });

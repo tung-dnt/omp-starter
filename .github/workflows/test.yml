@@ -63,4 +63,4 @@ jobs:
         run: bun run typecheck
 
       - name: Build
-        run: bun build extensions/setup.ts extensions/kb-commit-gate.ts extensions/kb-memory.ts extensions/kb-memory-tools.ts extensions/kb-command.ts extensions/fable-router.ts extensions/unattended.ts --target=bun --packages=external --outdir="$RUNNER_TEMP/omp-starter-build"
+        run: bun build extensions/setup.ts extensions/kb-commit-gate.ts extensions/kb-command.ts extensions/fable-router.ts extensions/unattended.ts --target=bun --packages=external --outdir="$RUNNER_TEMP/omp-starter-build"

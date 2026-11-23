@@ -1,5 +1,5 @@
 // Blocks agent `git commit` under a knowledge-base source's gate folder until that source's KB was
-// written in this session, via write/edit or kb_remember. `[skip-mem]` in the command bypasses it, and
+// written in this session via write/edit. `[skip-mem]` in the command bypasses it, and
 // an unattended build (OMP_STARTER_UNATTENDED=1, see unattended.ts) is never gated: nobody could answer it.
 // Configured by the setup wizard (`kb.sources[].gateDir` / `kbPaths` in ~/.omp/agent/omp-starter.json).
 import * as path from "node:path";
@@ -44,7 +44,7 @@ export default function kbCommitGate(pi: ExtensionAPI): void {
 			block: true,
 			reason:
 				`memory-before-code: commit blocked. Write the relevant facts under ${source.kbRef}/ ` +
-				"(e.g. _memory/ or projects/) with kb_remember or the write/edit tools first, " +
+				"(e.g. projects/) with the write/edit tools first, " +
 				"or add [skip-mem] to the commit message if the commit carries no new facts.",
 		};
 	});

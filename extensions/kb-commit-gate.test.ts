@@ -7,6 +7,9 @@ import { HOME, type KbSource } from "./lib/state";
 
 beforeEach(resetHome);
 
+/** A file inside `kb`'s root, the way a note or project page is written. */
+const note = (kb: SeededKb): string => path.join(kb.root, "projects", "fact.md");
+
 interface Verdict {
 	block: boolean;
 	reason: string;
@@ -52,22 +55,22 @@ describe("git commit under a gated folder", () => {
 		expect(blocked?.reason).toContain(g.work.source.kbRef);
 		expect(blocked?.reason).toContain("[skip-mem]");
 
-		g.write("write", { path: path.join(g.work.memoryDir, "fact.md") });
+		g.write("write", { path: note(g.work) });
 		expect(g.commit('git commit -m "feat: add thing"')).toBeUndefined();
 	});
 
 	test("ignores writes that failed, that miss the knowledge base, or that use other tools", () => {
 		const g = gate();
-		g.write("write", { path: path.join(g.work.memoryDir, "fact.md") }, { isError: true });
+		g.write("write", { path: note(g.work) }, { isError: true });
 		g.write("write", { path: path.join(g.work.folder, "repo", "src.ts") });
-		g.fake.emit("tool_result", { toolName: "read", isError: false, input: { path: path.join(g.work.memoryDir, "fact.md") } }, fakeContext({ cwd: g.work.folder }));
-		g.fake.emit("tool_result", { toolName: "bash", isError: false, input: { command: `echo x > ${g.work.memoryDir}/fact.md` } }, fakeContext({ cwd: g.work.folder }));
+		g.fake.emit("tool_result", { toolName: "read", isError: false, input: { path: note(g.work) } }, fakeContext({ cwd: g.work.folder }));
+		g.fake.emit("tool_result", { toolName: "bash", isError: false, input: { command: `echo x > ${note(g.work)}` } }, fakeContext({ cwd: g.work.folder }));
 		expect(g.commit("git commit -m wip")?.block).toBe(true);
 	});
 
 	test("a write into another knowledge base does not satisfy this one", () => {
 		const g = gate();
-		g.write("write", { path: path.join(g.personal.memoryDir, "fact.md") });
+		g.write("write", { path: note(g.personal) });
 		expect(g.commit("git commit -m wip")?.block).toBe(true);
 		expect(g.commit("git commit -m wip", { cwd: g.personal.folder })).toBeUndefined();
 	});
@@ -80,10 +83,10 @@ describe("git commit under a gated folder", () => {
 
 	test("counts edits named in a hashline payload, a move destination and an apply_patch header", () => {
 		for (const input of [
-			`[${path.join("KB", "_memory", "a.md")}#1A2B]\nPUT 1.=1:\n+x`,
-			`MV ${path.join("KB", "_memory", "moved.md")}`,
-			`*** Update File: ${path.join("KB", "_memory", "a.md")}\n@@\n-a\n+b`,
-			`*** Move to: ${path.join("KB", "_memory", "moved.md")}`,
+			`[${path.join("KB", "projects", "a.md")}#1A2B]\nPUT 1.=1:\n+x`,
+			`MV ${path.join("KB", "projects", "moved.md")}`,
+			`*** Update File: ${path.join("KB", "projects", "a.md")}\n@@\n-a\n+b`,
+			`*** Move to: ${path.join("KB", "projects", "moved.md")}`,
 		]) {
 			resetHome();
 			const g = gate();
@@ -94,7 +97,7 @@ describe("git commit under a gated folder", () => {
 
 	test("counts a vault:// write as a write to the knowledge base serving the session folder", () => {
 		const g = gate();
-		g.write("write", { path: "vault://_memory/fact.md" });
+		g.write("write", { path: "vault://projects/fact.md" });
 		expect(g.commit("git commit -m wip")).toBeUndefined();
 		// The personal knowledge base was not written, so its folder stays gated.
 		expect(g.commit("git commit -m wip", { cwd: g.personal.folder })?.block).toBe(true);
@@ -102,13 +105,13 @@ describe("git commit under a gated folder", () => {
 
 	test("counts a relative path, resolved against the session folder", () => {
 		const g = gate();
-		g.write("write", { path: "../../work-kb/_memory/fact.md" });
+		g.write("write", { path: "../../work-kb/projects/fact.md" });
 		expect(g.commit("git commit -m wip")).toBeUndefined();
 	});
 
 	test("a failed write result for a vault:// path does not count", () => {
 		const g = gate();
-		g.write("write", { path: "vault://_memory/fact.md" }, { isError: true });
+		g.write("write", { path: "vault://projects/fact.md" }, { isError: true });
 		expect(g.commit("git commit -m wip")?.block).toBe(true);
 	});
 });
@@ -207,7 +210,7 @@ describe("when the write flag resets", () => {
 	test("a new main session or a session switch asks for a fresh KB write", () => {
 		for (const event of ["session_start", "session_switch"]) {
 			const g = gate();
-			g.write("write", { path: path.join(g.work.memoryDir, "fact.md") });
+			g.write("write", { path: note(g.work) });
 			expect(g.commit("git commit -m wip")).toBeUndefined();
 			g.fake.emit(event, {}, fakeContext({ cwd: g.work.folder, agent: { kind: "main", name: "main" } }));
 			expect(g.commit("git commit -m wip")?.block).toBe(true);
@@ -217,7 +220,7 @@ describe("when the write flag resets", () => {
 	test("a subagent starting does not reset what its parent already wrote", () => {
 		for (const event of ["session_start", "session_switch"]) {
 			const g = gate();
-			g.write("write", { path: path.join(g.work.memoryDir, "fact.md") });
+			g.write("write", { path: note(g.work) });
 			g.fake.emit(event, {}, fakeContext({ cwd: g.work.folder, agent: { kind: "sub", name: "task" } }));
 			expect(g.commit("git commit -m wip")).toBeUndefined();
 		}
@@ -226,7 +229,7 @@ describe("when the write flag resets", () => {
 	test("a subagent's KB write satisfies its parent's commit", () => {
 		const g = gate();
 		g.fake.emit("session_start", {}, fakeContext({ cwd: g.work.folder, agent: { kind: "sub", name: "task" } }));
-		g.fake.emit("tool_result", { toolName: "write", isError: false, input: { path: path.join(g.work.memoryDir, "fact.md") } }, fakeContext({ cwd: g.work.folder, agent: { kind: "sub", name: "task" } }));
+		g.fake.emit("tool_result", { toolName: "write", isError: false, input: { path: note(g.work) } }, fakeContext({ cwd: g.work.folder, agent: { kind: "sub", name: "task" } }));
 		expect(g.commit("git commit -m wip")).toBeUndefined();
 	});
 });

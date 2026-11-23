@@ -14,8 +14,6 @@
     "extensions": [
       "./extensions/setup.ts",
       "./extensions/kb-commit-gate.ts",
-      "./extensions/kb-memory.ts",
-      "./extensions/kb-memory-tools.ts",
       "./extensions/kb-command.ts",
       "./extensions/fable-router.ts",
       "./extensions/cross-repo-reads.ts",

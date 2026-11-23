@@ -12,7 +12,7 @@ test("session startup and KB setup leave the agent-skills config untouched", () 
 	// Load modules only after HOME is set so every module uses the disposable test config.
 	const script = `
 		const { writeState } = await import("./extensions/lib/state.ts");
-		const { memoryDir } = await import("./extensions/lib/kb-store.ts");
+		const { resolveKb } = await import("./extensions/lib/kb-sources.ts");
 		const { default: kbCommitGate } = await import("./extensions/kb-commit-gate.ts");
 		const { default: ompStarter } = await import("./extensions/setup.ts");
 		writeState({
@@ -41,8 +41,7 @@ test("session startup and KB setup leave the agent-skills config untouched", () 
 		const ctx = { mode: "tui", hasUI: true, cwd: "/work/repo", ui };
 		listeners.get("session_start")({}, ctx);
 		await command("kb", ctx);
-		const memory = memoryDir("/work/repo");
-		if (memory.source.kbRef !== "~/work-kb" || memory.dir !== process.env.HOME + "/work-kb/_memory") throw new Error("memory routing lost its KB source");
+		if (resolveKb("/work/repo")?.kbRef !== "~/work-kb") throw new Error("knowledge-base routing lost its KB source");
 		const gateHooks = new Map();
 		kbCommitGate({ on(event, handler) { gateHooks.set(event, handler); } });
 		const commit = () => gateHooks.get("tool_call")({ toolName: "bash", input: { command: "git commit -m test" } }, { cwd: "/work/repo" });

@@ -1,5 +1,5 @@
 // Which knowledge bases (by `kbRef`) were written in this session. Set by the commit gate (write/edit
-// into a KB) and by kb_remember; read by the gate. omp evaluates each extension's imports separately,
+// into a KB); read by the gate. omp evaluates each extension's imports separately,
 // so module state is not shared between extensions: the set lives on `globalThis` under a registry
 // symbol instead. One process serves the main session and its subagents, so a subagent's KB write
 // satisfies the parent's commit.
