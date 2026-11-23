@@ -87,6 +87,14 @@ describe("renderContextFile", () => {
 		expect(renderContextFile("~/kb", kb, [], false)).not.toContain("[skip-mem]");
 	});
 
+	test("memory points at the Hindsight tools, not at vault notes, and keeps the data rule", () => {
+		const kb = home("kb");
+		fs.mkdirSync(kb);
+		const text = renderContextFile("~/kb", kb, [], true);
+		for (const fact of ["Memory lives in Hindsight", "`retain`", "`learn`", "`recall`", "patient data", "secrets"]) expect(text).toContain(fact);
+		for (const gone of ["_memory", "MEMORY.md", "kb_remember", "kb_recall"]) expect(text).not.toContain(gone);
+	});
+
 	test("skips pointers to files the vault does not have", () => {
 		const kb = home("kb");
 		fs.mkdirSync(kb);
@@ -108,7 +116,7 @@ describe("setupKnowledgeBase, first knowledge base", () => {
 		return { ui: scriptedUi(script), script };
 	}
 
-	test("wires one vault to one folder: AGENTS.md, empty index, and a gated source", async () => {
+	test("wires one vault to one folder: AGENTS.md and a gated source, without a memory folder", async () => {
 		const notes = vault("Notes");
 		fs.mkdirSync(home("projects"));
 		const { ui } = firstRun({ vault: notes });
@@ -122,7 +130,7 @@ describe("setupKnowledgeBase, first knowledge base", () => {
 		const agents = fs.readFileSync(home("projects", "AGENTS.md"), "utf8");
 		expect(agents).toContain("KB root: `~/vaults/Notes/KnowledgeBase/`");
 		expect(agents).toContain("[skip-mem]");
-		expect(fs.readFileSync(path.join(kbRoot, "_memory", "MEMORY.md"), "utf8")).toBe("## Global\n");
+		expect(fs.existsSync(path.join(kbRoot, "_memory"))).toBe(false);
 		expect(resolveKb(home("projects", "app"), state)?.kbRef).toBe("~/vaults/Notes/KnowledgeBase");
 		expect(resolveKb(home("elsewhere"), state)).toBeUndefined();
 	});
@@ -196,7 +204,8 @@ describe("setupKnowledgeBase, first knowledge base", () => {
 
 		const { ui } = firstRun({ vault: bare, extraConfirm: [true] });
 		expect((await setupKnowledgeBase(ui, undefined)).status).toBe("done");
-		expect(fs.readFileSync(path.join(bare, "KnowledgeBase", "_memory", "MEMORY.md"), "utf8")).toBe("## Global\n");
+		expect(fs.statSync(path.join(bare, "KnowledgeBase")).isDirectory()).toBe(true);
+		expect(fs.existsSync(path.join(bare, "KnowledgeBase", "_memory"))).toBe(false);
 	});
 
 	test("every refusal or cancellation ends skipped and writes nothing", async () => {
@@ -295,7 +304,7 @@ describe("setupKnowledgeBase, existing knowledge bases", () => {
 		expect(state).toEqual({ status: "skipped" });
 		expect(fs.existsSync(home("projects", "AGENTS.md"))).toBe(false);
 		expect(fs.readdirSync(home("projects")).some(f => f.startsWith("AGENTS.md.bak-"))).toBe(true);
-		expect(fs.existsSync(home("vaults", "Notes", "KnowledgeBase", "_memory", "MEMORY.md"))).toBe(true);
+		expect(fs.existsSync(home("vaults", "Notes", "KnowledgeBase", "_index.md"))).toBe(true);
 	});
 
 	test("declining the AGENTS.md deletion still removes the source but warns that the file stays", async () => {

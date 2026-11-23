@@ -1,5 +1,5 @@
 // First-run setup wizard: a skill-kit picker (pstack, Matt Pocock, addy, spec-kit), Claude-first subscription presets,
-// an optional TypeSafe Jev judge, and an Obsidian vault as omp's knowledge base and memory.
+// an optional TypeSafe Jev judge, and an Obsidian vault as omp's knowledge base.
 // Runs automatically in the TUI until each step is done or skipped; `/starter` reruns it.
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -71,36 +71,17 @@ export function renderContextFile(kbRef: string, kbAbs: string, pinned: string[]
 		? `\n## Always-loaded notes\n\n${pinned.map(rel => `@${kbRef}/${rel}`).join("\n\n")}\n`
 		: "";
 	const commitGate = gate
-		? `\n### Commit gate\n\n\`git commit\` is blocked until a \`${kbRef}/\` file has been written in the session (\`kb_remember\`, \`write\` or \`edit\`). Save the relevant facts first; for commits with no new facts (typos, formatting) put \`[skip-mem]\` in the commit message.\n`
+		? `\n### Commit gate\n\n\`git commit\` is blocked until a \`${kbRef}/\` file has been written in the session (\`write\` or \`edit\`). Save the relevant facts first; for commits with no new facts (typos, formatting) put \`[skip-mem]\` in the commit message.\n`
 		: "";
 	return `# Knowledge base (Obsidian)
 
-KB root: \`${kbRef}/\`. Single source of truth for project context, conventions, and long-term memory.
+KB root: \`${kbRef}/\`. Single source of truth for project context and conventions.
 ${pointers.length ? `\n${pointers.join("\n")}\n` : ""}${pinnedSection}
 ## Memory
 
-Per-fact memory notes live in \`${kbRef}/_memory/<slug>.md\`. The \`kb-memory\` extension injects the \`## Global\` section of \`${kbRef}/_memory/MEMORY.md\` plus the section for the current repo as a "Memory index" block; read the file for other scopes. Search the notes with \`kb_recall\`.
+Memory lives in Hindsight, not in this vault; relevant memories are recalled when a session starts. When you learn a durable fact (decision, gotcha, convention, user preference, resolved failure), save it with \`retain\` or \`learn\`. Search past memories with \`recall\`. Update a stale memory instead of adding a contradicting one.
 
-### Saving a memory
-
-When you learn a durable fact (decision, gotcha, convention, user preference, resolved failure), save it with \`kb_remember\`: it writes \`${kbRef}/_memory/<slug>.md\` and its index line under the section for the current repo (\`scope\` overrides; facts that apply across projects go to \`Global\`). Use \`mode: "update"\` for an existing note after reading it. Without the tool, use \`write\`/\`edit\` (not shell heredocs):
-
-1. Create or update \`${kbRef}/_memory/<kebab-slug>.md\`:
-   \`\`\`markdown
-   ---
-   name: <kebab-slug>
-   description: <one-line hook>
-   metadata:
-     node_type: memory
-     type: project | feedback | reference | user
-     modified: <ISO timestamp>
-   ---
-
-   <fact>. **Why:** <reason>. **How to apply:** <rule>. Link related notes with [[wikilinks]].
-   \`\`\`
-2. Add or update its line in \`${kbRef}/_memory/MEMORY.md\` under the \`## <Scope>\` section whose heading or \`<!-- repos: … -->\` list names the current repo (add a \`## <repo>\` section if none matches); facts that apply across projects go under \`## Global\`. Line format: \`- [Title](<slug>.md) — <hook, ≤ ~60 chars>\`.
-
-Update stale memories instead of adding contradicting ones.
+Never retain database query results, tool output that holds patient data, or secrets.
 ${commitGate}`;
 }
 
@@ -163,18 +144,13 @@ async function addSource(ui: WizardUi, sources: KbSource[]): Promise<KbSource | 
 	if (!fs.existsSync(kbAbs)) {
 		const go = await ui.confirm(
 			"Folder not found",
-			`${tildify(kbAbs)} does not exist yet (a synced vault may still be downloading). Create it with an empty memory index?`,
+			`${tildify(kbAbs)} does not exist yet (a synced vault may still be downloading). Create it?`,
 		);
 		if (!go) return undefined;
+		fs.mkdirSync(kbAbs, { recursive: true });
 	}
 	const link = /\s/.test(vault) ? vaultLink(vault) : undefined;
 	const kbRootAbs = link ? path.join(link, sub) : kbAbs;
-
-	const memoryIndex = path.join(kbAbs, "_memory", "MEMORY.md");
-	if (!fs.existsSync(memoryIndex)) {
-		fs.mkdirSync(path.dirname(memoryIndex), { recursive: true });
-		fs.writeFileSync(memoryIndex, "## Global\n");
-	}
 
 	const pinnedInput = await ui.input(
 		"Notes to load in every session (optional, comma-separated, relative to the knowledge base)",
@@ -243,7 +219,7 @@ async function retireContextFile(ui: WizardUi, file: string): Promise<void> {
 export async function setupKnowledgeBase(ui: WizardUi, current: KbState | undefined): Promise<KbState> {
 	let sources = doneSources(current);
 	if (!sources.length) {
-		if (!(await ui.confirm("Obsidian knowledge base", "Use an Obsidian vault as omp's knowledge base and memory?"))) {
+		if (!(await ui.confirm("Obsidian knowledge base", "Use an Obsidian vault as omp's knowledge base?"))) {
 			return { status: "skipped" };
 		}
 		const added = await addSource(ui, []);
