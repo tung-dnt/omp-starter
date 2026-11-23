@@ -2,13 +2,26 @@
 // a source whose AGENTS.md lives in ~/.omp/agent serves every session (allowed only as the sole source).
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { HOME, readState, type KbSource, type KbState } from "./state";
+import type { WizardUi } from "../setup";
+import { HOME, expandHome, readState, tildify, type KbSource, type KbState } from "./state";
 
 export const EVERY_SESSION_DIR = path.join(HOME, ".omp", "agent");
+/** The AGENTS.md omp loads in every session: the memory rules and the commit gate live here. */
+export const EVERY_SESSION_FILE = path.join(EVERY_SESSION_DIR, "AGENTS.md");
 
 /** Folder a source serves (the AGENTS.md folder). */
 export const sourceFolder = (s: KbSource): string => path.dirname(s.contextFile);
 export const servesEverySession = (s: KbSource): boolean => sourceFolder(s) === EVERY_SESSION_DIR;
+
+/** `raw` as an absolute, existing folder (`~` expands), or undefined after telling the user why not. */
+export function existingFolder(ui: WizardUi, raw: string): string | undefined {
+	const dir = expandHome(raw);
+	if (!path.isAbsolute(dir) || !fs.statSync(dir, { throwIfNoEntry: false })?.isDirectory()) {
+		ui.notify(`${tildify(dir)} is not an existing absolute folder. Use a path like ~/projects.`, "error");
+		return undefined;
+	}
+	return path.resolve(dir);
+}
 
 export const within = (p: string, dir: string): boolean => p === dir || p.startsWith(dir + path.sep);
 

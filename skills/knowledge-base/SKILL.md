@@ -14,7 +14,7 @@ The knowledge base root is the `KB root` path in your context (written by omp-st
 - Obsidian `[[wikilinks]]` (`[[Note Title]]`) link notes; `[[name]]` resolves to `name.md` anywhere in the vault.
 - Put related links at the bottom of a note. Index notes are lists of `[[wikilinks]]`.
 - Follow the vault's existing naming and folder structure. Look at neighbouring notes before creating one.
-- Memory is not kept in the vault: it lives in Hindsight. Save a durable fact with `retain` (or `learn`) and search with `recall`; see the memory rules in your context. A `_memory/` folder in the vault is a read-only archive of earlier memory notes: read it when useful, never add to it.
+- Memory is not kept in the vault: it lives in omp's memory backend (see the memory rules in your context for the tools to use). A `_memory/` folder in the vault is a read-only archive of earlier memory notes: read it when useful, never add to it.
 
 
 ## Workflows

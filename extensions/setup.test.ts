@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import ompStarter, { discoverVaults, renderContextFile, setupKnowledgeBase, startupSteps, type WizardUi } from "./setup";
 import { resolveKb } from "./lib/kb-sources";
-import { HOME, readState, STATE_FILE, type KbSource } from "./lib/state";
+import { HOME, readState, STATE_FILE, type KbSource, type MemoryState } from "./lib/state";
 import { fakeContext, fakePi, resetHome, scriptedUi, seedState, writeFiles, type FakeExec, type FakePi, type Prompt, type ScriptedUi, type UiScript } from "./test-harness";
 
 beforeEach(resetHome);
@@ -27,11 +27,11 @@ function vault(name: string, withKb = true): string {
 
 describe("startupSteps", () => {
 	test("a brand-new install is offered every step", () => {
-		expect(startupSteps({}, false)).toEqual({ skills: true, models: true, jev: true, kb: true, tools: true });
+		expect(startupSteps({}, false)).toEqual({ skills: true, models: true, jev: true, memory: true, kb: true, tools: true });
 	});
 
-	test("an existing install is only offered the steps it never answered, never Jev or language tooling", () => {
-		expect(startupSteps({ agentSkills: "done", models: "skipped" }, true)).toEqual({ skills: false, models: false, jev: false, kb: true, tools: false });
+	test("an existing install is only offered the steps it never answered, never the memory step, Jev or language tooling", () => {
+		expect(startupSteps({ agentSkills: "done", models: "skipped" }, true)).toEqual({ skills: false, models: false, jev: false, memory: false, kb: true, tools: false });
 		expect(startupSteps({ agentSkills: "skipped", models: "done", kb: { status: "skipped" } }, true)).toBeUndefined();
 	});
 });
@@ -66,60 +66,96 @@ describe("discoverVaults", () => {
 });
 
 describe("renderContextFile", () => {
-	test("points at the master map, the projects folder, and every pinned note", () => {
+	const EVERY = home(".omp", "agent", "AGENTS.md");
+	const everySession = (kbRef: string): KbSource => {
+		const kb = path.join(HOME, kbRef.replace("~/", ""));
+		fs.mkdirSync(kb, { recursive: true });
+		return { kbRef, kbPaths: [kb], contextFile: EVERY };
+	};
+
+	test("docs section: points at the master map, the projects folder, and every pinned note, without memory or gate text", () => {
 		const kb = home("vaults", "Notes", "KnowledgeBase");
 		fs.mkdirSync(path.join(kb, "projects"), { recursive: true });
 		fs.writeFileSync(path.join(kb, "_index.md"), "");
-		const text = renderContextFile("~/vaults/Notes/KnowledgeBase", kb, ["conventions.md", "people.md"], false);
+		const source: KbSource = { kbRef: "~/vaults/Notes/KnowledgeBase", kbPaths: [kb], contextFile: home("projects", "AGENTS.md") };
+		const text = renderContextFile(source.contextFile, { kb: { status: "done", sources: [source] }, memory: { status: "done", backend: "hindsight", gateDirs: [HOME] } }, ["conventions.md", "people.md"]) ?? "";
+		expect(text).toContain("# Knowledge base (Obsidian docs)");
 		expect(text).toContain("~/vaults/Notes/KnowledgeBase/_index.md");
 		expect(text).toContain("~/vaults/Notes/KnowledgeBase/projects/<repo>.md");
 		expect(text).toContain("@~/vaults/Notes/KnowledgeBase/conventions.md");
 		expect(text).toContain("@~/vaults/Notes/KnowledgeBase/people.md");
+		expect(text).not.toContain("Memory");
 		expect(text).not.toContain("Commit gate");
 	});
 
-	test("mentions the commit gate and its [skip-mem] escape only when the gate is on", () => {
-		const kb = home("kb");
-		fs.mkdirSync(kb);
-		const gated = renderContextFile("~/kb", kb, [], true);
-		expect(gated).toContain("Commit gate");
-		expect(gated).toContain("[skip-mem]");
-		expect(gated).toContain("`retain` or `learn` also satisfies it");
-		const ungated = renderContextFile("~/kb", kb, [], false);
-		expect(ungated).not.toContain("[skip-mem]");
-		expect(ungated).not.toContain("also satisfies it");
-	});
-
-	test("memory points at the Hindsight tools, not at vault notes, and keeps the data rule", () => {
-		const kb = home("kb");
-		fs.mkdirSync(kb);
-		const text = renderContextFile("~/kb", kb, [], true);
-		for (const fact of ["Memory lives in Hindsight", "`retain`", "`learn`", "`recall`", "patient data", "secrets"]) expect(text).toContain(fact);
-		for (const gone of ["_memory", "MEMORY.md", "kb_remember", "kb_recall"]) expect(text).not.toContain(gone);
-	});
-
 	test("skips pointers to files the vault does not have", () => {
-		const kb = home("kb");
-		fs.mkdirSync(kb);
-		const text = renderContextFile("~/kb", kb, [], false);
+		const source = everySession("~/kb");
+		const text = renderContextFile(source.contextFile, { kb: { status: "done", sources: [source] } }) ?? "";
 		expect(text).not.toContain("_index.md");
 		expect(text).not.toContain("projects/<repo>");
 		expect(text).not.toContain("Always-loaded");
+	});
+
+	test("the every-session file composes the docs, the memory rules of the backend and the commit gate, in that order", () => {
+		const source = everySession("~/kb");
+		const memory: MemoryState = { status: "done", backend: "mnemopi", gateDirs: [home("projects"), home("work")] };
+		const text = renderContextFile(EVERY, { kb: { status: "done", sources: [source] }, memory }) ?? "";
+		const at = (needle: string) => text.indexOf(needle);
+		expect(at("# Knowledge base (Obsidian docs)")).toBeGreaterThanOrEqual(0);
+		expect(at("# Memory")).toBeGreaterThan(at("# Knowledge base"));
+		expect(at("# Commit gate")).toBeGreaterThan(at("# Memory"));
+		for (const fact of ["`retain`", "`recall`", "`reflect`", "`memory_edit`", "patient data", "secrets"]) expect(text).toContain(fact);
+		expect(text).toContain("under ~/projects or ~/work is blocked");
+		expect(text).toContain("a successful `retain`, `learn` or `memory_edit`");
+		expect(text).toContain("`write` or `edit` of a note under `~/kb/`");
+		expect(text).toContain("[skip-mem]");
+	});
+
+	test("each backend gets its own rules, and only the backends that store something carry the data rule", () => {
+		const render = (backend: MemoryState["backend"]) => renderContextFile(EVERY, { memory: { status: "done", backend } });
+		expect(render("hindsight")).toContain("Hindsight");
+		expect(render("local")).toContain("summarises sessions");
+		expect(render("local")).not.toContain("`recall`");
+		expect(render("sharpshooter")).toContain("decision files");
+		for (const backend of ["hindsight", "mnemopi", "local", "sharpshooter"] as const) expect(render(backend)).toContain("patient data");
+		expect(render("off")).toBeUndefined();
+		expect(render(undefined)).toBeUndefined();
+		expect(renderContextFile(EVERY, { memory: { status: "skipped", backend: "hindsight" } })).toBeUndefined();
+	});
+
+	test("the gate section needs something that can satisfy it, and only the every-session file carries memory and gate", () => {
+		const gated = (backend: MemoryState["backend"]): MemoryState => ({ status: "done", backend, gateDirs: [HOME] });
+		expect(renderContextFile(EVERY, { memory: gated("sharpshooter") }) ?? "").not.toContain("Commit gate");
+		const source = everySession("~/kb");
+		expect(renderContextFile(EVERY, { memory: gated("sharpshooter"), kb: { status: "done", sources: [source] } })).toContain("`write` or `edit` of a note under `~/kb/`");
+		const folderSource: KbSource = { ...source, contextFile: home("projects", "AGENTS.md") };
+		const folderFile = renderContextFile(folderSource.contextFile, { kb: { status: "done", sources: [folderSource] }, memory: gated("hindsight") }) ?? "";
+		expect(folderFile).not.toContain("# Memory");
+		expect(renderContextFile(home("projects", "AGENTS.md"), { memory: gated("hindsight") })).toBeUndefined();
+	});
+
+	test("a rewrite keeps the notes the existing file already loads", () => {
+		const source = everySession("~/kb");
+		fs.mkdirSync(path.dirname(EVERY), { recursive: true });
+		fs.writeFileSync(EVERY, "# Knowledge base (Obsidian docs)\n\n## Always-loaded notes\n\n@~/kb/rules.md\n\n@~/kb/people.md\n");
+		const text = renderContextFile(EVERY, { kb: { status: "done", sources: [source] }, memory: { status: "done", backend: "hindsight" } }) ?? "";
+		expect(text).toContain("@~/kb/rules.md");
+		expect(text).toContain("@~/kb/people.md");
 	});
 });
 
 describe("setupKnowledgeBase, first knowledge base", () => {
 	/** Answers for a first run with no vault registered: vault folder typed in, one folder served. */
-	function firstRun(overrides: { vault: string; sub?: string; pinned?: string; gate?: boolean; folder?: string; scope?: string; extraConfirm?: boolean[] }): { ui: ScriptedUi; script: UiScript } {
+	function firstRun(overrides: { vault: string; sub?: string; pinned?: string; folder?: string; scope?: string; extraConfirm?: boolean[] }): { ui: ScriptedUi; script: UiScript } {
 		const script: UiScript = {
-			confirm: [true, ...(overrides.extraConfirm ?? []), overrides.gate ?? true],
+			confirm: [true, ...(overrides.extraConfirm ?? [])],
 			select: [choose(overrides.scope ?? "Sessions under")],
 			input: [overrides.vault, overrides.sub ?? "KnowledgeBase", overrides.pinned ?? "", overrides.folder ?? home("projects")],
 		};
 		return { ui: scriptedUi(script), script };
 	}
 
-	test("wires one vault to one folder: AGENTS.md and a gated source, without a memory folder", async () => {
+	test("wires one vault to one folder: its AGENTS.md holds docs only, with no memory folder and no gate", async () => {
 		const notes = vault("Notes");
 		fs.mkdirSync(home("projects"));
 		const { ui } = firstRun({ vault: notes });
@@ -128,22 +164,24 @@ describe("setupKnowledgeBase, first knowledge base", () => {
 		const kbRoot = path.join(notes, "KnowledgeBase");
 		expect(state).toEqual({
 			status: "done",
-			sources: [{ vault: notes, kbRef: "~/vaults/Notes/KnowledgeBase", kbPaths: [kbRoot], contextFile: home("projects", "AGENTS.md"), gateDir: home("projects") }],
+			sources: [{ vault: notes, kbRef: "~/vaults/Notes/KnowledgeBase", kbPaths: [kbRoot], contextFile: home("projects", "AGENTS.md") }],
 		});
 		const agents = fs.readFileSync(home("projects", "AGENTS.md"), "utf8");
 		expect(agents).toContain("KB root: `~/vaults/Notes/KnowledgeBase/`");
-		expect(agents).toContain("[skip-mem]");
+		expect(agents).toContain("# Knowledge base (Obsidian docs)");
+		expect(agents).not.toContain("[skip-mem]");
+		expect(agents).not.toContain("# Memory");
 		expect(fs.existsSync(path.join(kbRoot, "_memory"))).toBe(false);
 		expect(resolveKb(home("projects", "app"), state)?.kbRef).toBe("~/vaults/Notes/KnowledgeBase");
 		expect(resolveKb(home("elsewhere"), state)).toBeUndefined();
 	});
 
-	test("declining the commit gate leaves the source ungated", async () => {
+	test("never asks about the commit gate, which belongs to the memory step", async () => {
 		fs.mkdirSync(home("projects"));
-		const { ui } = firstRun({ vault: vault("Notes"), gate: false });
-		const state = await setupKnowledgeBase(ui, undefined);
-		expect(state.sources?.[0].gateDir).toBeUndefined();
-		expect(fs.readFileSync(home("projects", "AGENTS.md"), "utf8")).not.toContain("[skip-mem]");
+		const { ui } = firstRun({ vault: vault("Notes") });
+		await setupKnowledgeBase(ui, undefined);
+		expect(ui.prompts.some(p => p.title === "Commit gate")).toBe(false);
+		expect(ui.prompts[0]).toMatchObject({ title: "Obsidian docs", detail: "Also use an Obsidian vault for docs and standards?" });
 	});
 
 	test("pinned notes are written into AGENTS.md, and ones that do not exist yet are reported but kept", async () => {
@@ -159,14 +197,16 @@ describe("setupKnowledgeBase, first knowledge base", () => {
 		expect(ui.notifications.some(n => n.message.includes("rules.md") && n.type === "warning")).toBe(false);
 	});
 
-	test("serving every session writes AGENTS.md into the agent directory and gates the whole home", async () => {
+	test("serving every session writes AGENTS.md into the agent directory, with the memory rules and gate of the memory state", async () => {
 		const { ui } = firstRun({ vault: vault("Notes"), scope: "Every omp session" });
-		ui.prompts.length = 0;
-		const state = await setupKnowledgeBase(ui, undefined);
+		const memory: MemoryState = { status: "done", backend: "hindsight", gateDirs: [HOME] };
+		const state = await setupKnowledgeBase(ui, undefined, memory);
 		const source = state.sources?.[0] as KbSource;
 		expect(source.contextFile).toBe(home(".omp", "agent", "AGENTS.md"));
-		expect(source.gateDir).toBe(HOME);
-		expect(fs.existsSync(source.contextFile)).toBe(true);
+		const text = fs.readFileSync(source.contextFile, "utf8");
+		expect(text.indexOf("# Knowledge base (Obsidian docs)")).toBe(0);
+		expect(text).toContain("# Memory");
+		expect(text).toContain("# Commit gate");
 		expect(resolveKb(home("anywhere"), state)?.kbRef).toBe(source.kbRef);
 	});
 
@@ -188,7 +228,7 @@ describe("setupKnowledgeBase, first knowledge base", () => {
 		writeFiles(HOME, { "Library/Application Support/obsidian/obsidian.json": JSON.stringify({ vaults: { a: { path: known } } }) });
 		fs.mkdirSync(home("projects"));
 		const ui = scriptedUi({
-			confirm: [true, false],
+			confirm: [true],
 			select: [choose("~/vaults/Known"), choose("Sessions under")],
 			input: ["", "", home("projects")],
 		});
@@ -233,12 +273,12 @@ describe("setupKnowledgeBase, first knowledge base", () => {
 		fs.writeFileSync(home("projects", "AGENTS.md"), "my own rules\n");
 
 		const declined = firstRun({ vault: notes, extraConfirm: [] });
-		declined.script.confirm = [true, true, false];
+		declined.script.confirm = [true, false];
 		expect(await setupKnowledgeBase(scriptedUi(declined.script), undefined)).toEqual({ status: "skipped" });
 		expect(fs.readFileSync(home("projects", "AGENTS.md"), "utf8")).toBe("my own rules\n");
 
 		const accepted = firstRun({ vault: notes });
-		accepted.script.confirm = [true, true, true];
+		accepted.script.confirm = [true, true];
 		expect((await setupKnowledgeBase(scriptedUi(accepted.script), undefined)).status).toBe("done");
 		expect(fs.readFileSync(home("projects", "AGENTS.md"), "utf8")).toContain("KB root:");
 		const backups = fs.readdirSync(home("projects")).filter(f => f.startsWith("AGENTS.md.bak-"));
@@ -252,7 +292,7 @@ describe("setupKnowledgeBase, existing knowledge bases", () => {
 	async function configured(): Promise<Awaited<ReturnType<typeof setupKnowledgeBase>>> {
 		fs.mkdirSync(home("projects", "nested"), { recursive: true });
 		fs.mkdirSync(home("other"));
-		const ui = scriptedUi({ confirm: [true, true], select: [choose("Sessions under")], input: [vault("Notes"), "KnowledgeBase", "", home("projects")] });
+		const ui = scriptedUi({ confirm: [true], select: [choose("Sessions under")], input: [vault("Notes"), "KnowledgeBase", "", home("projects")] });
 		return setupKnowledgeBase(ui, undefined);
 	}
 
@@ -266,7 +306,6 @@ describe("setupKnowledgeBase, existing knowledge bases", () => {
 	test("a second knowledge base for another folder is added next to the first, and every-session is no longer offered", async () => {
 		const first = await configured();
 		const ui = scriptedUi({
-			confirm: [true],
 			select: [choose("Add"), choose("Sessions under"), choose("Done")],
 			input: [vault("Second"), "KnowledgeBase", "", home("other")],
 		});
@@ -292,7 +331,7 @@ describe("setupKnowledgeBase, existing knowledge bases", () => {
 	test("adding for a folder that already has a knowledge base replaces that source", async () => {
 		const first = await configured();
 		const ui = scriptedUi({
-			confirm: [true, true],
+			confirm: [true],
 			select: [choose("Add"), choose("Sessions under"), choose("Done")],
 			input: [vault("Replacement"), "KnowledgeBase", "", home("projects")],
 		});
@@ -308,6 +347,31 @@ describe("setupKnowledgeBase, existing knowledge bases", () => {
 		expect(fs.existsSync(home("projects", "AGENTS.md"))).toBe(false);
 		expect(fs.readdirSync(home("projects")).some(f => f.startsWith("AGENTS.md.bak-"))).toBe(true);
 		expect(fs.existsSync(home("vaults", "Notes", "KnowledgeBase", "_index.md"))).toBe(true);
+	});
+
+	test("removing the every-session source rewrites AGENTS.md with the memory rules and gate instead of deleting it", async () => {
+		const memory: MemoryState = { status: "done", backend: "hindsight", gateDirs: [HOME] };
+		const ui = scriptedUi({
+			confirm: [true],
+			select: [choose("Every omp session")],
+			input: [vault("Notes"), "KnowledgeBase", ""],
+		});
+		const first = await setupKnowledgeBase(ui, undefined, memory);
+		const file = home(".omp", "agent", "AGENTS.md");
+		expect(fs.readFileSync(file, "utf8")).toContain("KB root:");
+
+		const remove = scriptedUi({ confirm: [true], select: [choose("Remove a"), choose("every session"), undefined] });
+		expect(await setupKnowledgeBase(remove, first, memory)).toEqual({ status: "skipped" });
+		const text = fs.readFileSync(file, "utf8");
+		expect(text).not.toContain("KB root:");
+		expect(text).toContain("# Memory");
+		expect(text).toContain("# Commit gate");
+		expect(text).not.toContain("a `write` or `edit` of a note");
+		expect(remove.prompts.some(p => p.title === "Delete AGENTS.md?")).toBe(false);
+
+		const bare = scriptedUi({ confirm: [true], select: [choose("Remove a"), choose("every session"), undefined] });
+		await setupKnowledgeBase(bare, first);
+		expect(fs.existsSync(file)).toBe(false);
 	});
 
 	test("declining the AGENTS.md deletion still removes the source but warns that the file stays", async () => {
@@ -440,15 +504,82 @@ describe("/starter jev", () => {
 	});
 });
 
+describe("/starter memory", () => {
+	/** omp that reports `backend` as `memory.backend`. */
+	const ompWith = (backend: string | null) => omp(NO_PLUGINS, args => (args[0] === "config" && args[1] === "get" ? { stdout: JSON.stringify({ value: backend }), code: 0 } : undefined));
+	const sets = (fake: FakePi) => fake.execCalls.filter(c => c.args[0] === "config" && c.args[1] === "set").map(c => c.args.slice(2));
+	const everySessionFile = () => home(".omp", "agent", "AGENTS.md");
+
+	test("marks the current backend, sets only a changed one, records the gate folder and writes the memory rules", async () => {
+		fs.mkdirSync(home("projects"));
+		const fake = starter(ompWith("off"));
+		const ui = await starterCommand(fake, "memory", { select: [choose("hindsight")], confirm: [true], input: [home("projects")] });
+		const title = ui.prompts[0];
+		expect(title.title).toBe("Memory backend (current: off)");
+		expect((title.detail as string[]).map(o => o.split(":")[0])).toEqual(["off", "local", "hindsight", "mnemopi", "sharpshooter"]);
+		expect((title.detail as string[])[0]).toContain("(current)");
+		expect(sets(fake)).toEqual([["memory.backend", "hindsight"]]);
+		expect(readState().memory).toEqual({ status: "done", backend: "hindsight", gateDirs: [home("projects")] });
+		expect(ui.notifications.some(n => n.message.includes("HINDSIGHT_API_URL") && n.message.includes("/settings"))).toBe(true);
+		const text = fs.readFileSync(everySessionFile(), "utf8");
+		expect(text).toContain("# Memory");
+		expect(text).toContain("`retain`");
+		expect(text).toContain("under ~/projects is blocked");
+	});
+
+	test("keeping the current backend changes no omp setting", async () => {
+		const fake = starter(ompWith("mnemopi"));
+		await starterCommand(fake, "memory", { select: [choose("mnemopi")], confirm: [false] });
+		expect(sets(fake)).toEqual([]);
+		expect(readState().memory).toEqual({ status: "done", backend: "mnemopi" });
+		expect(fs.readFileSync(everySessionFile(), "utf8")).toContain("memory_edit");
+	});
+
+	test("a backend with no write tool and no knowledge base offers no gate, and writes no AGENTS.md when off", async () => {
+		const fake = starter(ompWith("local"));
+		const ui = await starterCommand(fake, "memory", { select: [choose("off")] });
+		expect(ui.prompts.some(p => p.title === "Commit gate")).toBe(false);
+		expect(readState().memory).toEqual({ status: "done", backend: "off" });
+		expect(fs.existsSync(everySessionFile())).toBe(false);
+	});
+
+	test("cancelling the choice, or a failing omp, leaves the state alone", async () => {
+		await starterCommand(starter(ompWith("off")), "memory", { select: [undefined] });
+		expect(readState().memory).toEqual({ status: "skipped" });
+
+		seedState({ memory: { status: "done", backend: "off" } });
+		const failing = starter(omp(NO_PLUGINS, args => (args[1] === "set" ? { stderr: "boom", code: 1 } : args[1] === "get" ? { stdout: JSON.stringify({ value: "off" }), code: 0 } : undefined)));
+		const ui = await starterCommand(failing, "memory", { select: [choose("local")] });
+		expect(readState().memory).toEqual({ status: "done", backend: "off" });
+		expect(ui.notifications.find(n => n.type === "error")?.message).toContain("Could not set memory.backend");
+	});
+
+	test("a gate folder that does not exist is refused, leaving the gate off", async () => {
+		const ui = await starterCommand(starter(ompWith("hindsight")), "memory", { select: [choose("hindsight")], confirm: [true], input: [home("nowhere")] });
+		expect(readState().memory).toEqual({ status: "done", backend: "hindsight" });
+		expect(ui.notifications.find(n => n.type === "error")?.message).toContain("not an existing absolute folder");
+	});
+
+	test("rewriting the docs of a migrated state fills in the live backend, so /starter kb keeps the memory rules", async () => {
+		seedState({ memory: { status: "done", gateDirs: [HOME] } });
+		await starterCommand(starter(ompWith("hindsight")), "kb", { confirm: [true], select: [choose("Every omp session")], input: [vault("Notes"), "KnowledgeBase", ""] });
+		expect(readState().memory?.backend).toBe("hindsight");
+		const text = fs.readFileSync(everySessionFile(), "utf8");
+		expect(text).toContain("KB root:");
+		expect(text).toContain("Hindsight");
+		expect(text).toContain("# Commit gate");
+	});
+});
+
 describe("/starter kb", () => {
 	test("runs the knowledge-base step and saves the sources it returns", async () => {
 		fs.mkdirSync(home("projects"));
 		await starterCommand(starter(), "kb", {
-			confirm: [true, true],
+			confirm: [true],
 			select: [choose("Sessions under")],
 			input: [vault("Notes"), "KnowledgeBase", "", home("projects")],
 		});
-		expect(readState().kb?.sources?.[0]).toMatchObject({ kbRef: "~/vaults/Notes/KnowledgeBase", gateDir: home("projects") });
+		expect(readState().kb?.sources?.[0]).toMatchObject({ kbRef: "~/vaults/Notes/KnowledgeBase", contextFile: home("projects", "AGENTS.md") });
 		expect(readState().agentSkills).toBeUndefined();
 	});
 
@@ -509,14 +640,15 @@ describe("the startup wizard", () => {
 
 	test("a brand-new install is offered every step, and each answer is saved", async () => {
 		ompSetupDone();
-		const ui = scriptedUi({ form: [undefined], confirm: [false, false, false, false] });
+		const ui = scriptedUi({ form: [undefined], select: [undefined], confirm: [false, false, false, false] });
 		start(starter(), ui);
 		await settled(() => readState().tooling !== undefined);
-		expect(ui.prompts.map(p => p.title).length).toBe(5);
+		expect(ui.prompts.map(p => p.title).length).toBe(6);
 		expect(readState()).toEqual({
 			agentSkills: "skipped",
 			models: "skipped",
 			jev: "skipped",
+			memory: { status: "skipped" },
 			kb: { status: "skipped" },
 			tooling: { status: "skipped", selected: [], results: {} },
 		});
@@ -556,7 +688,7 @@ describe("the startup wizard", () => {
 	});
 
 	test("while omp's own setup is unfinished it waits, then starts once that setup is recorded", async () => {
-		const ui = scriptedUi({ form: [undefined], confirm: [false, false, false, false] });
+		const ui = scriptedUi({ form: [undefined], select: [undefined], confirm: [false, false, false, false] });
 		const ctx = start(starter(), ui);
 		expect(ctx.timers.size).toBe(1);
 		ctx.tick();
@@ -566,21 +698,21 @@ describe("the startup wizard", () => {
 		ompSetupDone();
 		ctx.tick();
 		await settled(() => readState().tooling !== undefined);
-		expect(ui.prompts).toHaveLength(5);
+		expect(ui.prompts).toHaveLength(6);
 		expect(ctx.timers.size).toBe(0);
 	});
 
 	test("the first prompt submitted starts a waiting wizard immediately, once", async () => {
 		const fake = starter();
-		const ui = scriptedUi({ form: [undefined], confirm: [false, false, false, false] });
+		const ui = scriptedUi({ form: [undefined], select: [undefined], confirm: [false, false, false, false] });
 		const ctx = start(fake, ui);
 		expect(ui.prompts).toEqual([]);
 		await fake.emit("input", {}, ctx);
 		expect(readState().tooling?.status).toBe("skipped");
-		expect(ui.prompts).toHaveLength(5);
+		expect(ui.prompts).toHaveLength(6);
 		expect(ctx.timers.size).toBe(0);
 		await fake.emit("input", {}, ctx);
-		expect(ui.prompts).toHaveLength(5);
+		expect(ui.prompts).toHaveLength(6);
 	});
 
 	test("a step that throws is reported and does not crash the session", async () => {

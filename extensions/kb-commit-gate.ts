@@ -1,25 +1,18 @@
-// Blocks agent `git commit` under a knowledge-base source's gate folder until this session saved a memory
-// or wrote that source's KB: a successful `retain` or `learn` (the Hindsight bank serves every
-// source), or a `write`/`edit` into the KB. `[skip-mem]` in the command bypasses it, and an unattended build
+// Blocks agent `git commit` under a memory gate folder until this session saved something: a successful memory
+// write (`retain`, `learn` or `memory_edit`, whichever the memory backend provides) or a `write`/`edit` into a
+// configured knowledge base. `[skip-mem]` in the command bypasses it, and an unattended build
 // (OMP_STARTER_UNATTENDED=1, see unattended.ts) is never gated: nobody could answer it.
-// Configured by the setup wizard (`kb.sources[].gateDir` / `kbPaths` in ~/.omp/agent/omp-starter.json).
+// Configured by `/starter memory` (`memory.gateDirs` in ~/.omp/agent/omp-starter.json); knowledge bases come from
+// `kb.sources[].kbPaths`.
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { doneSources, inside, resolveKb, sourceOwning } from "./lib/kb-sources";
+import { doneSources, inside, sourceOwning } from "./lib/kb-sources";
 import { kbWritten, markKbWritten, resetKbWritten } from "./lib/kb-write-flag";
+import { MEMORY_WRITE_TOOLS, gateRequirement } from "./lib/memory";
 import { expandHome, readState } from "./lib/state";
 import { GIT_COMMIT, gitCommandDir, resolveFrom, targetPaths, unquote } from "./lib/tool-input";
 
-/**
- * The tools whose successful result counts as a knowledge-base write, and what each one writes to: the files it
- * names (counted only inside a knowledge base), or the Hindsight bank, which every knowledge base shares.
- */
-const WRITE_TOOLS: Record<string, "files" | "bank"> = {
-	write: "files",
-	edit: "files",
-	retain: "bank",
-	learn: "bank",
-};
+const FILE_TOOLS: readonly string[] = ["write", "edit"];
 
 export default function kbCommitGate(pi: ExtensionAPI): void {
 	const reset = (ctx: { agent?: { kind: string } }) => {
@@ -29,38 +22,35 @@ export default function kbCommitGate(pi: ExtensionAPI): void {
 	pi.on("session_switch", (_event, ctx) => reset(ctx));
 
 	pi.on("tool_result", (event, ctx) => {
-		const target = WRITE_TOOLS[event.toolName];
-		if (event.isError || !target) return;
-		const kb = readState().kb;
-		if (target === "bank") {
-			for (const source of doneSources(kb)) markKbWritten(source.kbRef);
+		if (event.isError) return;
+		if (MEMORY_WRITE_TOOLS.includes(event.toolName)) {
+			markKbWritten();
 			return;
 		}
+		if (!FILE_TOOLS.includes(event.toolName)) return;
+		const kb = readState().kb;
 		for (const raw of targetPaths(event.toolName, (event.input ?? {}) as Record<string, unknown>)) {
 			const p = unquote(raw.trim());
-			// `vault://` addresses the Obsidian vault, taken as the one serving this session's folder.
-			const source = p.startsWith("vault://") ? resolveKb(ctx.cwd, kb) : sourceOwning(resolveFrom(ctx.cwd, p), kb);
-			if (source) markKbWritten(source.kbRef);
+			// `vault://` addresses the Obsidian vault of any configured knowledge base.
+			if (p.startsWith("vault://") ? doneSources(kb).length : sourceOwning(resolveFrom(ctx.cwd, p), kb)) markKbWritten();
 		}
 	});
 
 	pi.on("tool_call", (event, ctx) => {
-		if (event.toolName !== "bash" || process.env.OMP_STARTER_UNATTENDED === "1") return;
+		if (event.toolName !== "bash" || process.env.OMP_STARTER_UNATTENDED === "1" || kbWritten()) return;
 		const command = String(event.input.command ?? "");
 		const match = GIT_COMMIT.exec(command);
 		if (!match || command.includes("[skip-mem]")) return;
+		const { memory, kb } = readState();
+		if (memory?.status !== "done") return;
 		const dir = gitCommandDir(command, match, event.input.cwd, ctx.cwd);
-		// The deepest gate folder holding the commit decides which KB must have been written.
-		const source = doneSources(readState().kb)
-			.filter(s => s.gateDir && inside(dir, path.resolve(expandHome(s.gateDir))))
-			.sort((a, b) => b.gateDir!.length - a.gateDir!.length)[0];
-		if (!source || kbWritten(source.kbRef)) return;
+		if (!(memory.gateDirs ?? []).some(gate => inside(dir, path.resolve(expandHome(gate))))) return;
+		const requirement = gateRequirement(memory.backend, doneSources(kb).map(s => s.kbRef));
+		// A backend with no write tool and no knowledge base leaves nothing that could satisfy the gate.
+		if (!requirement) return;
 		return {
 			block: true,
-			reason:
-				"memory-before-code: commit blocked. Save the relevant facts first: retain or learn a memory, " +
-				`or write a note under ${source.kbRef}/ (e.g. projects/) with the write/edit tools. ` +
-				"Add [skip-mem] to the commit message if the commit carries no new facts.",
+			reason: `memory-before-code: commit blocked. Save the relevant facts first: ${requirement}. Add [skip-mem] to the commit message if the commit carries no new facts.`,
 		};
 	});
 }

@@ -70,8 +70,6 @@ export interface KbSpec {
 	name: string;
 	/** Session folder the knowledge base serves; omit for a knowledge base serving every session. */
 	folder?: string;
-	/** Turns the commit gate on for `folder` (every-session sources gate the whole home). */
-	gate?: boolean;
 }
 
 export interface SeededKb {
@@ -93,7 +91,6 @@ export function seedKb(spec: KbSpec): SeededKb {
 		kbRef: tildify(root),
 		kbPaths: [root],
 		contextFile: path.join(folder, "AGENTS.md"),
-		...(spec.gate ? { gateDir: spec.folder ?? home } : {}),
 	};
 	return { source, root, folder };
 }

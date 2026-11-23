@@ -1,13 +1,15 @@
 // First-run setup wizard: a skill-kit picker (pstack, Matt Pocock, addy, spec-kit), Claude-first subscription presets,
-// an optional TypeSafe Jev judge, and an Obsidian vault as omp's knowledge base.
+// an optional TypeSafe Jev judge, omp's memory backend with the commit gate, and optional Obsidian vaults as docs.
 // Runs automatically in the TUI until each step is done or skipped; `/starter` reruns it.
+// `renderContextFile` composes every AGENTS.md this plugin writes: vault docs, memory rules and the commit gate.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { JEV_MODEL, setupJev } from "./lib/jev";
 import { setupModels } from "./lib/routing";
-import { EVERY_SESSION_DIR, doneSources, overlapProblem, servesEverySession, sourceFolder } from "./lib/kb-sources";
-import { HOME, STATE_FILE, expandHome, readState, readTooling, saveTooling, tildify, updateState, type KbSource, type KbState, type SetupState } from "./lib/state";
+import { EVERY_SESSION_DIR, EVERY_SESSION_FILE, doneSources, existingFolder, overlapProblem, servesEverySession, sourceFolder } from "./lib/kb-sources";
+import { gateSection, memorySection, setupMemory, withLiveBackend } from "./lib/memory";
+import { HOME, STATE_FILE, expandHome, readState, readTooling, saveTooling, tildify, updateState, type KbSource, type KbState, type MemoryState, type SetupState } from "./lib/state";
 import type { ToolsUi } from "./lib/tooling";
 import { checkPluginUpdates } from "./lib/plugin-updates";
 import { setupSkillKits } from "./lib/skill-kits";
@@ -57,7 +59,10 @@ export function discoverVaults(): string[] {
 	return [...new Set(found)].filter(p => p !== ICLOUD_OBSIDIAN && fs.existsSync(p));
 }
 
-export function renderContextFile(kbRef: string, kbAbs: string, pinned: string[], gate: boolean): string {
+/** The docs section of a vault source: pointers into its knowledge base and the notes loaded in every session. */
+function renderDocsSection(source: KbSource, pinned: string[]): string {
+	const kbRef = source.kbRef;
+	const kbAbs = expandHome(kbRef);
 	const has = (rel: string) => fs.existsSync(path.join(kbAbs, rel));
 	const pointers = [
 		has("_index.md") && `- Start from the master map: \`${kbRef}/_index.md\`.`,
@@ -70,19 +75,39 @@ export function renderContextFile(kbRef: string, kbAbs: string, pinned: string[]
 	const pinnedSection = pinned.length
 		? `\n## Always-loaded notes\n\n${pinned.map(rel => `@${kbRef}/${rel}`).join("\n\n")}\n`
 		: "";
-	const commitGate = gate
-		? `\n### Commit gate\n\n\`git commit\` is blocked until a \`${kbRef}/\` file has been written in the session (\`write\` or \`edit\`); a successful \`retain\` or \`learn\` also satisfies it. Save the relevant facts first; for commits with no new facts (typos, formatting) put \`[skip-mem]\` in the commit message.\n`
-		: "";
-	return `# Knowledge base (Obsidian)
+	return `# Knowledge base (Obsidian docs)
 
 KB root: \`${kbRef}/\`. Single source of truth for project context and conventions.
-${pointers.length ? `\n${pointers.join("\n")}\n` : ""}${pinnedSection}
-## Memory
+${pointers.length ? `\n${pointers.join("\n")}\n` : ""}${pinnedSection}`;
+}
 
-Memory lives in Hindsight, not in this vault; relevant memories are recalled when a session starts. When you learn a durable fact (decision, gotcha, convention, user preference, resolved failure), save it with \`retain\` or \`learn\`. Search past memories with \`recall\`. Update a stale memory instead of adding a contradicting one.
+/** Notes a context file already loads from `kbRef` (its `@<kbRef>/<note>` lines), so a re-render keeps them. */
+function pinnedNotes(file: string, kbRef: string): string[] {
+	let text: string;
+	try {
+		text = fs.readFileSync(file, "utf8");
+	} catch {
+		return [];
+	}
+	const prefix = `@${kbRef}/`;
+	return text.split("\n").filter(line => line.startsWith(prefix)).map(line => line.slice(prefix.length).trim());
+}
 
-Never retain database query results, tool output that holds patient data, or secrets.
-${commitGate}`;
+/**
+ * The content of one AGENTS.md this plugin owns, or undefined when nothing belongs in it. A file holds the docs of the
+ * vault source whose `contextFile` it is; the every-session file also holds the memory rules for `memory.backend` and the
+ * commit gate. `pinned` replaces the notes the existing file loads (a source being added or changed).
+ */
+export function renderContextFile(file: string, state: Pick<SetupState, "kb" | "memory">, pinned?: string[]): string | undefined {
+	const sources = doneSources(state.kb);
+	const source = sources.find(s => s.contextFile === file);
+	const everySession = file === EVERY_SESSION_FILE;
+	const sections = [
+		source && renderDocsSection(source, pinned ?? pinnedNotes(file, source.kbRef)),
+		everySession && state.memory?.status === "done" && memorySection(state.memory.backend),
+		everySession && gateSection(state.memory, sources.map(s => s.kbRef)),
+	].filter((section): section is string => Boolean(section));
+	return sections.length ? sections.join("\n") : undefined;
 }
 
 /** Writes `content` to `file`, backing up a differing existing file after confirmation. */
@@ -127,8 +152,11 @@ function vaultLink(vault: string): string {
 	throw new Error(`No free link name for ${vault} (tried ${tildify(KB_LINK)}-${slug}…)`);
 }
 
-/** Asks for one vault + folder and writes its AGENTS.md. `sources` are the existing ones (same folder = replace). */
-async function addSource(ui: WizardUi, sources: KbSource[]): Promise<KbSource | undefined> {
+/**
+ * Asks for one vault + folder and writes the AGENTS.md that serves it. `sources` are the existing ones (same folder =
+ * replace); `memory` decides what else the every-session file carries.
+ */
+async function addSource(ui: WizardUi, sources: KbSource[], memory: MemoryState | undefined): Promise<KbSource | undefined> {
 	const vaults = discoverVaults();
 	let vault: string | undefined;
 	if (vaults.length) {
@@ -168,61 +196,54 @@ async function addSource(ui: WizardUi, sources: KbSource[]): Promise<KbSource | 
 	const scope = await ui.select("Load this knowledge base in", everySessionAllowed ? [EVERY_SESSION, ONE_FOLDER] : [ONE_FOLDER]);
 	if (!scope) return undefined;
 	let folder = EVERY_SESSION_DIR;
-	let gateDir = HOME;
 	if (scope === ONE_FOLDER) {
-		const rawDir = expandHome((await ui.input("Folder", "~/projects"))?.trim() || "~/projects");
-		if (!path.isAbsolute(rawDir) || !fs.statSync(rawDir, { throwIfNoEntry: false })?.isDirectory()) {
-			ui.notify(`${rawDir} is not an existing absolute folder. Use a path like ~/projects.`, "error");
-			return undefined;
-		}
-		folder = path.resolve(rawDir);
-		gateDir = folder;
+		const chosen = existingFolder(ui, (await ui.input("Folder", "~/projects"))?.trim() || "~/projects");
+		if (!chosen) return undefined;
+		folder = chosen;
 	}
 	const contextFile = path.join(folder, "AGENTS.md");
 	const replaced = sources.find(s => s.contextFile === contextFile);
-	const problem = overlapProblem(folder, sources.filter(s => s !== replaced));
+	const others = sources.filter(s => s !== replaced);
+	const problem = overlapProblem(folder, others);
 	if (problem) {
 		ui.notify(`Can't add this knowledge base: ${problem}.`, "error");
 		return undefined;
 	}
-	const gate = await ui.confirm(
-		"Commit gate",
-		`Block agent \`git commit\` under ${tildify(gateDir)} until a note in this knowledge base was written or a memory was saved in the session ([skip-mem] bypasses)?`,
-	);
 	const kbRef = tildify(kbRootAbs);
-	if (!(await writeWithBackup(ui, contextFile, renderContextFile(kbRef, kbAbs, pinned, gate)))) return undefined;
+	const source: KbSource = { vault: link ?? vault, kbRef, kbPaths: [...new Set([kbRootAbs, kbAbs])], contextFile };
+	if (!(await writeContextFile(ui, contextFile, { kb: { status: "done", sources: [...others, source] }, memory }, pinned))) return undefined;
 	ui.notify(`Knowledge base wired into ${tildify(contextFile)}. Takes effect in new sessions.`, "info");
-	return {
-		vault: link ?? vault,
-		kbRef,
-		kbPaths: [...new Set([kbRootAbs, kbAbs])],
-		contextFile,
-		...(gate ? { gateDir } : {}),
-	};
+	return source;
 }
 
-/** Backs up and deletes a removed source's AGENTS.md when the user agrees; the vault is never touched. */
-async function retireContextFile(ui: WizardUi, file: string): Promise<void> {
-	if (!fs.existsSync(file)) return;
-	if (!(await ui.confirm("Delete AGENTS.md?", `Delete ${tildify(file)}? It still points sessions at the removed knowledge base. A backup is kept next to it.`))) {
-		ui.notify(`${tildify(file)} kept; edit it so it no longer names the removed knowledge base.`, "warning");
-		return;
+/** Backs up and deletes an AGENTS.md nothing belongs in any more when the user agrees. False when the file stays. */
+async function retireContextFile(ui: WizardUi, file: string): Promise<boolean> {
+	if (!fs.existsSync(file)) return true;
+	if (!(await ui.confirm("Delete AGENTS.md?", `Delete ${tildify(file)}? It holds rules for a knowledge base or memory backend that is no longer set up. A backup is kept next to it.`))) {
+		return false;
 	}
 	fs.copyFileSync(file, `${file}.bak-${Date.now()}`);
 	fs.rmSync(file);
+	return true;
+}
+
+/** Brings `file` in line with `state` through the composer: writes it, or retires it when nothing belongs in it. False when the user kept the old file. */
+async function writeContextFile(ui: WizardUi, file: string, state: Pick<SetupState, "kb" | "memory">, pinned?: string[]): Promise<boolean> {
+	const content = renderContextFile(file, state, pinned);
+	return content === undefined ? retireContextFile(ui, file) : writeWithBackup(ui, file, content);
 }
 
 /**
- * First run: one knowledge base. Later runs: a menu to add or replace one per folder or remove one.
- * Cancelling returns the current state unchanged.
+ * Optional Obsidian docs. First run: one knowledge base. Later runs: a menu to add or replace one per folder or remove one.
+ * Cancelling returns the current state unchanged. `memory` is what the every-session AGENTS.md carries besides docs.
  */
-export async function setupKnowledgeBase(ui: WizardUi, current: KbState | undefined): Promise<KbState> {
+export async function setupKnowledgeBase(ui: WizardUi, current: KbState | undefined, memory?: MemoryState): Promise<KbState> {
 	let sources = doneSources(current);
 	if (!sources.length) {
-		if (!(await ui.confirm("Obsidian knowledge base", "Use an Obsidian vault as omp's knowledge base?"))) {
+		if (!(await ui.confirm("Obsidian docs", "Also use an Obsidian vault for docs and standards?"))) {
 			return { status: "skipped" };
 		}
-		const added = await addSource(ui, []);
+		const added = await addSource(ui, [], memory);
 		return added ? { status: "done", sources: [added] } : { status: "skipped" };
 	}
 	for (;;) {
@@ -233,14 +254,17 @@ export async function setupKnowledgeBase(ui: WizardUi, current: KbState | undefi
 		]);
 		if (!choice || choice === KB_DONE) break;
 		if (choice === ADD_SOURCE) {
-			const added = await addSource(ui, sources);
+			const added = await addSource(ui, sources, memory);
 			if (added) sources = [...sources.filter(s => s.contextFile !== added.contextFile), added];
 		} else if (choice === REMOVE_SOURCE) {
 			const picked = await ui.select("Remove which knowledge base?", sources.map(sourceLabel));
 			const target = sources.find(s => sourceLabel(s) === picked);
 			if (!target) continue;
-			await retireContextFile(ui, target.contextFile);
 			sources = sources.filter(s => s !== target);
+			// The every-session file keeps its memory rules and gate; any other file has nothing left and is retired.
+			if (!(await writeContextFile(ui, target.contextFile, { kb: { status: "done", sources }, memory }))) {
+				ui.notify(`${tildify(target.contextFile)} kept; edit it so it no longer names the removed knowledge base.`, "warning");
+			}
 		}
 	}
 	return sources.length ? { status: "done", sources } : { status: "skipped" };
@@ -252,24 +276,26 @@ export interface Steps {
 	skills: boolean;
 	models: boolean;
 	jev: boolean;
+	memory: boolean;
 	kb: boolean;
 	tools: boolean;
 }
 
 /**
- * Steps the automatic wizard offers. Language tooling and the optional Jev judge are offered only to a brand-new install
- * (no state file existed before the wizard began); existing installs opt in with `/starter tools` or `/starter jev`,
- * so a new field never re-prompts them.
+ * Steps the automatic wizard offers. The memory step, language tooling and the optional Jev judge are offered only to a
+ * brand-new install (no state file existed before the wizard began); existing installs opt in with `/starter memory`,
+ * `/starter tools` or `/starter jev`, so a new field never re-prompts them.
  */
 export function startupSteps(state: SetupState, stateFileExisted: boolean): Steps | undefined {
 	const steps: Steps = {
 		skills: !state.agentSkills,
 		models: !state.models,
 		jev: !stateFileExisted,
+		memory: !stateFileExisted,
 		kb: !state.kb,
 		tools: !stateFileExisted,
 	};
-	return steps.skills || steps.models || steps.jev || steps.kb || steps.tools ? steps : undefined;
+	return steps.skills || steps.models || steps.jev || steps.memory || steps.kb || steps.tools ? steps : undefined;
 }
 
 /** Whether omp's own first-run setup has not finished yet: it records `setupVersion` in config.yml when done. */
@@ -306,8 +332,21 @@ export default function ompStarter(pi: ExtensionAPI): void {
 				ui.notify(`Jev setup failed: ${String(error)}`, "error");
 			}
 		}
+		if (steps.memory) {
+			const state = readState();
+			const memory = await setupMemory(ui, exec, state);
+			updateState({ memory });
+			// Rewrite the every-session AGENTS.md with the memory rules and the gate, next to the docs of a vault serving it.
+			if (memory.status === "done" && !(await writeContextFile(ui, EVERY_SESSION_FILE, { kb: state.kb, memory }))) {
+				ui.notify(`${tildify(EVERY_SESSION_FILE)} was not updated, so it has no memory rules for the new backend.`, "warning");
+			}
+		}
 		if (steps.kb) {
-			updateState({ kb: await setupKnowledgeBase(ui, readState().kb) });
+			const state = readState();
+			// A migrated memory state has no backend yet; the docs rewrite must not drop its memory rules.
+			const memory = await withLiveBackend(exec, state.memory);
+			if (memory?.backend && memory.backend !== state.memory?.backend) updateState({ memory });
+			updateState({ kb: await setupKnowledgeBase(ui, state.kb, memory) });
 		}
 		if (steps.tools) {
 			try {
@@ -355,7 +394,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 
 
 	pi.registerCommand("starter", {
-		description: "Setup or confirmed plugin updates. Args: updates | skills | models | jev | kb | tools (default: setup all)",
+		description: "Setup or confirmed plugin updates. Args: updates | skills | models | jev | memory | kb | tools (default: setup all)",
 		handler: async (args, ctx) => {
 			const which = args.trim();
 			if (which === "updates") {
@@ -376,6 +415,7 @@ export default function ompStarter(pi: ExtensionAPI): void {
 					skills: !which || which === "skills",
 					models: !which || which === "models",
 					jev: !which || which === "jev",
+					memory: !which || which === "memory",
 					kb: !which || which === "kb",
 					tools: !which || which === "tools",
 				},

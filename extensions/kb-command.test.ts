@@ -4,6 +4,7 @@ import * as path from "node:path";
 import kbCommand from "./kb-command";
 import { markKbWritten } from "./lib/kb-write-flag";
 import { HOME } from "./lib/state";
+import type { MemoryState } from "./lib/state";
 import { fakeContext, fakePi, resetHome, scriptedUi, seedKb, seedState, type FakePi, type KbSpec, type Notification, type SeededKb } from "./test-harness";
 
 beforeEach(resetHome);
@@ -15,9 +16,9 @@ interface Fixture {
 	kbCommand(args: string, cwd?: string): Promise<Notification[]>;
 }
 
-function fixture(spec: Partial<KbSpec> = {}): Fixture {
+function fixture(spec: Partial<KbSpec> = {}, memory?: MemoryState): Fixture {
 	const kb = seedKb({ name: "work-kb", folder: path.join(HOME, "work"), ...spec });
-	seedState({ kb: { status: "done", sources: [kb.source] } });
+	seedState({ kb: { status: "done", sources: [kb.source] }, ...(memory ? { memory } : {}) });
 	const fake = fakePi();
 	kbCommand(fake.pi);
 	return {
@@ -42,17 +43,32 @@ describe("/kb status", () => {
 		const f = fixture();
 		const shown = only(await f.kbCommand(""));
 		expect(shown.type).toBe("info");
-		for (const fact of ["Knowledge base ~/work-kb serves ~/work.", "Vault: ~/work-kb", "Commit gate: off"]) {
+		for (const fact of ["Knowledge base ~/work-kb serves ~/work.", "Vault: ~/work-kb", "Memory: not set up", "Commit gate: off"]) {
 			expect(shown.message).toContain(fact);
 		}
 		expect((await f.kbCommand("status"))[0].message).toBe(shown.message);
 	});
 
-	test("shows the commit gate state, flipping once the session writes to the knowledge base or saves a memory", async () => {
-		const f = fixture({ gate: true });
-		expect(only(await f.kbCommand("status")).message).toContain("Commit gate (~/work): blocks git commit until this session writes a note to the KB or saves a memory");
-		markKbWritten(f.kb.source.kbRef);
-		expect(only(await f.kbCommand("status")).message).toContain("Commit gate (~/work): satisfied, a note or memory was written this session");
+	test("shows the memory backend, or that it is unknown and where to look", async () => {
+		const set = fixture({}, { status: "done", backend: "mnemopi" });
+		expect(only(await set.kbCommand("status")).message).toContain("Memory backend: mnemopi");
+		const migrated = fixture({}, { status: "done", gateDirs: [path.join(HOME, "work")] });
+		expect(only(await migrated.kbCommand("status")).message).toContain("Memory backend: unknown, see /settings → Memory");
+	});
+
+	test("shows the commit gate state, flipping once the session saves a memory or writes to the knowledge base", async () => {
+		const f = fixture({}, { status: "done", backend: "hindsight", gateDirs: [path.join(HOME, "work")] });
+		expect(only(await f.kbCommand("status")).message).toContain("Commit gate (~/work): blocks git commit until this session saves a memory or writes a note to the KB");
+		markKbWritten();
+		expect(only(await f.kbCommand("status")).message).toContain("Commit gate (~/work): satisfied, a memory or note was saved this session");
+	});
+
+	test("shows the memory backend even when no knowledge base serves the folder or none exists", async () => {
+		const f = fixture({}, { status: "done", backend: "local" });
+		fs.mkdirSync(path.join(HOME, "unrelated"));
+		expect(only(await f.kbCommand("status", path.join(HOME, "unrelated"))).message).toContain("Memory backend: local");
+		seedState({ memory: { status: "done", backend: "local" } });
+		expect(only(await f.kbCommand("status")).message).toContain("Memory backend: local");
 	});
 
 	test("lists the other knowledge bases and what they serve", async () => {

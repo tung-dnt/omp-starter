@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import kbCommitGate from "./kb-commit-gate";
 import { type FakePi, fakeContext, fakePi, resetHome, seedKb, seedState, type SeededKb } from "./test-harness";
-import { HOME, type KbSource } from "./lib/state";
+import { HOME, type KbSource, type MemoryBackend, type MemoryState } from "./lib/state";
 
 beforeEach(resetHome);
 
@@ -26,11 +26,19 @@ interface Gate {
 	result(toolName: string, options?: { isError?: boolean }): void;
 }
 
-/** Two gated knowledge bases: `work-kb` serves ~/work, `personal-kb` serves ~/personal. */
-function gate(sources?: (work: SeededKb, personal: SeededKb) => KbSource[]): Gate {
-	const work = seedKb({ name: "work-kb", folder: path.join(HOME, "work"), gate: true });
-	const personal = seedKb({ name: "personal-kb", folder: path.join(HOME, "personal"), gate: true });
-	seedState({ kb: { status: "done", sources: sources ? sources(work, personal) : [work.source, personal.source] } });
+interface GateOptions {
+	sources?: (work: SeededKb, personal: SeededKb) => KbSource[];
+	memory?: Partial<MemoryState>;
+}
+
+/** Two knowledge bases, `work-kb` serving ~/work and `personal-kb` serving ~/personal; the commit gate covers both folders. */
+function gate({ sources, memory }: GateOptions = {}): Gate {
+	const work = seedKb({ name: "work-kb", folder: path.join(HOME, "work") });
+	const personal = seedKb({ name: "personal-kb", folder: path.join(HOME, "personal") });
+	seedState({
+		memory: { status: "done", backend: "hindsight", gateDirs: [work.folder, personal.folder], ...memory },
+		kb: { status: "done", sources: sources ? sources(work, personal) : [work.source, personal.source] },
+	});
 	const fake = fakePi();
 	kbCommitGate(fake.pi);
 	fs.mkdirSync(path.join(work.folder, "repo"), { recursive: true });
@@ -53,13 +61,14 @@ function gate(sources?: (work: SeededKb, personal: SeededKb) => KbSource[]): Gat
 }
 
 describe("git commit under a gated folder", () => {
-	test("is blocked until a file in the serving knowledge base is written, naming that knowledge base", () => {
+	test("is blocked until a file in a knowledge base is written, naming the memory tools and the knowledge bases", () => {
 		const g = gate();
 		const blocked = g.commit('git commit -m "feat: add thing"');
 		expect(blocked?.block).toBe(true);
 		expect(blocked?.reason).toContain(g.work.source.kbRef);
+		expect(blocked?.reason).toContain(g.personal.source.kbRef);
 		expect(blocked?.reason).toContain("[skip-mem]");
-		expect(blocked?.reason).toContain("retain");
+		expect(blocked?.reason).toContain("`retain` or `learn`");
 
 		g.write("write", { path: note(g.work) });
 		expect(g.commit('git commit -m "feat: add thing"')).toBeUndefined();
@@ -74,10 +83,10 @@ describe("git commit under a gated folder", () => {
 		expect(g.commit("git commit -m wip")?.block).toBe(true);
 	});
 
-	test("a write into another knowledge base does not satisfy this one", () => {
+	test("a note in any configured knowledge base satisfies the gate of every folder", () => {
 		const g = gate();
 		g.write("write", { path: note(g.personal) });
-		expect(g.commit("git commit -m wip")?.block).toBe(true);
+		expect(g.commit("git commit -m wip")).toBeUndefined();
 		expect(g.commit("git commit -m wip", { cwd: g.personal.folder })).toBeUndefined();
 	});
 
@@ -101,12 +110,17 @@ describe("git commit under a gated folder", () => {
 		}
 	});
 
-	test("counts a vault:// write as a write to the knowledge base serving the session folder", () => {
+	test("counts a vault:// write as a write to the vault", () => {
 		const g = gate();
 		g.write("write", { path: "vault://projects/fact.md" });
 		expect(g.commit("git commit -m wip")).toBeUndefined();
-		// The personal knowledge base was not written, so its folder stays gated.
-		expect(g.commit("git commit -m wip", { cwd: g.personal.folder })?.block).toBe(true);
+	});
+
+	test("a vault:// write counts for nothing when no knowledge base is configured", () => {
+		const g = gate({ sources: () => [] });
+		g.write("write", { path: "vault://projects/fact.md" });
+		g.result("recall");
+		expect(g.commit("git commit -m wip")?.block).toBe(true);
 	});
 
 	test("counts a relative path, resolved against the session folder", () => {
@@ -123,8 +137,8 @@ describe("git commit under a gated folder", () => {
 });
 
 describe("saving a memory", () => {
-	test("a successful retain or learn result lets the commit through", () => {
-		for (const tool of ["retain", "learn"]) {
+	test("a successful retain, learn or memory_edit result lets the commit through", () => {
+		for (const tool of ["retain", "learn", "memory_edit"]) {
 			resetHome();
 			const g = gate();
 			expect(g.commit("git commit -m wip")?.block).toBe(true);
@@ -133,7 +147,7 @@ describe("saving a memory", () => {
 		}
 	});
 
-	test("one memory write satisfies every gated knowledge base, since they share one bank", () => {
+	test("one memory write satisfies every gated folder, since they share one memory", () => {
 		const g = gate();
 		g.result("retain");
 		expect(g.commit("git commit -m wip")).toBeUndefined();
@@ -171,15 +185,15 @@ describe("which folder the commit runs in", () => {
 
 	test("`git -C <dir>` and the bash `cwd` argument pick the gated folder, relative to where each applies", () => {
 		const g = gate();
-		expect(g.commit(`git -C ${g.personal.folder} commit -m wip`, { cwd: path.join(HOME, "elsewhere") })?.reason).toContain(g.personal.source.kbRef);
-		expect(g.commit("git -C ../work/repo commit -m wip", { cwd: path.join(HOME, "elsewhere") })?.reason).toContain(g.work.source.kbRef);
+		expect(g.commit(`git -C ${g.personal.folder} commit -m wip`, { cwd: path.join(HOME, "elsewhere") })?.block).toBe(true);
+		expect(g.commit("git -C ../work/repo commit -m wip", { cwd: path.join(HOME, "elsewhere") })?.block).toBe(true);
 		expect(g.commit("git commit -m wip", { cwd: path.join(HOME, "elsewhere"), input: { cwd: g.work.folder } })?.block).toBe(true);
 		expect(g.commit(`git -C ${HOME}/elsewhere commit -m wip`)).toBeUndefined();
 	});
 
 	test("~ in a path expands to the home directory", () => {
 		const g = gate();
-		expect(g.commit("git -C ~/personal commit -m wip", { cwd: path.join(HOME, "elsewhere") })?.reason).toContain(g.personal.source.kbRef);
+		expect(g.commit("git -C ~/personal commit -m wip", { cwd: path.join(HOME, "elsewhere") })?.block).toBe(true);
 	});
 
 	test("commits outside every gated folder pass", () => {
@@ -210,18 +224,50 @@ describe("what counts as a commit", () => {
 	});
 });
 
+describe("what the block message names", () => {
+	test("the write tools of the memory backend", () => {
+		const names = (backend: MemoryBackend | undefined) => gate({ memory: { backend } }).commit("git commit -m wip")?.reason ?? "";
+		expect(names("mnemopi")).toContain("`retain`, `learn` or `memory_edit`");
+		expect(names("local")).toContain("a successful `learn`");
+		expect(names(undefined)).toContain("a successful memory tool call such as `retain` or `learn`");
+	});
+
+	test("only the knowledge bases when the backend has no write tool", () => {
+		for (const backend of ["off", "sharpshooter"] as const) {
+			resetHome();
+			const reason = gate({ memory: { backend } }).commit("git commit -m wip")?.reason ?? "";
+			expect(reason).toContain("a `write` or `edit` of a note under");
+			expect(reason).not.toContain("retain");
+		}
+	});
+});
+
 describe("when the gate does not apply", () => {
-	test("a knowledge base without a gate folder never blocks", () => {
-		const g = gate((work, personal) => [{ ...work.source, gateDir: undefined }, personal.source]);
+	test("no gate folders never block", () => {
+		for (const gateDirs of [undefined, []]) {
+			resetHome();
+			expect(gate({ memory: { gateDirs } }).commit("git commit -m wip")).toBeUndefined();
+		}
+	});
+
+	test("a backend with no write tool and no knowledge base leaves nothing to satisfy the gate, so it never blocks", () => {
+		const g = gate({ memory: { backend: "sharpshooter" }, sources: () => [] });
 		expect(g.commit("git commit -m wip")).toBeUndefined();
 	});
 
-	test("skipped or missing knowledge-base setup never blocks", () => {
+	test("skipped or missing memory setup never blocks", () => {
 		const skipped = gate();
-		seedState({ kb: { status: "skipped" } });
+		seedState({ memory: { status: "skipped", gateDirs: [skipped.work.folder] } });
 		expect(skipped.commit("git commit -m wip")).toBeUndefined();
 		seedState({});
 		expect(skipped.commit("git commit -m wip")).toBeUndefined();
+	});
+
+	test("0.39 state, with the gate on a knowledge-base source, is migrated and keeps blocking", () => {
+		const g = gate();
+		seedState({ kb: { status: "done", sources: [{ ...g.work.source, gateDir: g.work.folder }] } } as never);
+		expect(g.commit("git commit -m wip")?.block).toBe(true);
+		expect(g.commit("git commit -m wip", { cwd: path.join(HOME, "elsewhere") })).toBeUndefined();
 	});
 });
 
@@ -252,7 +298,7 @@ describe("unattended builds", () => {
 });
 
 describe("when the write flag resets", () => {
-	test("a new main session or a session switch asks for a fresh KB write", () => {
+	test("a new main session or a session switch asks for a fresh save", () => {
 		for (const event of ["session_start", "session_switch"]) {
 			const g = gate();
 			g.write("write", { path: note(g.work) });

@@ -7,7 +7,8 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 | **Skill kits** *(optional)* | A checkbox picker for any combination of [pstack](https://github.com/cursor/plugins/tree/main/pstack), [Matt Pocock's skills](https://github.com/mattpocock/skills), [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) and [spec-kit](https://github.com/github/spec-kit), with a warning when the chosen kits cover the same job. See [Skill kits](#skill-kits-starter-skills). |
 | **Model routing** *(Claude-first)* | Saves `claude` and `codex` subscription presets without requiring a login. When the required Claude models are available, also routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels; otherwise keeps the current routing. Using a preset requires its provider login. |
 | **TypeSafe Jev judge** *(optional)* | Routes omp's `judge` role to TypeSafe Jev after checking your API key, and stores the key in `~/.omp/agent/.env` (mode 600). Jev then answers `question` rules and picks the thinking level per prompt. Offered on a brand-new install; existing installs run `/starter jev`. See [TypeSafe Jev judge](#typesafe-jev-judge-starter-jev). |
-| **Knowledge base** | Uses Obsidian vaults as omp's knowledge base for docs, standards and projects, one per folder if you like (e.g. `~/work` and `~/personal`). Lets you pick a vault Obsidian already knows about, writes an `AGENTS.md` that points sessions at the knowledge base and at omp's memory tools, and optionally adds a commit gate. Long-term memory is not kept in the vault: it lives in omp's Hindsight backend (see [Knowledge base](#knowledge-base)). |
+| **Memory** | Picks omp's memory backend (`off`, `local`, `hindsight`, `mnemopi`, `sharpshooter`), writes the matching memory rules into `~/.omp/agent/AGENTS.md`, and optionally adds a commit gate. omp itself owns the backend settings (`/settings` → Memory). Offered on a brand-new install; existing installs run `/starter memory`. See [Memory and knowledge base](#memory-and-knowledge-base). |
+| **Obsidian docs** *(optional)* | Uses Obsidian vaults for docs, standards and projects, one per folder if you like (e.g. `~/work` and `~/personal`). Lets you pick a vault Obsidian already knows about and writes an `AGENTS.md` that points sessions at it. Memory is not kept in the vault. See [Obsidian docs](#obsidian-docs-starter-kb-optional). |
 | **Developer tools** *(optional)* | Sets up a language server (LSP) and a debugger (DAP) for JavaScript/TypeScript, Python, Go, Rust and C/C++ with the SDKs you already have. Offered on a brand-new install; existing installs run `/starter tools`. See [Language tooling](#language-tooling-starter-tools). |
 
 Every step can be skipped.
@@ -103,22 +104,53 @@ Optional. It sends judged tool calls and your prompts to TypeSafe (processed in 
 
 Rerunning `/starter jev` offers to turn Jev off: the presets' own judges come back, and the key stays in `~/.omp/agent/.env`.
 
-## Knowledge base
+## Memory and knowledge base
+
+### Memory (`/starter memory`)
+
+The step picks omp's memory backend and nothing else about it. omp already owns the backend and its settings: `memory.backend`, `/settings` → Memory, and `/memory`. omp-starter adds what omp lacks: the memory rules in `~/.omp/agent/AGENTS.md` and the commit gate.
+
+| Backend | What it is | Agent memory tools |
+|---|---|---|
+| `off` | No memory subsystem | none |
+| `local` | Local session summaries (`memory_summary.md`) | `learn` (with `autolearn`) |
+| `hindsight` | Hindsight remote memory service | `retain`, `recall`, `reflect`, `learn` (with `autolearn`) |
+| `mnemopi` | Local SQLite recall/retain | `retain`, `recall`, `reflect`, `memory_edit`, `learn` (with `autolearn`) |
+| `sharpshooter` | Project decision files, consolidated in the background | none |
+
+1. The select shows the current `memory.backend` (read with `omp config get`) and marks it. `omp config set memory.backend` runs only when you choose a different one.
+2. For `hindsight` the step does not ask for the server. It tells you to set the URL and token in `/settings` → Memory, or export `HINDSIGHT_API_URL` and `HINDSIGHT_API_TOKEN` (which win over the settings and keep the token out of the settings file).
+3. **Commit gate (optional):** offered when the backend has a write tool or a knowledge base exists. You confirm it and name the folders (default `~/projects`).
+4. The step then rewrites `~/.omp/agent/AGENTS.md` from the docs of a vault source serving every session (if any), the memory rules of the chosen backend, and the gate rules. An existing different file is backed up after you confirm.
+
+It runs automatically only on a brand-new install; existing installs opt in with `/starter memory`. The generated rules, per backend:
+
+- **hindsight, mnemopi:** save a durable fact (decision, gotcha, convention, preference, resolved failure) with `retain` (or `learn`), search with `recall`, use `reflect` to synthesize an answer, update a stale memory instead of adding a contradicting one. mnemopi also names `memory_edit` for edit and forget.
+- **local:** omp summarises sessions automatically; `learn` saves a fact when `autolearn` is on.
+- **sharpshooter:** decision files are consolidated automatically; follow them unless the user overrides one.
+- Every backend that stores something adds: never retain database query results, tool output that holds patient data, or secrets.
+
+This plugin adds no memory tools, memory index or memory folder. Recommended Hindsight settings: `hindsight.autoRetain false` (session transcripts carry tool output) and `hindsight.recallTimeoutMs 5000`.
+
+**Commit gate.** Blocks the agent's `git commit` under a gate folder until the session saved something: a successful `retain`, `learn` or `memory_edit` (whichever the backend has) or a `write`/`edit` of a note in any configured knowledge base. `[skip-mem]` in the commit message bypasses it, and so does an unattended build (`OMP_STARTER_UNATTENDED=1`). Only the `commit` subcommand is gated: `git commit-tree` or `git log --grep commit` pass. The gate checks the folder the commit really runs in (bash `cwd`, a leading `cd <dir> &&`, `git -C <dir>`). A note counts when a `write`/`edit` target is inside a knowledge base (symlinked or real path) or a `vault://` path; mentioning the KB path in a file's content doesn't. A save counts when the tool returns without an error. The block message names the tools of the current backend. A backend with no write tool and no knowledge base has nothing that could satisfy the gate, so the gate never blocks. The setting lives in `memory.gateDirs` of `~/.omp/agent/omp-starter.json`.
+
+### Obsidian docs (`/starter kb`, optional)
+
+An Obsidian vault can still hold docs, standards and project pages next to the memory backend. This is secondary: the first-run prompt is "Also use an Obsidian vault for docs and standards?".
 
 - **Vault:** chosen from Obsidian's own vault list, or any folder you type.
 - **Knowledge-base folder:** a folder inside the vault (default `KnowledgeBase`). If it does not exist yet, it is created after you confirm.
 - **Space-free link:** omp's `@` imports stop at spaces, so a vault path containing spaces gets a `~/.omp-kb` symlink (`~/.omp-kb-<vault>` when that name already points at another vault; existing links are never repointed).
-- **Always-loaded notes:** optional list of notes (relative paths) imported into every session, e.g. your coding standards.
-- **Scope:** every omp session (`~/.omp/agent/AGENTS.md`) or only sessions under one folder (`<folder>/AGENTS.md`). An existing file is backed up before it's replaced.
-- **Several knowledge bases:** rerunning `/starter kb` opens a menu to add or replace a knowledge base for another folder, remove one (its `AGENTS.md` is backed up and deleted only if you agree; the vault is never touched), or choose the primary one. Each session uses the knowledge base whose folder contains its working directory. Folders must not contain each other, since omp loads every enclosing `AGENTS.md` and two knowledge-base roots would mix; "every omp session" is only offered while it is the sole knowledge base. agent-skills stores tasks in the primary knowledge base's vault. State written by 0.13 or earlier is read as one primary knowledge base.
-- **Memory:** not stored in the vault. omp's built-in [Hindsight](https://hindsight.vectorize.io) backend (`memory.backend hindsight`) holds it, in a remote bank that other agents can share. omp recalls relevant memories when a session starts (`hindsight.autoRecall`) and provides `retain`, `recall` and `reflect`, plus `learn` when `autolearn.enabled` is on. The generated `AGENTS.md` tells the agent to save durable facts with `retain` or `learn`, search with `recall`, and never retain database query results, tool output that holds patient data, or secrets. This plugin adds no memory tools, memory index or memory folder. An existing `_memory/` folder stays where it is as a read-only archive that nothing in this plugin reads or writes. The settings an existing install needs are in the 0.39.0 release notes.
-- **Commit gate (optional):** blocks the agent's `git commit` under the chosen folder until it has saved a memory or written a note in that folder's knowledge base in that session. `[skip-mem]` in the commit message bypasses it. Only the `commit` subcommand is gated: `git commit-tree` or `git log --grep commit` pass. The gate checks the folder the commit really runs in (bash `cwd`, a leading `cd <dir> &&`, `git -C <dir>`). A note counts when a `write`/`edit` target is inside that knowledge base (symlinked or real path) or a `vault://` path; mentioning the KB path in a file's content doesn't count, and a note written to another folder's knowledge base doesn't either. A memory counts when `retain` or `learn` returns without an error; one memory write satisfies every gated knowledge base, because they share one memory. The folder must be an existing absolute path such as `~/projects`. Cancelling a step while rerunning `/starter` keeps that step's saved result. In an [unattended build](#unattended-builds) the gate does nothing.
+- **Always-loaded notes:** optional list of notes (relative paths) imported into every session, e.g. your coding standards. A rewrite keeps the notes the file already loads.
+- **Scope:** every omp session (`~/.omp/agent/AGENTS.md`) or only sessions under one folder (`<folder>/AGENTS.md`). An existing file is backed up before it's replaced. A per-folder `AGENTS.md` holds the docs only; the memory rules and the gate always live in the every-session file.
+- **Several knowledge bases:** rerunning `/starter kb` opens a menu to add or replace a knowledge base for another folder, or remove one (its `AGENTS.md` is backed up and deleted only if you agree; the vault is never touched). Removing the every-session source rewrites that file with the memory rules and gate instead of deleting it. Each session uses the knowledge base whose folder contains its working directory. Folders must not contain each other, since omp loads every enclosing `AGENTS.md` and two knowledge-base roots would mix; "every omp session" is only offered while it is the sole knowledge base.
+- **Memory is not in the vault.** An existing `_memory/` folder stays where it is as a read-only archive that nothing in this plugin reads or writes.
 
-`/kb` (or `/kb status`) is read-only: it shows the knowledge base serving the current session's folder, whether its vault is reachable, the commit gate state and the other configured knowledge bases. It does not show memory; omp's `/memory` inspects the memory backend.
+`/kb` (or `/kb status`) is read-only: it shows the memory backend (or that it is unknown, with a pointer to `/settings` → Memory), the commit gate state, the knowledge base serving the current session's folder, whether its vault is reachable and the other configured knowledge bases.
 
 | Do | Don't |
 |---|---|
-| `retain` a decision with who, what, when and why, and `recall` before asking about a past choice. | Retain database query results, tool output that holds patient data, or secrets. |
+| Save a decision with who, what, when and why, and `recall` before asking about a past choice. | Retain database query results, tool output that holds patient data, or secrets. |
 | Keep `hindsight.autoRetain` off: session transcripts carry tool output. | Write new notes into an archived `_memory/` folder. |
 
 **Verify:** `bun test extensions/kb-commit-gate.test.ts extensions/kb-command.test.ts extensions/setup.test.ts`.
@@ -163,7 +195,7 @@ It needs no provider login, never installs or changes an SDK, and never changes 
 ## Commands
 
 - `/starter`: rerun every step.
-- `/starter skills`, `/starter models`, `/starter jev`, `/starter kb`, `/starter tools`: rerun one step (`/starter skills` reopens the kit picker and offers updates for kept kits; `/starter kb` manages several knowledge bases once one exists; `/starter jev` turns Jev off when it is on).
+- `/starter skills`, `/starter models`, `/starter jev`, `/starter memory`, `/starter kb`, `/starter tools`: rerun one step (`/starter skills` reopens the kit picker and offers updates for kept kits; `/starter memory` picks the memory backend and the commit gate; `/starter kb` manages several Obsidian docs vaults once one exists; `/starter jev` turns Jev off when it is on).
 - `/starter updates`: check installed/published versions of the installed skill kits and `starter@omp-starter`; confirm each plugin/scope before updating. pstack and Matt Pocock publish no version in their catalogs, so for them it prints the upgrade command instead.
 
 Answers are stored in `~/.omp/agent/omp-starter.json`. Delete a key to be asked again at the next start. The wizard only runs automatically in the interactive TUI: not in `omp -p` or subagents.
@@ -274,6 +306,13 @@ The numbering starts at M5: M1 to M4 measured the vault's memory notes, and memo
 Limits: a session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names and tool names; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.40.0 — 2026-11-23
+
+- **Added:** `/starter memory`, a step that selects omp's memory backend (`off`, `local`, `hindsight`, `mnemopi`, `sharpshooter`), runs `omp config set memory.backend` only on a change, and writes the memory rules for that backend into `~/.omp/agent/AGENTS.md`. For Hindsight it points to `/settings` → Memory or `HINDSIGHT_API_URL`/`HINDSIGHT_API_TOKEN` instead of asking for a URL or token. Offered automatically only on a brand-new install.
+- **Changed / Breaking:** the commit gate moved from the knowledge-base source (`kb.sources[].gateDir`) to the memory state (`memory.gateDirs`), and `/starter kb` no longer asks about it. Existing state is migrated automatically on read: each source's `gateDir` becomes one entry of `memory.gateDirs`, so commits stay blocked where they were, with no wizard rerun. The gate also accepts `memory_edit`, and a write into any configured knowledge base satisfies every gate folder.
+- **Changed:** the vault is an optional docs add-on ("Knowledge base (Obsidian docs)"). The every-session `AGENTS.md` is composed from the vault docs, the memory rules of the backend and the gate rules; per-folder files hold docs only. `/kb status` also shows the memory backend and the gate.
+- Existing installs: run `/starter memory` to record the backend and regenerate `~/.omp/agent/AGENTS.md` (an existing different file is backed up after you confirm); until then the migrated gate works and the backend is read live.
 
 ### 0.39.0 — 2026-11-23
 

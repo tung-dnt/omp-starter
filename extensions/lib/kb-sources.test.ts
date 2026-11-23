@@ -1,7 +1,10 @@
-import { expect, test } from "bun:test";
+import { beforeEach, expect, test } from "bun:test";
 import * as path from "node:path";
+import { resetHome } from "../test-harness";
 import { EVERY_SESSION_DIR, overlapProblem, resolveKb } from "./kb-sources";
-import { HOME, migrateKb, type KbSource } from "./state";
+import { HOME, migrateKb, readState, writeState, type KbSource, type SetupState } from "./state";
+
+beforeEach(resetHome);
 
 const source = (folder: string, kbRef: string, extra: Partial<KbSource> = {}): KbSource => ({
 	kbRef,
@@ -32,7 +35,7 @@ test("source folders may be siblings but not nested, and every-session must stan
 	expect(overlapProblem(EVERY_SESSION_DIR, [])).toBeUndefined();
 });
 
-test("pre-0.14 single-kb state keeps serving and gate fields without a primary marker", () => {
+test("pre-0.14 single-kb state becomes one source, and its gate folder moves to the memory state", () => {
 	const legacy = {
 		status: "done" as const,
 		vault: `${HOME}/.kb`,
@@ -41,37 +44,42 @@ test("pre-0.14 single-kb state keeps serving and gate fields without a primary m
 		contextFile: "/w/projects/AGENTS.md",
 		gateDir: "/w/projects",
 	};
-	expect(migrateKb(legacy)).toEqual({
-		status: "done",
-		sources: [
-			{
-				vault: `${HOME}/.kb`,
-				kbRef: "~/.kb/KnowledgeBase",
-				kbPaths: [`${HOME}/.kb/KnowledgeBase`],
-				contextFile: "/w/projects/AGENTS.md",
-				gateDir: "/w/projects",
-			},
-		],
-	});
+	const expected = {
+		vault: `${HOME}/.kb`,
+		kbRef: "~/.kb/KnowledgeBase",
+		kbPaths: [`${HOME}/.kb/KnowledgeBase`],
+		contextFile: "/w/projects/AGENTS.md",
+	};
+	expect(migrateKb(legacy)).toEqual({ status: "done", sources: [expected] });
 	expect(migrateKb({ status: "skipped" })).toEqual({ status: "skipped" });
+
+	writeState({ kb: legacy } as unknown as SetupState);
+	expect(readState()).toEqual({ kb: { status: "done", sources: [expected] }, memory: { status: "done", gateDirs: ["/w/projects"] } });
 });
 
-test("multi-source migration strips stale primary keys and preserves folder, memory, and gate routing", () => {
+test("0.39 state keeps its gate: every source's gateDir becomes one deduplicated memory.gateDirs, and routing is unchanged", () => {
 	const legacy = {
 		status: "done" as const,
 		sources: [
 			{ ...work, primary: true, gateDir: "/w/projects" },
 			{ ...personal, primary: false, gateDir: "/w/personal" },
+			{ ...everywhere, gateDir: "/w/projects" },
+			source("/w/plain", "plain"),
 		],
 	};
-	expect(migrateKb(legacy)).toEqual({
-		status: "done",
-		sources: [
-			{ ...work, gateDir: "/w/projects" },
-			{ ...personal, gateDir: "/w/personal" },
-		],
-	});
-	const migrated = migrateKb(legacy);
-	expect(resolveKb("/w/projects/acme-api", migrated)?.kbRef).toBe("work");
-	expect(resolveKb("/w/personal/notes", migrated)?.kbRef).toBe("personal");
+	writeState({ kb: legacy } as unknown as SetupState);
+	const state = readState();
+	expect(state.memory).toEqual({ status: "done", gateDirs: ["/w/projects", "/w/personal"] });
+	expect(state.kb?.sources).toEqual([work, personal, everywhere, source("/w/plain", "plain")]);
+	expect(resolveKb("/w/projects/acme-api", state.kb)?.kbRef).toBe("work");
+	expect(resolveKb("/w/personal/notes", state.kb)?.kbRef).toBe("personal");
+});
+
+test("migration never overrides a memory state, and a skipped knowledge base brings no gate", () => {
+	writeState({ memory: { status: "done", backend: "mnemopi" }, kb: { status: "done", sources: [{ ...work, gateDir: "/w/projects" }] } } as unknown as SetupState);
+	expect(readState().memory).toEqual({ status: "done", backend: "mnemopi" });
+	expect(readState().kb?.sources).toEqual([work]);
+
+	writeState({ kb: { status: "skipped", sources: [{ ...work, gateDir: "/w/projects" }] } } as unknown as SetupState);
+	expect(readState().memory).toBeUndefined();
 });

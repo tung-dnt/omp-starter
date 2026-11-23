@@ -14,13 +14,23 @@ export interface KbSource {
 	kbPaths: string[];
 	/** AGENTS.md written for this source. Its folder is the source's scope; `~/.omp/agent` means every session. */
 	contextFile: string;
-	/** Commit gate applies to `git commit` run at or below this directory; absent = gate off. */
-	gateDir?: string;
 }
 
 export interface KbState {
 	status: "done" | "skipped";
 	sources?: KbSource[];
+}
+
+/** The values of omp's `memory.backend` setting. */
+export type MemoryBackend = "off" | "local" | "hindsight" | "mnemopi" | "sharpshooter";
+
+/** Memory step (`/starter memory`): which omp memory backend the agent rules describe, and where the commit gate applies. */
+export interface MemoryState {
+	status: "done" | "skipped";
+	/** Backend chosen in the step; absent = unknown (read `memory.backend` live when needed). */
+	backend?: MemoryBackend;
+	/** Commit gate applies to `git commit` run at or below one of these directories; absent or empty = gate off. */
+	gateDirs?: string[];
 }
 
 /** Outcome of one language group: the language server and the debugger are judged independently. */
@@ -41,6 +51,9 @@ export interface SetupState {
 	models?: "done" | "skipped";
 	/** Optional TypeSafe Jev judge (`/starter jev`). */
 	jev?: "done" | "skipped";
+	/** Memory backend and commit gate (`/starter memory`). */
+	memory?: MemoryState;
+	/** Optional Obsidian vaults used as docs and standards (`/starter kb`). */
 	kb?: KbState;
 	tooling?: ToolingState;
 }
@@ -56,7 +69,7 @@ export function tildify(p: string): string {
 	return p === HOME ? "~" : p.startsWith(HOME + path.sep) ? `~/${p.slice(HOME.length + 1)}` : p;
 }
 
-/** State written before multi-source knowledge bases (≤ 0.13): one source's fields directly on `kb`. */
+/** State written before multi-source knowledge bases (≤ 0.13): one source's fields directly on `kb`. Before 0.40 a source also carried its commit-gate folder. */
 interface LegacyKb {
 	status: "done" | "skipped";
 	vault?: string;
@@ -64,16 +77,23 @@ interface LegacyKb {
 	kbPaths?: string[];
 	contextFile?: string;
 	gateDir?: string;
-	sources?: Array<KbSource & { primary?: boolean }>;
+	sources?: Array<KbSource & { primary?: boolean; gateDir?: string }>;
 }
 
-/** Converts old single- and multi-source state while discarding obsolete primary markers. */
+/** Commit-gate folders that sources of state written before 0.40 carried (`gateDir`), deduplicated. */
+function legacyGateDirs(kb: LegacyKb | undefined): string[] {
+	if (kb?.status !== "done") return [];
+	const dirs = kb.sources ? kb.sources.map(s => s.gateDir) : [kb.gateDir];
+	return [...new Set(dirs.filter((dir): dir is string => Boolean(dir)))];
+}
+
+/** Converts old single- and multi-source state while discarding obsolete primary markers and per-source gate folders. */
 export function migrateKb(kb: LegacyKb | undefined): KbState | undefined {
 	if (!kb) return undefined;
 	if (kb.sources) {
 		return {
 			status: kb.status,
-			sources: kb.sources.map(({ primary: _, ...source }) => source),
+			sources: kb.sources.map(({ primary: _, gateDir: __, ...source }) => source),
 		};
 	}
 	if (!kb.kbRef || !kb.contextFile) return { status: kb.status };
@@ -82,7 +102,6 @@ export function migrateKb(kb: LegacyKb | undefined): KbState | undefined {
 		kbRef: kb.kbRef,
 		kbPaths: kb.kbPaths ?? [],
 		contextFile: kb.contextFile,
-		...(kb.gateDir ? { gateDir: kb.gateDir } : {}),
 	};
 	return { status: kb.status, sources: [source] };
 }
@@ -94,7 +113,11 @@ export function readState(file = STATE_FILE): SetupState {
 	} catch {
 		return {};
 	}
-	if (state.kb) state.kb = migrateKb(state.kb as LegacyKb);
+	if (state.kb) {
+		const gateDirs = legacyGateDirs(state.kb as LegacyKb);
+		if (!state.memory && gateDirs.length) state.memory = { status: "done", gateDirs };
+		state.kb = migrateKb(state.kb as LegacyKb);
+	}
 	return state;
 }
 
