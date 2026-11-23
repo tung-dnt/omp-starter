@@ -1,8 +1,8 @@
 {
   "name": "omp-starter",
-  "version": "0.38.1",
+  "version": "0.39.0",
   "private": true,
-  "description": "First-run setup for omp: Claude-first routing with Codex/Claude subscription presets and capped Fable/Astra escalation, Obsidian vaults as knowledge base + memory per folder with kb_remember/kb_recall tools, optional agent-skills, unattended build sessions that refuse questions, and optional guided LSP/debugger tooling for JavaScript/TypeScript, Python, Go, Rust and C/C++",
+  "description": "First-run setup for omp: Claude-first routing with Codex/Claude subscription presets and capped Fable/Astra escalation, Obsidian vaults as knowledge base per folder with an optional commit gate that also accepts Hindsight memory writes, optional agent-skills, unattended build sessions that refuse questions, and optional guided LSP/debugger tooling for JavaScript/TypeScript, Python, Go, Rust and C/C++",
   "license": "MIT",
   "scripts": {
     "test": "bun test",
