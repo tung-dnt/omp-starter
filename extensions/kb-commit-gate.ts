@@ -1,5 +1,6 @@
 // Blocks agent `git commit` under a knowledge-base source's gate folder until that source's KB was
-// written in this session, via write/edit or kb_remember. `[skip-mem]` in the command bypasses it.
+// written in this session, via write/edit or kb_remember. `[skip-mem]` in the command bypasses it, and
+// an unattended build (OMP_STARTER_UNATTENDED=1, see unattended.ts) is never gated: nobody could answer it.
 // Configured by the setup wizard (`kb.sources[].gateDir` / `kbPaths` in ~/.omp/agent/omp-starter.json).
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -29,7 +30,7 @@ export default function kbCommitGate(pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_call", (event, ctx) => {
-		if (event.toolName !== "bash") return;
+		if (event.toolName !== "bash" || process.env.OMP_STARTER_UNATTENDED === "1") return;
 		const command = String(event.input.command ?? "");
 		const match = GIT_COMMIT.exec(command);
 		if (!match || command.includes("[skip-mem]")) return;

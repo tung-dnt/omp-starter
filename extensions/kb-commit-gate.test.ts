@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import kbCommitGate from "./kb-commit-gate";
@@ -174,6 +174,32 @@ describe("when the gate does not apply", () => {
 		expect(skipped.commit("git commit -m wip")).toBeUndefined();
 		seedState({});
 		expect(skipped.commit("git commit -m wip")).toBeUndefined();
+	});
+});
+
+describe("unattended builds", () => {
+	afterEach(() => {
+		delete process.env.OMP_STARTER_UNATTENDED;
+	});
+
+	test("OMP_STARTER_UNATTENDED=1 lets every commit through, under every gated folder, and the gate is back without it", () => {
+		const g = gate();
+		expect(g.commit("git commit -m wip")?.block).toBe(true);
+
+		process.env.OMP_STARTER_UNATTENDED = "1";
+		expect(g.commit("git commit -m wip")).toBeUndefined();
+		expect(g.commit("git commit -m wip", { cwd: g.personal.folder })).toBeUndefined();
+
+		delete process.env.OMP_STARTER_UNATTENDED;
+		expect(g.commit("git commit -m wip")?.block).toBe(true);
+	});
+
+	test("only the exact value 1 switches the gate off", () => {
+		const g = gate();
+		for (const value of ["0", "true", "", " 1"]) {
+			process.env.OMP_STARTER_UNATTENDED = value;
+			expect(g.commit("git commit -m wip")?.block).toBe(true);
+		}
 	});
 });
 

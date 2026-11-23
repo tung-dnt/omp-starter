@@ -19,7 +19,8 @@
       "./extensions/kb-command.ts",
       "./extensions/fable-router.ts",
       "./extensions/cross-repo-reads.ts",
-      "./extensions/blast-radius.ts"
+      "./extensions/blast-radius.ts",
+      "./extensions/unattended.ts"
     ]
   },
   "devDependencies": {
