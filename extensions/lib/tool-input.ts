@@ -92,14 +92,16 @@ export function gitCommandDir(command: string, match: RegExpExecArray, cwd: unkn
 	return dir;
 }
 
-// Target paths named inside an `edit` payload: hashline `[PATH#TAG]` / `MV DEST`, apply_patch and sloppy headers.
+// Target paths named inside an `edit` payload: hashline `[PATH#TAG]` / `MV DEST`, apply_patch and sloppy headers
+// (`Add`, `Update`, `Edit` and `Delete File`, `Move to`).
 const EDIT_TARGET =
-	/^\[([^\]\n]+?)#[0-9A-Fa-f]{4}\]|^MV\s+("[^"]*"|'[^']*'|\S+)|^\*\*\* (?:Add|Update|Edit) File:\s*(.+?)(?:\s+all)?\s*$|^\*\*\* Move to:\s*(.+?)\s*$/gm;
+	/^\[([^\]\n]+?)#[0-9A-Fa-f]{4}\]|^MV\s+("[^"]*"|'[^']*'|\S+)|^\*\*\* (?:Add|Update|Edit|Delete) File:\s*(.+?)(?:\s+all)?\s*$|^\*\*\* Move to:\s*(.+?)\s*$/gm;
 
-/** Paths a write/edit tool call targets, as written (not yet resolved). */
+/** Paths a write/edit tool call targets, as written (not yet resolved); patch mode's `rename` included. */
 export function targetPaths(toolName: string, input: Record<string, unknown>): string[] {
 	const out: string[] = [];
 	if (typeof input.path === "string") out.push(input.path);
+	if (toolName === "edit" && typeof input.rename === "string") out.push(input.rename);
 	if (toolName === "edit" && typeof input.input === "string") {
 		for (const m of input.input.matchAll(EDIT_TARGET)) out.push(m[1] ?? m[2] ?? m[3] ?? m[4]);
 	}

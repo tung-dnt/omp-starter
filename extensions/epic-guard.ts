@@ -1,6 +1,7 @@
 // `/epic` never implements: from `/epic` until `/epic-done`, `/story` or `/build`, write and edit calls inside the repo are
 // held unless they target the epic plan folder `plans/`. Subagents are held too.
-// The state is saved in the session, so it survives a restart or resume of the same session.
+// The state is saved in the session, so it survives a restart or resume of the same session, and it carries over the
+// fresh session that approving a plan in Plan Review starts ("Approve and execute" clears the context).
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { repoRoot } from "./lib/repo";
@@ -8,13 +9,14 @@ import { resolveFrom, targetPaths } from "./lib/tool-input";
 
 const ENTRY = "epic-guard";
 const KEY = Symbol.for("omp-starter.epic-guard");
+const CARRY = Symbol.for("omp-starter.epic-guard.carry");
 /** Where `/epic` writes its plan (`plans/<NNN-name>.md`, skills/epic/SKILL.md). */
 export const PLAN_ONLY = /^plans\//;
 const STARTS = /^\/epic(?:\s|$)/;
 const ENDS = /^\/(?:story|build)(?:\s|$)/;
 
 // Subagents run the factory again with their own `pi`; one flag on globalThis covers the whole process.
-const store = globalThis as typeof globalThis & { [KEY]?: boolean };
+const store = globalThis as typeof globalThis & { [KEY]?: boolean; [CARRY]?: boolean };
 const active = (): boolean => store[KEY] === true;
 
 function setActive(pi: ExtensionAPI, on: boolean): void {
@@ -23,8 +25,8 @@ function setActive(pi: ExtensionAPI, on: boolean): void {
 	pi.appendEntry(ENTRY, { active: on });
 }
 
-/** The last saved guard state on the current branch. */
-function restore(ctx: ExtensionContext): void {
+/** The last saved guard state on the current branch, or on when a plan review open under the guard started this session. */
+function restore(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	let on = false;
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type !== "custom" || entry.customType !== ENTRY) continue;
@@ -32,6 +34,7 @@ function restore(ctx: ExtensionContext): void {
 		on = typeof data === "object" && data !== null && "active" in data && data.active === true;
 	}
 	store[KEY] = on;
+	if (store[CARRY] === true) setActive(pi, true);
 }
 
 /** Repo files outside `plans/` a write or edit call names; paths outside the repo and internal URLs pass. */
@@ -50,10 +53,18 @@ export function heldPaths(toolName: string, input: Record<string, unknown>, cwd:
 
 export default function epicGuard(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
-		if (ctx.agent?.kind !== "sub") restore(ctx);
+		if (ctx.agent?.kind !== "sub") restore(pi, ctx);
 	});
 	pi.on("session_switch", (_event, ctx) => {
-		if (ctx.agent?.kind !== "sub") restore(ctx);
+		if (ctx.agent?.kind !== "sub") restore(pi, ctx);
+	});
+	// "Approve and execute" clears the context (a new session) before the review closes, so the carry is armed when the
+	// review opens and dropped when it closes, by which time any fresh session has restored it.
+	pi.on("plan_review_requested", () => {
+		store[CARRY] = active();
+	});
+	pi.on("plan_review_resolved", () => {
+		store[CARRY] = false;
 	});
 
 	pi.on("input", (event, ctx) => {

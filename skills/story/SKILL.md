@@ -14,7 +14,7 @@ One vertical slice: end to end, one PR, under about 400 changed lines. The reque
 
 1. **Clarify, one question at a time.** Ask exactly ONE question per `ask` call, with your best guess preselected. Stop when you can predict the answers. Write the acceptance criteria as a numbered list and get them confirmed.
    - If the repo has an epic plan covering this story (`plans/<NNN-name>.md` with a `## Story N` section), read it first. Ask only about what it leaves open.
-   - In the interactive TUI, `/story` starts in plan mode (omp-starter `story-plan`): steps 1 and 2 are read-only. Write the plan with the confirmed acceptance criteria, the size check, the target branch and the build order, then submit it for approval. Approving it in Plan Review leaves plan mode and starts step 3. Without plan mode (print, RPC, unattended), confirm the criteria with `ask` as above.
+   - In the interactive TUI, `/story` starts in plan mode (omp-starter `plan-mode`): steps 1 and 2 are read-only. Write the plan with the confirmed acceptance criteria, the size check, the target branch and the build order, then submit it for approval. Approving it in Plan Review leaves plan mode and starts step 3. Without plan mode (print, RPC, unattended), confirm the criteria with `ask` as above.
 2. **Size check.** If the slice needs more than about 400 lines, more than one PR, or several independent slices, stop and recommend `/epic`.
 3. **Load the method.** Read `skill://poteto-mode` and follow it, using the feature playbook at `skill://poteto-mode/playbooks/feature.md`. Before code crosses a function boundary, read `skill://architect`. Build test-first with `skill://tdd`.
 4. **Branch.** Confirm the target branch with the user before creating any branch.
