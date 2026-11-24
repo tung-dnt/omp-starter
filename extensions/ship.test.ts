@@ -1394,7 +1394,16 @@ describe("the real gh and git runner", () => {
 	test("gives the pipes up at the timeout, so repeated timeouts leak no descriptors", async () => {
 		const before = fs.readdirSync("/dev/fd").length;
 		for (let i = 0; i < 10; i++) await exec("sh", ["-c", "sleep 2 & wait"], 100);
-		expect(fs.readdirSync("/dev/fd").length).toBeLessThanOrEqual(before + 2);
+		// The last child's pidfd and pipe sockets close a few ms after exec returns: poll the real descriptor table until the count settles (a real leak never does).
+		// Real wall-clock polling is deliberate: the OS closes these on its own schedule, which fake timers cannot drive.
+		const allowed = before + 2;
+		const deadline = performance.now() + 1000;
+		let open = fs.readdirSync("/dev/fd").length;
+		while (open > allowed && performance.now() < deadline) {
+			await Bun.sleep(20);
+			open = fs.readdirSync("/dev/fd").length;
+		}
+		expect(open).toBeLessThanOrEqual(allowed);
 	});
 
 	test("leaves no timer behind once the command has finished, so a process that ran it can exit at once", async () => {
