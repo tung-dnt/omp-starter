@@ -303,9 +303,18 @@ The model can do the same with the `schedule_prompt`, `list_scheduled_prompts` a
 
 **Verify:** `bun test extensions/path-policy.test.ts extensions/file-undo.test.ts extensions/notify.test.ts extensions/every.test.ts`.
 
-### `/epic` and `/story` modes
+### Workflow commands (`/epic`, `/story`, `/build`, `/quick-fix`)
 
-Both commands are your own (`~/.omp/agent/commands/epic.md`, `skill://story`); these two extensions only recognise their names in what you type.
+The plugin ships four commands (`commands/*.md`), each reading its skill (`skills/<name>/SKILL.md`). They need the pstack skill kit (`/starter skills` → pstack); without it they say so and stop.
+
+| Command | For |
+|---|---|
+| `/quick-fix <bug>` | One bug or small task: failing test, fix, evidence. |
+| `/story <story or ticket>` | One vertical slice, one PR under about 400 lines: clarify, TDD, review, verify, PR. |
+| `/epic <epic or ticket>` | Big work: a pstack multi-phase plan in `plans/<NNN-name>.md`, split into stories. Never implements. |
+| `/build <repo> <branch> <plan> [story=N] [--feedback]` | Unattended build of a plan (or one story) to a draft PR, started by agent-dispatch. |
+
+A file with the same name in `~/.omp/agent/commands/` or `~/.omp/agent/skills/` shadows the plugin's (omp ranks your own files first); delete it to get the plugin's version. Two extensions enforce the commands:
 
 | Extension | When | What it does |
 |---|---|---|
@@ -314,7 +323,7 @@ Both commands are your own (`~/.omp/agent/commands/epic.md`, `skill://story`); t
 
 `/epic` cannot use plan mode itself: plan mode refuses the plan-file write and the commit it needs. `epic-guard` leaves `bash` alone, so a shell write of code is not caught.
 
-**Verify:** `bun test extensions/epic-guard.test.ts`.
+**Verify:** `bun test extensions/epic-guard.test.ts` (it also checks that every plan path the `epic` and `build` skills name is one the guard allows).
 
 ## Usage report
 
@@ -346,13 +355,18 @@ Limits: a session's repo comes from the origin URL of its working folder, so a f
 
 ## Release notes
 
+### 0.45.0 — 2026-11-24
+
+- **Added:** the workflow commands `/epic`, `/story`, `/build` and `/quick-fix` and their skills ship with the plugin (`commands/`, `skills/`), next to `epic-guard` and `story-plan`, so a change to a skill and its guard lands in one commit. See [Workflow commands](#workflow-commands-epic-story-build-quick-fix). They need the pstack kit.
+- Existing installs: delete your own copies in `~/.omp/agent/commands/{epic,story,build,quick-fix}.md` and `~/.omp/agent/skills/{epic,story,build,quick-fix}/`, which shadow the plugin's.
+
 ### 0.44.1 — 2026-11-24
 
 - **Fixed:** `epic-guard` allowed only spec-kit paths (`.specify/`, `specs/`), but `/epic` now writes a pstack plan to `plans/<NNN-name>.md`, so the guard refused `/epic`'s own plan. It now allows `plans/` only.
 
 ### 0.44.0 — 2026-11-24
 
-- **Added:** `epic-guard`: `/epic` is spec-only until `/epic-done`, `/story` or `/build` (writes outside the spec-kit folders are refused, subagents included). `story-plan`: `/story` starts in plan mode in the TUI. See [`/epic` and `/story` modes](#epic-and-story-modes).
+- **Added:** `epic-guard`: `/epic` is spec-only until `/epic-done`, `/story` or `/build` (writes outside the spec-kit folders are refused, subagents included). `story-plan`: `/story` starts in plan mode in the TUI. See [Workflow commands](#workflow-commands-epic-story-build-quick-fix).
 - Existing installs: nothing to do. The commands themselves live in your agent folder; the skill texts for `epic` and `story` there describe the new behaviour.
 
 ### 0.43.0 — 2026-11-24

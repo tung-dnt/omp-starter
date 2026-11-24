@@ -1,6 +1,7 @@
 import { beforeEach, expect, test } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
-import epicGuard from "./epic-guard";
+import epicGuard, { PLAN_ONLY } from "./epic-guard";
 import storyPlan from "./story-plan";
 import { fakeContext, fakePi, initGitRepo, privateHome, resetHome } from "./test-harness";
 
@@ -83,4 +84,11 @@ test("/story enters plan mode in the TUI and warns when it cannot", async () => 
 	expect(ctx.ui.notifications.at(-1)?.message).toContain("conflict");
 	const headless = { ...fakeContext({ cwd: "/", agent: { kind: "main", name: "main" } }) };
 	expect(await fake.emit("input", { text: "/story x", source: "rpc" }, headless)).toBeUndefined();
+});
+
+test("every plan path the epic and build skills name is one the guard lets /epic write", () => {
+	const skills = ["epic", "build"].map(name => fs.readFileSync(path.join(import.meta.dir, "..", "skills", name, "SKILL.md"), "utf8")).join("\n");
+	const plans = [...skills.matchAll(/`([^`\s]*plans\/[^`\s]+\.md)`/g)].map(m => m[1].replace(/<[^>]+>/g, "001-x"));
+	expect(plans.length).toBeGreaterThan(0);
+	for (const plan of plans) expect(PLAN_ONLY.test(plan)).toBe(true);
 });
