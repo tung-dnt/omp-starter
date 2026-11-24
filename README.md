@@ -348,7 +348,7 @@ The code that decides when `/ship` runs a model pass and which session may run i
 - **A pass starts** when the PR changed, at least 10 minutes after the last pass; or when the check the last pass set comes due: 2 minutes after a push, 30 minutes while checks run, otherwise an hour, each pushed back (doubling, up to a day) while nothing changes. Nothing starts a pass in the 2 minutes after a push.
 - **One watch per PR**, in `~/.omp/agent/ship/watches/<owner>-<repo>-<n>.json`, written to a temp file and renamed into place, so a crash leaves the old one. A second live session on the same PR is refused and told which session holds it; an owner whose heartbeat is over 10 minutes old, or whose process is gone, is taken over. Running `/ship` again resumes the file and starts the pass count over.
 
-`bun scripts/ship-watch-replay.ts` replays a recorded day of one PR through the engine and prints every pass, push and wait.
+`bun scripts/ship-watch-replay.ts` replays a scripted day of one PR through the engine and prints every pass, push and wait.
 
 **Verify:** `bun test extensions/ship/watch.test.ts`.
 

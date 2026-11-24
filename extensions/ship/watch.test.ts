@@ -49,7 +49,7 @@ const same = { hash: "h1" };
 const changed = { hash: "h2" };
 
 describe("nextStep", () => {
-	const rows: Array<[name: string, watch: Ago, now: Parameters<typeof snapshot>[0], expected: string]> = [
+	const rows: Array<[name: string, watch: Ago, seen: Parameters<typeof snapshot>[0], expected: string]> = [
 		["a new watch starts with a pass", { lastHash: null, lastPassAt: null, nextAt: null }, same, "pass"],
 		["a change 12 minutes after the last pass starts a pass", { lastPassAt: -12 * MIN, nextAt: 48 * MIN }, changed, "pass"],
 		["a change exactly 10 minutes after the last pass starts a pass", { lastPassAt: -10 * MIN, nextAt: 50 * MIN }, changed, "pass"],
@@ -204,7 +204,7 @@ describe("claiming a watch", () => {
 	});
 
 	test("the same session claims its own watch again: facts stay, the pass count starts over, the first step is a pass", () => {
-		const held = { ...claimed(), lastPassAt: NOW + MIN, lastHash: "h9", nextAt: NOW + HOUR, passes: day.map(at => NOW + at + DAY), pushesPerCause: { "ci:build": 2 }, told: ["untrusted"] };
+		const held = { ...claimed(), lastPassAt: NOW + MIN, lastHash: "h9", nextAt: NOW + HOUR, passes: Array.from({ length: SHIP.passCap }, (_, i) => NOW + (i + 1) * MIN), pushesPerCause: { "ci:build": 2 }, told: ["untrusted"] };
 		saveWatch(held);
 		const later = NOW + 30 * MIN;
 		expect(show(nextStep(snapshot({ hash: "h9" }), held, later))).toBe("end spend_cap");
@@ -299,7 +299,7 @@ describe("the file on disk", () => {
 
 // ---- a day ---------------------------------------------------------------------------------------------------------
 
-describe("a recorded day of one PR", () => {
+describe("a scripted day of one PR", () => {
 	const rows = replay();
 	const timeline = rows.map(row => (row.kind === "pass" ? `${row.clock} pass` : `${row.clock} ${row.kind} ${row.detail}`));
 	const minutes = (clock: string): number => Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5));

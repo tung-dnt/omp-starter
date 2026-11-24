@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-// Replays a recorded day of one pull request through the /ship watch engine and prints every pass, push and wait. The
-// day is the states `readPr` would have reported, one entry per change; the engine is driven as the session's 2-minute
-// timer drives it. No network, no model, no files.
+// Replays a scripted day of one pull request through the /ship watch engine and prints every pass, push and wait. The
+// day is written by hand as the states `readPr` would report, one entry per change; the engine is driven as the
+// session's 2-minute timer drives it. No network, no model, no files.
 //
 //   bun scripts/ship-watch-replay.ts
 import { type Check, type CheckBucket, type Note, type PrRef, SHIP, type Snapshot, type Watch } from "../extensions/ship/types";
