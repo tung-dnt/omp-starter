@@ -89,11 +89,11 @@ describe("git", () => {
 		}
 		expect(git("archive -o x HEAD", policy, "/repo/.git/hooks")).toContain("git folder");
 		expect(git("status", policy, "/data/app-gitdir")).toContain("git folder");
-		for (const line of ["init --template=/tmp/tpl", "init --templ /tmp/tpl", "init --separate-git-dir=/tmp/gd new"]) expect(git(line)).toContain("git init");
+		for (const line of ["init --template=/tmp/tpl", "init --templ /tmp/tpl", "init --separate-git-dir=/tmp/gd new", "init --bogus"]) expect(git(line)).toContain("git init");
 		for (const line of [
 			"archive --format=tar HEAD -o /tmp/x.tar", "diff --output=/tmp/d.patch HEAD~1", "checkout-index --prefix=/tmp/out/ -a", "bundle create /tmp/x.bundle HEAD",
 			"format-patch -o /tmp/patches HEAD~1", "add .gitignore", "diff -- .github/workflows/ci.yml", "log -- .gitattributes", "-C sub archive -o out.tar HEAD",
-			"init", "init --bare /tmp/new.git", "init -q /tmp/new",
+			"init", "init --bare /tmp/new.git", "init -q /tmp/new", "init -b main /tmp/new", "init --initial-branch=main", "init --object-format=sha256 /tmp/new",
 		]) {
 			expect(git(line)).toBeNull();
 		}

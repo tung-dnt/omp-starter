@@ -315,15 +315,19 @@ function checkGitFolder(args: string[], dir: string, policy: GitPolicy): string 
 
 /** Refs only a fetch from the remote may set: remote-tracking refs, which a push check could be fooled by, and replacement refs, which change what git reads. */
 const FETCH_ONLY_REFS = /^(?:(?:refs\/)?remotes|refs\/replace)\//i;
-/** git init's options that copy files into the git folder or move it. */
-const INIT_COPYING = ["--template", "--separate-git-dir"];
+/** git init's options a fenced session may use. --template and --separate-git-dir are left out: they copy files into the git folder or move it. */
+const INIT_OK = names("-q", "--quiet", "--bare", "--shared", "-b", "--initial-branch", "--object-format", "--ref-format");
+const INIT_VALUE_FLAGS = names("-b", "--initial-branch", "--object-format", "--ref-format");
 
-/** Why a subcommand's own options would write where /ship may not send it: files into the git folder, or a ref only a fetch from the remote may set. */
-function checkSubcommandWrites(sub: string, rest: string[]): string | null {
+/** Why a subcommand's own options would write where /ship may not send it: files into a git folder, or a ref only a fetch from the remote may set. */
+function checkSubcommandWrites(sub: string, rest: string[], dir: string): string | null {
 	if (sub === "init") {
-		// Abbreviations count: git reads `--templ` as `--template`.
-		const copying = [...parse(rest, {}).long.keys()].find(flag => flag.length > 2 && INIT_COPYING.some(full => full.startsWith(flag)));
-		if (copying !== undefined) return refused(`git init ${copying} is refused: it copies files into the git folder, or moves it`);
+		const f = parse(rest, INIT_VALUE_FLAGS);
+		const flag = [...f.long.keys(), ...f.short].find(name => !isIn(INIT_OK, name));
+		if (flag !== undefined) return refused(`git init ${flag} is refused: init takes only -q, --bare, -b, --object-format, --ref-format and --shared`);
+		// Running init again in a repo copies the templates, hooks included, into its git folder: from --template, -c init.templateDir or GIT_TEMPLATE_DIR alike.
+		const target = walk(dir, f.positionals[0] ?? ".");
+		if (fs.existsSync(path.join(target, ".git")) || ["HEAD", "objects", "refs"].every(name => fs.existsSync(path.join(target, name)))) return refused(`git init in ${target} is refused: it holds a repo already, and init would copy templates, hooks included, into it`);
 	}
 	if (sub === "update-ref") {
 		const f = parse(rest, names("-m"));
@@ -358,7 +362,8 @@ export function checkGit(args: string[], policy: GitPolicy, cwd: string): string
 	const sub = args[i] ?? "";
 	const rest = args.slice(i + 1);
 	if (sub !== "" && !isIn(GIT_COMMANDS, sub)) return refused(`git ${sub} is not a git command the fence allows`);
-	const writes = checkGitFolder(args, gitWorkDir(args, cwd), policy) ?? checkSubcommandWrites(sub, rest);
+	const dir = gitWorkDir(args, cwd);
+	const writes = checkGitFolder(args, dir, policy) ?? checkSubcommandWrites(sub, rest, dir);
 	if (writes !== null) return writes;
 	const risky = settings.find(s => RISKY_CONFIG.test(s));
 	if ((sub === "push" || sub === "commit" || sub === "merge") && risky !== undefined) return refused(`git -c ${risky} with ${sub} is refused: hooks and remotes stay as configured`);

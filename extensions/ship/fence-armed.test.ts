@@ -196,6 +196,20 @@ describe("the shims, with real git", () => {
 		expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
 	});
 
+	test("a base merge that brings a protected change onto a branch origin already holds passes too", () => {
+		armFence({ pushBranch: BRANCH, root: repo });
+		write(path.join(repo, "src/a.ts"), "export const a = 2;\n");
+		sh(repo, "commit", "--quiet", "-am", "session fix");
+		expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+		sh(repo, "switch", "--quiet", "main");
+		write(path.join(repo, ".github/workflows/ci.yml"), "name: CI\non: [push]\n");
+		sh(repo, "commit", "--quiet", "-am", "base ci");
+		sh(repo, "push", "--quiet", "origin", "main");
+		sh(repo, "switch", "--quiet", BRANCH);
+		expect(git(process.env, "merge", "--quiet", "--no-edit", "origin/main").status).toBe(0);
+		expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+	});
+
 	const bare = () => path.join(privateHome(), "remote.git");
 	/** What origin holds for `branch`: a commit id, or "" when it has no such branch. */
 	const originHas = (branch: string) => spawnSync("git", ["--git-dir", bare(), "for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`], { env: { ...process.env, PATH: savedPath }, encoding: "utf8" }).stdout.trim();
@@ -295,6 +309,9 @@ describe("the shims, with real git", () => {
 			["checkout-index", "--prefix=.git/hooks/", "-a"],
 			["bundle", "create", ".git/hooks/pre-commit", "HEAD"],
 			["init", `--template=${template}`],
+			// Running init again copies the templates in, however they are named.
+			["init"],
+			["-c", `init.templateDir=${template}`, "init"],
 			["-C", "src", "archive", "-o", "../.git/hooks/pre-commit", "HEAD"],
 			["archive", "-o", path.join(hooks, "pre-commit"), "HEAD"],
 			["archive", "-o", "hk/pre-commit", "HEAD"],
@@ -307,6 +324,11 @@ describe("the shims, with real git", () => {
 			expect(r.status).toBe(1);
 			expect(r.stderr).toContain("ship fence");
 		}
+		const viaEnv = git({ ...process.env, GIT_TEMPLATE_DIR: template }, "init");
+		expect(viaEnv.status).toBe(1);
+		expect(viaEnv.stderr).toContain("ship fence");
+		// A fresh folder is none of the fence's business.
+		expect(git(process.env, "init", "--quiet", path.join(privateHome(), "fresh")).status).toBe(0);
 		const inside = spawnSync("git", ["archive", "-o", "pre-commit", "HEAD"], { cwd: hooks, env: process.env, encoding: "utf8" });
 		expect(inside.status).toBe(1);
 		expect(fs.readdirSync(hooks).filter(name => !name.endsWith(".sample"))).toEqual([]);
