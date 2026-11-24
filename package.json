@@ -1,6 +1,6 @@
 {
   "name": "omp-starter",
-  "version": "0.45.0",
+  "version": "0.46.0",
   "private": true,
   "description": "First-run setup for omp: Claude-first routing with Codex/Claude subscription presets and capped Fable/Astra escalation, a memory-backend step (omp's memory.backend) with an optional commit gate, optional agent-skills, unattended build sessions that refuse questions, optional guided LSP/debugger tooling for JavaScript/TypeScript, Python, Go, Rust and C/C++, and a safety kit: protected-path policy, file /undo, macOS notifications and /every timed prompts",
   "license": "MIT",
@@ -23,7 +23,7 @@
       "./extensions/notify.ts",
       "./extensions/every.ts",
       "./extensions/epic-guard.ts",
-      "./extensions/story-plan.ts"
+      "./extensions/plan-mode.ts"
     ]
   },
   "devDependencies": {

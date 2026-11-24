@@ -318,10 +318,10 @@ A file with the same name in `~/.omp/agent/commands/` or `~/.omp/agent/skills/` 
 
 | Extension | When | What it does |
 |---|---|---|
-| `epic-guard` | From `/epic` until `/epic-done`, `/story` or `/build` | Refuses `write`, `edit` and `ast_edit` calls on repo files outside `plans/` (where `/epic` writes `plans/<NNN-name>.md`), in subagents too. Paths outside the repo pass. Saved in the session, so it survives a restart or resume. |
-| `story-plan` | `/story` typed in the interactive TUI | Enters omp's plan mode before the turn, so clarifying and the acceptance criteria are read-only; approving the plan in Plan Review starts the build. Print, RPC and unattended sessions run `/story` as before. |
+| `epic-guard` | From `/epic` until `/epic-done`, `/story` or `/build` | Refuses `write`, `edit` and `ast_edit` calls on repo files outside `plans/` (where `/epic` writes `plans/<NNN-name>.md`), in subagents too. Paths outside the repo pass. Saved in the session, so it survives a restart or resume, and carried into the fresh session that "Approve and execute" in Plan Review starts. |
+| `plan-mode` | `/story` or `/epic` typed in the interactive TUI | Enters omp's plan mode before the turn, so clarifying, the acceptance criteria and the decisions are read-only and the plan goes to Plan Review. Approving it leaves plan mode: `/story` builds, `/epic` writes `plans/<NNN-name>.md` and commits it. Print, RPC and unattended sessions run both as before and confirm with `ask`. |
 
-`/epic` cannot use plan mode itself: plan mode refuses the plan-file write and the commit it needs. `epic-guard` leaves `bash` alone, so a shell write of code is not caught.
+`epic-guard` leaves `bash` alone, so a shell write of code is not caught.
 
 **Verify:** `bun test extensions/epic-guard.test.ts` (it also checks that every plan path the `epic` and `build` skills name is one the guard allows).
 
@@ -354,6 +354,11 @@ The numbering starts at M5: M1 to M4 measured memory notes that omp's memory bac
 Limits: a session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names and tool names; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.46.0 — 2026-11-24
+
+- **Changed:** `/epic` starts in plan mode in the TUI, like `/story`: questions and the draft plan stay read-only and the plan is approved in Plan Review, where you can annotate it. Approval leaves plan mode, then `/epic` writes `plans/<NNN-name>.md` and commits it. `story-plan` is renamed `plan-mode`.
+- **Fixed:** `epic-guard` turned off when Plan Review's "Approve and execute" started a fresh session; it now carries over that session.
 
 ### 0.45.0 — 2026-11-24
 
