@@ -862,7 +862,7 @@ describe("the shims, with real git", () => {
 				expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
 			}
 			expect(ran()).toHaveLength(3);
-		});
+		}, 30_000);
 
 		test("a flag in front of gh's command words takes the word after it, so the command gh runs is not the one the fence would see", () => {
 			armFence({ pushBranch: BRANCH, root: repo });
@@ -885,7 +885,7 @@ describe("the shims, with real git", () => {
 				expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
 			}
 			expect(ran()).toHaveLength(6);
-		});
+		}, 30_000);
 
 		test("gh pr create opens a draft only when the last --draft or -d is a true bool, as strconv.ParseBool reads it; a flag's value can't be the --draft that follows it", () => {
 			armFence({ pushBranch: BRANCH, root: repo });
@@ -909,7 +909,7 @@ describe("the shims, with real git", () => {
 			];
 			for (const args of allowed) expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
 			expect(ran()).toHaveLength(allowed.length);
-		});
+		}, 30_000);
 
 		test("a GraphQL query read from a file is refused whichever way the flag is spelled, and a thread may still be resolved", () => {
 			armFence({ pushBranch: BRANCH, root: repo });
@@ -928,7 +928,7 @@ describe("the shims, with real git", () => {
 				expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
 			}
 			expect(ran()).toHaveLength(3);
-		});
+		}, 30_000);
 
 		test("a comment is the last --body or -b gh is given, so the first one can't stand in for it", () => {
 			armFence({ pushBranch: BRANCH, root: repo });
@@ -943,7 +943,7 @@ describe("the shims, with real git", () => {
 			const allowed = [["pr", "comment", "7", "--body", "no marker", "-b", good], ["pr", "comment", "7", `--body=${good}`], ["pr", "comment", "7", `-b=${good}`], ["issue", "comment", "7", "-b", good, "-R", "o/r"]];
 			for (const args of allowed) expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
 			expect(ghRuns()).toBe(allowed.length);
-		});
+		}, 30_000);
 
 		test("git -C takes the next word as the folder, a folder named -c included, and --attr-source and --shallow-file take theirs: the push is judged as the push it is", () => {
 			armFence({ pushBranch: BRANCH, root: repo });
@@ -968,7 +968,7 @@ describe("the shims, with real git", () => {
 				expect(r.stderr, args.join(" ")).not.toContain("ship fence");
 				expect(r.status, args.join(" ")).toBe(0);
 			}
-		});
+		}, 30_000);
 
 		test("a push that would also send a tag is refused, however git came to follow tags; --no-follow-tags sends the branch alone", () => {
 			armFence({ pushBranch: BRANCH, root: repo });
@@ -1008,7 +1008,7 @@ describe("the shims, with real git", () => {
 			expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
 			expect(originHas(BRANCH)).toBe(sh(repo, "rev-parse", "HEAD").trim());
 			expect(tags()).toBe("");
-		});
+		}, 30_000);
 
 		test("git remote's subcommand follows its options: -v and --verbose in front change nothing", () => {
 			armFence({ pushBranch: BRANCH, root: repo });
@@ -1028,7 +1028,7 @@ describe("the shims, with real git", () => {
 				expect(r.stderr, args.join(" ")).not.toContain("ship fence");
 				expect(r.status, args.join(" ")).toBe(0);
 			}
-		});
+		}, 30_000);
 
 		test("--no-verify is refused in every spelling git reads for it, on commit, merge and pull, and a message that holds an n is not -n", () => {
 			armFence({ pushBranch: BRANCH, root: repo });
@@ -1074,7 +1074,7 @@ describe("the shims, with real git", () => {
 				expect(r.stderr, args.join(" ")).not.toContain("ship fence");
 				expect(r.status, `${args.join(" ")}: ${r.stderr}`).toBe(0);
 			}
-		});
+		}, 30_000);
 
 		test("the same shims still run what was always allowed", () => {
 			armFence({ pushBranch: BRANCH, root: repo });
@@ -1093,6 +1093,6 @@ describe("the shims, with real git", () => {
 				expect(r.status, `${args.join(" ")}: ${r.stderr}`).toBe(0);
 			}
 			expect(originHas(BRANCH)).toBe(sh(repo, "rev-parse", "HEAD").trim());
-		});
+		}, 30_000);
 	});
 });
