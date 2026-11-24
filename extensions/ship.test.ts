@@ -5,13 +5,15 @@ import { type Args, createShip, exec, parseArgs, readVerdict, type Report, type 
 import { SHIM_DIR } from "./ship/fence-state";
 import { putUp } from "./ship/putup";
 import { type Note, SHIP, type Snapshot, type Step, type Watch } from "./ship/types";
-import { claimWatch, heldElsewhere, loadWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch } from "./ship/watch";
+import { claimWatch, loadWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch, unclaimWatch } from "./ship/watch";
 import { fakeContext, fakePi, privateHome, resetHome, scriptedUi, type FakeContext, type FakePi } from "./test-harness";
 
 const PR = { host: "github.com", owner: "tung-dnt", repo: "sandbox", number: 12 } as const;
 const URL = "https://github.com/tung-dnt/sandbox/pull/12";
 const T0 = Date.UTC(2026, 10, 24, 9, 0, 0);
 const ROOT = "/work/sandbox";
+/** What `gh pr list --head <branch>` finds when the branch already has the user's open PR. */
+const listed = { number: 12, url: URL, author: { login: "tung-dnt" }, isCrossRepository: false };
 
 const snap = (over: Partial<Snapshot> = {}): Snapshot => ({
 	pr: PR,
@@ -65,6 +67,8 @@ interface Rig {
 		armed: { pushBranch: string; root: string }[];
 		disarmed: number;
 		released: { reason: string }[];
+		/** Claims that a start gave back because it never became a watch. */
+		unclaimed: Watch[];
 		saved: Watch[];
 		reads: { trust: { me: string; bots: string[] } }[];
 		pushes: string[];
@@ -73,15 +77,17 @@ interface Rig {
 		dirs: string[];
 		/** Every `git push` that was run. */
 		gitPushes: string[];
+		/** Every `gh pr create` that was run. */
+		creates: string[];
 		/** Reads of the PR that have started and not answered yet, and the most there were at once. */
 		open: number;
 		mostOpen: number;
 	};
 	/** What the parts answer; the last snapshot repeats, and an Error is thrown by the read. `listed` is what `gh pr list` finds for the branch. */
-	answers: { snapshots: (Snapshot | string | Error)[]; steps: Step[]; claim: string | Watch | null; put: unknown; putFiles: string[]; confirmed: boolean | null; renew: "held" | "taken"; branch: string; dirty: string; armError: string | null; listed: unknown[]; readMs: number };
+	answers: { snapshots: (Snapshot | string | Error)[]; steps: Step[]; claim: string | Watch | null; put: unknown; putFiles: string[]; confirmed: boolean | null; renew: "held" | "taken"; branch: string; dirty: string; armError: string | null; listed: unknown[]; ahead: string; readMs: number };
 	clock: { now: number };
-	/** Makes the next read of the PR, or the next `git status`, wait until the returned function is called, as a slow GitHub or a slow disk would. */
-	hold(what?: "read" | "git"): () => void;
+	/** Makes the next read of the PR, `git status`, `gh pr list` or `gh api user`, or the next `git push`, wait until the returned function is called, as a slow GitHub, disk or link would. */
+	hold(what?: "read" | "git" | "list" | "user" | "push"): () => void;
 	cmd(args: string, ctx?: Rig["ctx"]): Promise<void>;
 	/** Moves the clock, fires the timer and lets everything that isn't held run to its end. */
 	tick(minutes?: number): Promise<void>;
@@ -111,9 +117,9 @@ function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform
 	const setInterval = ctx.setInterval;
 	ctx.setInterval = (callback, ms) => (ctx.intervals.push(ms), setInterval(callback, ms));
 
-	const calls: Rig["calls"] = { claims: [], armed: [], disarmed: 0, released: [], saved: [], reads: [], pushes: [], puts: [], dirs: [], gitPushes: [], open: 0, mostOpen: 0 };
-	const answers: Rig["answers"] = { snapshots: [snap()], steps: [], claim: null, put: PR, putFiles: [], confirmed: null, renew: "held", branch: "feat/x", dirty: "", armError: null, listed: [], readMs: 0 };
-	const holds = { read: [] as Promise<void>[], git: [] as Promise<void>[] };
+	const calls: Rig["calls"] = { claims: [], armed: [], disarmed: 0, released: [], unclaimed: [], saved: [], reads: [], pushes: [], puts: [], dirs: [], gitPushes: [], creates: [], open: 0, mostOpen: 0 };
+	const answers: Rig["answers"] = { snapshots: [snap()], steps: [], claim: null, put: PR, putFiles: [], confirmed: null, renew: "held", branch: "feat/x", dirty: "", armError: null, listed: [], ahead: "", readMs: 0 };
+	const holds = { read: [] as Promise<void>[], git: [] as Promise<void>[], list: [] as Promise<void>[], user: [] as Promise<void>[], push: [] as Promise<void>[] };
 
 	const parts: ShipParts = {
 		now: () => clock.now,
@@ -129,12 +135,27 @@ function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform
 				await holds.git.shift();
 				return { code: 0, out: answers.dirty, err: "" };
 			}
-			if (args[0] === "push") calls.gitPushes.push(key);
+			// The commits beyond main that put-up lists when the branch has no PR yet.
+			if (args[0] === "log" && args[1] === "--reverse") return { code: 0, out: answers.ahead, err: "" };
+			if (args[0] === "push") {
+				calls.gitPushes.push(key);
+				await holds.push.shift();
+			}
 			return { code: 0, out: "", err: "" };
 		},
 		ghFor: () => async args => {
-			if (args.join(" ") === "api user --jq .login") return { code: 0, out: "tung-dnt\n", err: "" };
-			if (args[0] === "pr" && args[1] === "list") return { code: 0, out: JSON.stringify(answers.listed), err: "" };
+			if (args.join(" ") === "api user --jq .login") {
+				await holds.user.shift();
+				return { code: 0, out: "tung-dnt\n", err: "" };
+			}
+			if (args[0] === "pr" && args[1] === "list") {
+				await holds.list.shift();
+				return { code: 0, out: JSON.stringify(answers.listed), err: "" };
+			}
+			if (args[0] === "pr" && args[1] === "create") {
+				calls.creates.push(args.join(" "));
+				return { code: 0, out: `${URL}\n`, err: "" };
+			}
 			return { code: 1, out: "", err: "unexpected gh call" };
 		},
 		sshHostname: () => null,
@@ -163,9 +184,9 @@ function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform
 			calls.claims.push({ pr, start });
 			return answers.claim ?? watchOf();
 		},
-		heldElsewhere: () => null,
 		renewClaim: (watch, now) => (answers.renew === "taken" ? null : { ...watch, owner: { ...watch.owner, heartbeat: now } }),
 		releaseWatch: (_watch, reason) => void calls.released.push({ reason }),
+		unclaimWatch: watch => void calls.unclaimed.push(watch),
 		saveWatch: watch => void calls.saved.push(watch),
 		recordPass: (watch, snapshot, now) => ({ ...watch, lastPassAt: now, lastHash: snapshot.hash, nextAt: now + SHIP.quietMs, passes: [...watch.passes, now] }),
 		recordPush: (watch, cause, now) => {
@@ -180,7 +201,7 @@ function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform
 		rules: () => "RULES OF THE PASS",
 	};
 	// With `real`, story 3's engine decides and keeps the watch file; only reading the PR and the fence stay fakes.
-	createShip({ ...parts, ...(options.real ? { claimWatch, heldElsewhere, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch } : {}), ...(options.realPutUp ? { putUp } : {}) })(fake.pi);
+	createShip({ ...parts, ...(options.real ? { claimWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch, unclaimWatch } : {}), ...(options.realPutUp ? { putUp } : {}) })(fake.pi);
 
 	return {
 		fake,
@@ -496,10 +517,179 @@ describe("reading the PR never holds the watch up", () => {
 		await settled();
 		await t.cmd("13");
 		expect(lastMessage(t)).toBe("/ship: another /ship is still starting; run it again in a moment");
+		expect(t.ctx.ui.notifications.at(-1)?.type).toBe("warning");
 		release();
 		await first;
 		expect(t.calls.claims).toHaveLength(1);
 		expect(t.ctx.timers.size).toBe(1);
+	});
+});
+
+describe("a /ship that is still starting can be stopped", () => {
+	test("without a stop, a branch with a commit beyond main and nothing to confirm is pushed, put up and watched", async () => {
+		const t = rig({ real: true, realPutUp: true });
+		t.answers.ahead = "a1b2c3d feat: x\n";
+		await t.cmd("");
+		expect(t.calls.gitPushes).toEqual(["push origin feat/x"]);
+		expect(t.calls.creates).toHaveLength(1);
+		expect(t.ctx.timers.size).toBe(1);
+	});
+
+	test("/ship stop cancels it: nothing is claimed, armed or watched, and the stop is the only word said", async () => {
+		const t = rig();
+		const release = t.hold();
+		const starting = t.cmd("12");
+		await settled();
+		await t.cmd("stop");
+		expect(lastMessage(t)).toBe("Stopped the /ship that was still starting.");
+		release();
+		await starting;
+		expect(t.calls.claims).toEqual([]);
+		expect(t.calls.armed).toEqual([]);
+		expect(t.ctx.timers.size).toBe(0);
+		expect(t.statuses).toEqual([]);
+		expect(t.ctx.ui.notifications).toHaveLength(1);
+	});
+
+	test("a second /ship waits until the stopped one has unwound, then runs", async () => {
+		const t = rig();
+		const release = t.hold();
+		const starting = t.cmd("12");
+		await settled();
+		await t.cmd("stop");
+		await t.cmd("12");
+		expect(lastMessage(t)).toBe("/ship: another /ship is still starting; run it again in a moment");
+		release();
+		await starting;
+		await t.cmd("12");
+		expect(t.calls.claims).toHaveLength(1);
+		expect(t.ctx.timers.size).toBe(1);
+	});
+
+	test("stopping while a rerun on the same PR is starting ends the old watch and cancels the rerun", async () => {
+		const t = rig();
+		await t.cmd("12");
+		const release = t.hold();
+		const rerun = t.cmd("12");
+		await settled();
+		await t.cmd("stop");
+		release();
+		await rerun;
+		expect(t.calls.claims).toHaveLength(1);
+		expect(t.calls.armed).toHaveLength(1);
+		expect(t.calls.released).toEqual([{ reason: "stopped" }]);
+		expect(t.ctx.timers.size).toBe(0);
+	});
+
+	test.each(["session_shutdown", "session_switch", "session_clear", "session_start"])("%s cancels it too, without a word to the session that is gone", async event => {
+		const t = rig();
+		const release = t.hold();
+		const starting = t.cmd("12");
+		await settled();
+		t.fake.emit(event, {}, t.ctx);
+		release();
+		await starting;
+		expect(t.calls.claims).toEqual([]);
+		expect(t.calls.armed).toEqual([]);
+		expect(t.ctx.timers.size).toBe(0);
+		expect(t.ctx.ui.notifications).toEqual([]);
+	});
+
+	test("a stop after put-up claimed the PR gives the claim back, and the fence is never armed", async () => {
+		const t = rig({ real: true, realPutUp: true });
+		t.answers.listed = [listed];
+		const release = t.hold();
+		const starting = t.cmd("");
+		await settled();
+		// Claimed before the push, and still held while the PR is read.
+		expect(loadWatch(PR)?.owner.heartbeat).toBe(T0);
+		expect(t.calls.gitPushes).toEqual(["push origin feat/x"]);
+		await t.cmd("stop");
+		release();
+		await starting;
+		expect(loadWatch(PR)).toBeNull();
+		expect(t.calls.armed).toEqual([]);
+		expect(t.ctx.timers.size).toBe(0);
+	});
+
+	test("a stop that comes before put-up has found the PR keeps it from claiming or pushing", async () => {
+		const t = rig({ real: true, realPutUp: true });
+		t.answers.listed = [listed];
+		const release = t.hold("list");
+		const starting = t.cmd("");
+		await settled();
+		await t.cmd("stop");
+		release();
+		await starting;
+		expect(t.calls.gitPushes).toEqual([]);
+		expect(loadWatch(PR)).toBeNull();
+		expect(t.calls.armed).toEqual([]);
+	});
+
+	test("a stop that comes before put-up starts keeps it from pushing or opening a PR", async () => {
+		const t = rig({ real: true, realPutUp: true });
+		t.answers.ahead = "a1b2c3d feat: x\n";
+		const release = t.hold("user");
+		const starting = t.cmd("");
+		await settled();
+		await t.cmd("stop");
+		release();
+		await starting;
+		expect(t.calls.gitPushes).toEqual([]);
+		expect(t.calls.creates).toEqual([]);
+		expect(t.calls.armed).toEqual([]);
+	});
+
+	test("a stop that comes while put-up pushes ends the start before the PR is read, and gives the claim back", async () => {
+		const t = rig({ real: true, realPutUp: true });
+		t.answers.listed = [listed];
+		const release = t.hold("push");
+		const starting = t.cmd("");
+		await settled();
+		expect(t.calls.gitPushes).toEqual(["push origin feat/x"]);
+		await t.cmd("stop");
+		release();
+		await starting;
+		expect(t.calls.reads).toEqual([]);
+		expect(loadWatch(PR)).toBeNull();
+		expect(t.calls.armed).toEqual([]);
+	});
+
+	test("/ship stop closes the confirm a starting /ship is waiting on, so the dialog doesn't outlive it", async () => {
+		const t = rig();
+		t.answers.putFiles = ["src/a.ts"];
+		let dialog: AbortSignal | undefined;
+		t.ctx.ui.confirm = (_title, _message, options?: { signal?: AbortSignal }) => {
+			dialog = options?.signal;
+			const answer = Promise.withResolvers<boolean>();
+			dialog?.addEventListener("abort", () => answer.resolve(false));
+			return answer.promise;
+		};
+		const starting = t.cmd("");
+		await settled();
+		expect(dialog?.aborted).toBe(false);
+		await t.cmd("stop");
+		expect(dialog?.aborted).toBe(true);
+		await starting;
+		expect(t.answers.confirmed).toBe(false);
+		expect(t.calls.claims).toEqual([]);
+		expect(t.calls.armed).toEqual([]);
+		expect(t.ctx.ui.notifications).toHaveLength(1);
+	});
+
+	test("a ship_start call that is stopped fails with the reason", async () => {
+		process.env.OMP_STARTER_UNATTENDED = "1";
+		const t = rig();
+		const release = t.hold();
+		const failure = t.fake.callTool("ship_start", {}, t.ctx).then(
+			() => null,
+			(error: Error) => error,
+		);
+		await settled();
+		await t.cmd("stop");
+		release();
+		expect((await failure)?.message).toBe("/ship: stopped before it started watching");
+		expect(t.calls.armed).toEqual([]);
 	});
 });
 
@@ -624,6 +814,14 @@ describe("refusals leave nothing behind", () => {
 		nothingStarted(t);
 	});
 
+	test("a merged PR is a warning, not an error", async () => {
+		const t = rig();
+		t.answers.snapshots = [snap({ state: "MERGED" })];
+		await t.cmd("12");
+		expect(t.ctx.ui.notifications.at(-1)?.type).toBe("warning");
+		nothingStarted(t);
+	});
+
 	test("a session that exits after one prompt can't watch", async () => {
 		const t = rig({ mode: "print" });
 		await t.cmd("12");
@@ -635,7 +833,8 @@ describe("refusals leave nothing behind", () => {
 		const t = rig();
 		t.answers.armError = "ship fence: the ship-fence extension is not loaded in this session";
 		await t.cmd("12");
-		expect(t.calls.released).toEqual([{ reason: "stopped" }]);
+		expect(t.calls.unclaimed).toHaveLength(1);
+		expect(t.calls.released).toEqual([]);
 		expect(lastMessage(t)).toContain("not loaded");
 		expect(t.ctx.timers.size).toBe(0);
 	});
@@ -680,8 +879,6 @@ describe("running it again", () => {
 });
 
 describe("a second /ship on a PR another session watches", () => {
-	const listed = { number: 12, url: URL, author: { login: "tung-dnt" }, isCrossRepository: false };
-
 	test("is refused before put-up pushes anything, and names the session that holds the PR", async () => {
 		const first = rig({ real: true, sessionId: "sess-A" });
 		const second = rig({ real: true, realPutUp: true, sessionId: "sess-B" });
@@ -705,6 +902,46 @@ describe("a second /ship on a PR another session watches", () => {
 		expect(second.calls.gitPushes).toEqual(["push origin feat/x"]);
 		expect(second.ctx.timers.size).toBe(1);
 		expect(loadWatch(PR)?.owner.session).toBe("sess-B");
+	});
+
+	test("two sessions starting within one read can't both push: the first to find the PR claims it before it pushes", async () => {
+		const first = rig({ real: true, realPutUp: true, sessionId: "sess-A" });
+		const second = rig({ real: true, realPutUp: true, sessionId: "sess-B" });
+		first.answers.listed = second.answers.listed = [listed];
+		const release = first.hold();
+		const starting = first.cmd("");
+		await settled();
+		await second.cmd("");
+		expect(lastMessage(second)).toContain("already watched by session sess-A");
+		expect(second.calls.gitPushes).toEqual([]);
+		expect(second.calls.armed).toEqual([]);
+		release();
+		await starting;
+		expect(first.calls.gitPushes).toEqual(["push origin feat/x"]);
+		expect(first.ctx.timers.size).toBe(1);
+		expect(loadWatch(PR)?.owner.session).toBe("sess-A");
+	});
+
+	test("a start that is refused after put-up claimed the PR leaves no claim and no file behind", async () => {
+		const first = rig({ real: true, realPutUp: true, sessionId: "sess-A" });
+		first.answers.listed = [listed];
+		first.answers.snapshots = ["gh pr view failed: HTTP 502"];
+		await first.cmd("");
+		expect(lastMessage(first)).toContain("HTTP 502");
+		expect(loadWatch(PR)).toBeNull();
+		const second = rig({ real: true, sessionId: "sess-B" });
+		await second.cmd("12");
+		expect(second.ctx.timers.size).toBe(1);
+		expect(loadWatch(PR)?.owner.session).toBe("sess-B");
+	});
+
+	test("a refused start over a saved watch gives the claim back but keeps what GitHub can't hold", async () => {
+		saveWatch(watchOf({ told: ["reviewed"], pushesPerCause: { "check:test": 2 }, owner: { session: "sess-A", pid: process.pid, heartbeat: 0 } }));
+		const first = rig({ real: true, realPutUp: true, sessionId: "sess-A" });
+		first.answers.listed = [listed];
+		first.answers.snapshots = ["gh pr view failed: HTTP 502"];
+		await first.cmd("");
+		expect(loadWatch(PR)).toMatchObject({ told: ["reviewed"], pushesPerCause: { "check:test": 2 }, owner: { session: "sess-A", heartbeat: 0 } });
 	});
 });
 
@@ -1134,6 +1371,47 @@ describe("the real gh and git runner", () => {
 	test("kills a command that outlives its timeout, and that counts as a failure", async () => {
 		const done = await exec("sleep", ["30"], 200);
 		expect(done.code).not.toBe(0);
+	});
+
+	test("stops waiting at the timeout even when a grandchild still holds the pipes open", async () => {
+		// The shell is killed at 300 ms, but its `sleep` outlives it and keeps both pipes open: a runner that waits for the pipes to close is held up for those 3 s.
+		const started = performance.now();
+		const done = await exec("sh", ["-c", "sleep 3 & wait"], 300);
+		expect(performance.now() - started).toBeLessThan(2000);
+		expect(done.code).not.toBe(0);
+	});
+
+	test("a command that times out hands back what it printed, and says that it timed out", async () => {
+		const done = await exec("sh", ["-c", "echo partial; echo oops >&2; sleep 4"], 300);
+		expect(done).toEqual({ code: 1, out: "partial\n", err: "timed out after 0.3 s\noops\n" });
+	});
+
+	test("a command that already exited but left a grandchild holding the pipes still fails at the timeout", async () => {
+		const done = await exec("sh", ["-c", "echo hi; sleep 3 &"], 300);
+		expect(done).toEqual({ code: 1, out: "hi\n", err: "timed out after 0.3 s" });
+	});
+
+	test("gives the pipes up at the timeout, so repeated timeouts leak no descriptors", async () => {
+		const before = fs.readdirSync("/dev/fd").length;
+		for (let i = 0; i < 10; i++) await exec("sh", ["-c", "sleep 2 & wait"], 100);
+		// The last child's pidfd and pipe sockets close a few ms after exec returns: poll the real descriptor table until the count settles (a real leak never does).
+		// Real wall-clock polling is deliberate: the OS closes these on its own schedule, which fake timers cannot drive.
+		const allowed = before + 2;
+		const deadline = performance.now() + 1000;
+		let open = fs.readdirSync("/dev/fd").length;
+		while (open > allowed && performance.now() < deadline) {
+			await Bun.sleep(20);
+			open = fs.readdirSync("/dev/fd").length;
+		}
+		expect(open).toBeLessThanOrEqual(allowed);
+	});
+
+	test("leaves no timer behind once the command has finished, so a process that ran it can exit at once", async () => {
+		const script = `import { exec } from ${JSON.stringify(path.join(import.meta.dir, "ship.ts"))}; await exec("true", [], 6000);`;
+		const started = performance.now();
+		const child = Bun.spawn([process.execPath, "-e", script], { stdout: "ignore", stderr: "ignore" });
+		expect(await child.exited).toBe(0);
+		expect(performance.now() - started).toBeLessThan(4000);
 	});
 
 	test("a command that isn't there fails with 127 instead of throwing", async () => {

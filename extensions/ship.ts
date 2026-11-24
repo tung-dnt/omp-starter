@@ -18,7 +18,6 @@ import {
 	type EndReason,
 	type Gh,
 	type Git,
-	type HeldElsewhere,
 	type NextStep,
 	type ParseTarget,
 	type PrRef,
@@ -29,7 +28,7 @@ import {
 	type Trust,
 	type Watch,
 } from "./ship/types";
-import { claimWatch, heldElsewhere, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch } from "./ship/watch";
+import { claimWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch, unclaimWatch } from "./ship/watch";
 
 const USAGE = [
 	"/ship [<pr#>|<pr url>] [+bot ...] [--report <path>]  watch a pull request; with none named, put the branch up first",
@@ -47,6 +46,8 @@ const FEEDBACK = "feedback";
 const FAILED_READS_BEFORE_NOTICE = 5;
 /** A turn code started that stays unreported this long while the session is idle is counted as lost. */
 const STALE_TURN_MS = 30 * 60_000;
+/** What the ship_start tool reports when `/ship stop` or the session's end cancelled the start; nobody else is told. */
+const STOPPED = "/ship: stopped before it started watching";
 
 /** What a trigger that can't watch the session (another process, a Hermes card) reads from `--report`. */
 export interface Report {
@@ -74,12 +75,13 @@ export interface ShipParts {
 	readPr: ReadPr;
 	putUp: PutUpFn;
 	nextStep: NextStep;
+	/** Takes the PR's watch for this session. Put-up asks for it before it pushes, so of two sessions starting at once only the first pushes (AC11); the session that holds it asks again once the PR is read, to record the PR's refs. */
 	claimWatch: ClaimWatch;
-	/** Why another live session holds the watch of a PR, or null. Asked before put-up pushes, so a refused /ship pushes nothing (AC11). */
-	heldElsewhere: HeldElsewhere;
 	/** The watch with a fresh heartbeat, or null when another session has taken the claim. */
 	renewClaim(watch: Watch, now: number): Watch | null;
 	releaseWatch(watch: Watch, reason: EndReason): void;
+	/** Gives back a claim that never became a running watch, leaving no file where the claim made it. */
+	unclaimWatch(watch: Watch): void;
 	saveWatch: SaveWatch;
 	recordPass(watch: Watch, snapshot: Snapshot, now: number): Watch;
 	recordPush(watch: Watch, cause: string, now: number): Watch;
@@ -269,11 +271,22 @@ interface Run {
 	noticed: string;
 }
 
+/** Why a /ship didn't start, and how loudly the user is told. */
+interface Refusal {
+	refusal: string;
+	level: "warning" | "error";
+}
+
+type Started = { url: string } | Refusal;
+
 export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 	return function ship(pi: ExtensionAPI): void {
 		let run: Run | null = null;
-		/** A /ship that is still waiting on git, gh or put-up. A second one is refused meanwhile: two starts at once could push twice or open two PRs. */
-		let starting = false;
+		/**
+		 * The /ship that is still waiting on git, gh or put-up, or null. A second one is refused meanwhile: two starts at once could push twice or open two PRs.
+		 * `/ship stop` and the session's end abort it: it gives up at its next check, before it claims, arms or watches anything.
+		 */
+		let starting: AbortController | null = null;
 
 		const unattended = (): boolean => process.env.OMP_STARTER_UNATTENDED === "1";
 		const say = (ctx: ExtensionContext, text: string, level: "info" | "warning" | "error" = "info"): void => ctx.ui.notify(text, level);
@@ -530,120 +543,148 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			refresh(r);
 		}
 
-		/** Tells the user why /ship didn't start, and hands the same text back for a caller that isn't a person (the ship_start tool). */
-		function refuse(ctx: ExtensionContext, text: string, level: "warning" | "error" = "error"): { refusal: string } {
-			say(ctx, text, level);
-			return { refusal: text };
-		}
+		/** Why /ship didn't start. `start` tells the user, and hands the same text to a caller that isn't a person (the ship_start tool). */
+		const refuse = (text: string, level: Refusal["level"] = "error"): Refusal => ({ refusal: text, level });
 
-		async function begin(args: Extract<Args, { kind: "start" }> & { cwd?: string }, ctx: ExtensionContext): Promise<{ url: string } | { refusal: string }> {
-			if (ctx.mode === "print" || ctx.mode === "json") return refuse(ctx, "/ship needs a session that stays open (the TUI or rpc mode); this one ends after its prompt.");
+		/**
+		 * Puts the branch up when no PR is named, then starts the watch. `signal` aborts when `/ship stop` or the session's end
+		 * cancels the start. It is checked after the waits that come before something with an effect, so a cancelled start gives
+		 * up before put-up commits or pushes and before the claim, the fence and the timer, and returns any claim it already took.
+		 */
+		async function begin(args: Extract<Args, { kind: "start" }> & { cwd?: string }, ctx: ExtensionContext, signal: AbortSignal): Promise<Started> {
+			if (ctx.mode === "print" || ctx.mode === "json") return refuse("/ship needs a session that stays open (the TUI or rpc mode); this one ends after its prompt.");
 			// A bare /ship means this checkout's branch, and put-up could push or open a PR for it while another is watched.
-			if (run !== null && args.target === null) return refuse(ctx, `/ship: already watching ${label(run.pr)}; run /ship stop first, or name a pull request: /ship <number>`);
+			if (run !== null && args.target === null) return refuse(`/ship: already watching ${label(run.pr)}; run /ship stop first, or name a pull request: /ship <number>`);
 			const out = (r: { code: number; out: string }): string | null => (r.code === 0 ? r.out.trim() : null);
 			// A model or a command line passes these paths as text, and no shell expands a leading ~ in them.
 			const dir = expandHome(args.cwd ?? ctx.cwd);
 			const root = out(await parts.git(dir, ["rev-parse", "--show-toplevel"]));
-			if (root === null) return refuse(ctx, "/ship: this folder is not in a git checkout");
+			if (root === null) return refuse("/ship: this folder is not in a git checkout");
 			const target = parts.parseTarget(args.target, out(await parts.git(root, ["remote", "get-url", "origin"])) ?? "", parts.sshHostname);
-			if (typeof target === "string") return refuse(ctx, `/ship: ${target}`);
+			if (typeof target === "string") return refuse(`/ship: ${target}`);
 			const gh = parts.ghFor(target.owner);
 			const me = out(await gh(["api", "user", "--jq", ".login"]));
-			if (!me) return refuse(ctx, `/ship: can't tell which GitHub account to use for ${target.owner} (gh api user failed)`);
+			if (!me) return refuse(`/ship: can't tell which GitHub account to use for ${target.owner} (gh api user failed)`);
 			const session = ctx.sessionManager.getSessionId();
 
-			let pr: PrRef;
-			let putUp = false;
-			if ("number" in target) {
-				pr = target;
-			} else {
-				// Nobody to confirm in an unattended or UI-less session: put-up refuses a dirty tree instead of asking (AC13).
-				const confirm =
-					!unattended() && ctx.hasUI
-						? (files: string[]) => ctx.ui.confirm("Commit these files and open a draft PR?", `${files.slice(0, 15).join("\n")}${files.length > 15 ? `\nand ${files.length - 15} more` : ""}`)
-						: undefined;
-				const put = await parts.putUp(root, {
-					git: parts.git,
+			// The claim this start took that no run owns yet. Every way out of here but a started watch gives it back.
+			let held = null as Watch | null;
+			try {
+				if (signal.aborted) return refuse(STOPPED);
+				let pr: PrRef;
+				let putUp = false;
+				if ("number" in target) {
+					pr = target;
+				} else {
+					// Nobody to confirm in an unattended or UI-less session: put-up refuses a dirty tree instead of asking (AC13). A stop closes the dialog.
+					const confirm =
+						!unattended() && ctx.hasUI
+							? (files: string[]) => ctx.ui.confirm("Commit these files and open a draft PR?", `${files.slice(0, 15).join("\n")}${files.length > 15 ? `\nand ${files.length - 15} more` : ""}`, { signal })
+							: undefined;
+					const put = await parts.putUp(root, {
+						git: parts.git,
+						gh,
+						confirm,
+						sshHostname: parts.sshHostname,
+						// Asked once put-up knows the branch's PR, before it pushes. The claim is taken here, so of two sessions starting at once only the first pushes, and a /ship that is refused pushes nothing (AC11). The PR's refs aren't read yet; the claim below records them.
+						claim: found => {
+							if (signal.aborted) return STOPPED;
+							const taken = parts.claimWatch(found, { baseRef: "", headRef: "", session, pid: process.pid, now: parts.now() });
+							if (typeof taken === "string") return taken;
+							held = taken;
+							return null;
+						},
+					});
+					if (typeof put === "string") return refuse(`/ship: ${put}`);
+					pr = put;
+					putUp = true;
+				}
+				if (signal.aborted) return refuse(STOPPED);
+				if (run !== null && !samePr(run.pr, pr)) return refuse(`/ship: already watching ${label(run.pr)}; run /ship stop first`);
+
+				const trust = { me, bots: args.bots };
+				const snapshot = await parts.readPr(pr, gh, trust);
+				if (typeof snapshot === "string") return refuse(`/ship: ${snapshot}`);
+				if (snapshot.state !== "OPEN") return refuse(`/ship: ${label(pr)} is ${snapshot.state.toLowerCase()}; nothing to watch`, "warning");
+				if (snapshot.author.toLowerCase() !== me.toLowerCase()) {
+					return refuse(`/ship: ${label(pr)} was opened by ${snapshot.author}, and gh acts as ${me} for ${pr.owner}; /ship only watches pull requests of that account`);
+				}
+				const branch = out(await parts.git(root, ["symbolic-ref", "--short", "-q", "HEAD"]));
+				if (branch !== snapshot.headRef) return refuse(`/ship: this checkout is on ${branch ?? "no branch"}, but ${label(pr)} is ${snapshot.headRef}; check that branch out first`);
+				// Nothing below waits, so a start that gets past this check goes on to watch.
+				if (signal.aborted) return refuse(STOPPED);
+
+				// A rerun on the same PR starts the watch over from GitHub and the state file (AC10), with the pass count reset (AC14).
+				if (run !== null) finish(run, "stopped", { quiet: true });
+				const watch = parts.claimWatch(pr, { baseRef: snapshot.baseRef, headRef: snapshot.headRef, session, pid: process.pid, now: parts.now() });
+				if (typeof watch === "string") return refuse(`/ship: ${watch}`);
+				held = watch;
+				try {
+					parts.armFence({ pushBranch: snapshot.headRef, root });
+				} catch (error) {
+					return refuse(`/ship: ${message(error)}`);
+				}
+
+				const r: Run = {
+					ctx,
+					pr,
 					gh,
-					confirm,
-					sshHostname: parts.sshHostname,
-					// Asked once put-up knows the branch's PR, before it pushes: a second /ship that is refused pushes nothing (AC11).
-					heldElsewhere: found => parts.heldElsewhere(found, session, parts.now()),
-				});
-				if (typeof put === "string") return refuse(ctx, `/ship: ${put}`);
-				pr = put;
-				putUp = true;
+					trust,
+					root,
+					watch,
+					timer: null,
+					report: args.report === null ? null : path.resolve(dir, expandHome(args.report)),
+					state: "watching",
+					reason: null,
+					lastLine: "started",
+					waitingFor: null,
+					snapshot,
+					passes: 0,
+					awaiting: null,
+					sentAt: 0,
+					sent: null,
+					passFrom: null,
+					triage: false,
+					failedReads: 0,
+					reading: null,
+					turnsEnded: 0,
+					noticed: "",
+				};
+				run = r;
+				held = null;
+				try {
+					r.timer = ctx.setInterval(() => tick(r), SHIP.tickMs);
+					say(ctx, `/ship: watching ${label(pr)} as ${me} on ${snapshot.headRef}, fence armed. The PR is read every ${SHIP.tickMs / 60_000} minutes; a model pass starts only when something changes.`);
+					// The review comes first, so the first pass has its findings to triage; the first tick follows on the timer.
+					if (putUp && !watch.told.includes(TOLD_REVIEWED)) sendReview(r);
+					else await tick(r, snapshot);
+				} catch (error) {
+					finish(r, "stopped", { quiet: true });
+					return refuse(`/ship: ${message(error)}`);
+				}
+				return { url: snapshot.url };
+			} finally {
+				if (held !== null) parts.unclaimWatch(held);
 			}
-			if (run !== null && !samePr(run.pr, pr)) return refuse(ctx, `/ship: already watching ${label(run.pr)}; run /ship stop first`);
-
-			const trust = { me, bots: args.bots };
-			const snapshot = await parts.readPr(pr, gh, trust);
-			if (typeof snapshot === "string") return refuse(ctx, `/ship: ${snapshot}`);
-			if (snapshot.state !== "OPEN") return refuse(ctx, `/ship: ${label(pr)} is ${snapshot.state.toLowerCase()}; nothing to watch`, "warning");
-			if (snapshot.author.toLowerCase() !== me.toLowerCase()) {
-				return refuse(ctx, `/ship: ${label(pr)} was opened by ${snapshot.author}, and gh acts as ${me} for ${pr.owner}; /ship only watches pull requests of that account`);
-			}
-			const branch = out(await parts.git(root, ["symbolic-ref", "--short", "-q", "HEAD"]));
-			if (branch !== snapshot.headRef) return refuse(ctx, `/ship: this checkout is on ${branch ?? "no branch"}, but ${label(pr)} is ${snapshot.headRef}; check that branch out first`);
-
-			// A rerun on the same PR starts the watch over from GitHub and the state file (AC10), with the pass count reset (AC14).
-			if (run !== null) finish(run, "stopped", { quiet: true });
-			const watch = parts.claimWatch(pr, { baseRef: snapshot.baseRef, headRef: snapshot.headRef, session, pid: process.pid, now: parts.now() });
-			if (typeof watch === "string") return refuse(ctx, `/ship: ${watch}`);
-			try {
-				parts.armFence({ pushBranch: snapshot.headRef, root });
-			} catch (error) {
-				parts.releaseWatch(watch, "stopped");
-				return refuse(ctx, `/ship: ${message(error)}`);
-			}
-
-			const r: Run = {
-				ctx,
-				pr,
-				gh,
-				trust,
-				root,
-				watch,
-				timer: null,
-				report: args.report === null ? null : path.resolve(dir, expandHome(args.report)),
-				state: "watching",
-				reason: null,
-				lastLine: "started",
-				waitingFor: null,
-				snapshot,
-				passes: 0,
-				awaiting: null,
-				sentAt: 0,
-				sent: null,
-				passFrom: null,
-				triage: false,
-				failedReads: 0,
-				reading: null,
-				turnsEnded: 0,
-				noticed: "",
-			};
-			run = r;
-			try {
-				r.timer = ctx.setInterval(() => tick(r), SHIP.tickMs);
-				say(ctx, `/ship: watching ${label(pr)} as ${me} on ${snapshot.headRef}, fence armed. The PR is read every ${SHIP.tickMs / 60_000} minutes; a model pass starts only when something changes.`);
-				// The review comes first, so the first pass has its findings to triage; the first tick follows on the timer.
-				if (putUp && !watch.told.includes(TOLD_REVIEWED)) sendReview(r);
-				else await tick(r, snapshot);
-			} catch (error) {
-				finish(r, "stopped", { quiet: true });
-				return refuse(ctx, `/ship: ${message(error)}`);
-			}
-			return { url: snapshot.url };
 		}
 
-		async function start(args: Extract<Args, { kind: "start" }> & { cwd?: string }, ctx: ExtensionContext): Promise<{ url: string } | { refusal: string }> {
-			if (starting) return refuse(ctx, "/ship: another /ship is still starting; run it again in a moment", "warning");
-			starting = true;
-			try {
-				return await begin(args, ctx);
-			} finally {
-				starting = false;
+		async function start(args: Extract<Args, { kind: "start" }> & { cwd?: string }, ctx: ExtensionContext): Promise<Started> {
+			let started: Started;
+			if (starting !== null) {
+				started = refuse("/ship: another /ship is still starting; run it again in a moment", "warning");
+			} else {
+				const attempt = new AbortController();
+				starting = attempt;
+				try {
+					started = await begin(args, ctx, attempt.signal);
+				} finally {
+					starting = null;
+				}
+				// A start that was stopped, or whose session ended, says nothing more: whatever it refused for is no news.
+				if ("refusal" in started && attempt.signal.aborted) return refuse(STOPPED);
 			}
+			if ("refusal" in started) say(ctx, started.refusal, started.level);
+			return started;
 		}
 
 		function describe(r: Run): string {
@@ -655,6 +696,14 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				`Passes: ${r.passes} this session, ${inWindow} of ${SHIP.passCap} in the last 24 hours. Pushes per cause: ${pushes.join(", ") || "none"}.`,
 				`Comments kept from the model: ${r.snapshot.untrusted}`,
 			].join("\n");
+		}
+
+		/** `/ship stop`: ends the watch, and cancels a /ship that is still starting, which would otherwise go on to start one. */
+		function stop(ctx: ExtensionContext): void {
+			const cancelling = starting !== null && !starting.signal.aborted;
+			starting?.abort();
+			if (run !== null) return finish(run, "stopped", { quiet: true });
+			say(ctx, cancelling ? "Stopped the /ship that was still starting." : "No /ship watch in this session.");
 		}
 
 		pi.registerCommand("ship", {
@@ -670,9 +719,9 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 						return say(ctx, `/ship: ${message(error)}`, "error");
 					}
 				}
+				if (args.kind === "stop") return stop(ctx);
 				if (run === null) return say(ctx, "No /ship watch in this session.");
-				if (args.kind === "status") return say(ctx, describe(run));
-				finish(run, "stopped", { quiet: true });
+				say(ctx, describe(run));
 			},
 		});
 
@@ -714,8 +763,9 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			void queue(r, () => passEnded(r, event));
 		});
 
-		// The conversation the passes belong to is going away, so the watch goes with it.
+		// The conversation the passes belong to is going away, so the watch goes with it, and a /ship still starting never starts one.
 		const sessionEnds = (): void => {
+			starting?.abort();
 			if (run !== null) finish(run, "stopped", { quiet: true, abort: false });
 		};
 		pi.on("session_start", sessionEnds);
@@ -731,9 +781,25 @@ const RUN_TIMEOUT_MS = 90_000;
 const SKILL = path.join(import.meta.dir, "..", "skills", "ship", "SKILL.md");
 
 /**
+ * What one of a child's pipes has said so far. `done` settles when the pipe closes, and a grandchild that inherited the
+ * pipe keeps it open for as long as it lives, so a caller with a deadline reads `text()` and `close()`s the pipe instead.
+ */
+function drain(pipe: ReadableStream<Uint8Array>): { done: Promise<void>; text(): string; close(): void } {
+	const reader = pipe.getReader();
+	const decoder = new TextDecoder();
+	let text = "";
+	const done = (async () => {
+		for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) text += decoder.decode(chunk.value, { stream: true });
+		text += decoder.decode();
+	})();
+	return { done, text: () => text, close: () => void reader.cancel().catch(() => {}) };
+}
+
+/**
  * gh and git run for the watch's own reads and for put-up, not for the model, so they skip the fence's shims: the fence
  * judges what the model runs, and a refusal of the watch's own GraphQL read would end the watch. Nothing prompts. Never
  * synchronous: a read takes seconds on a slow link, and the session must keep running while it waits (#7). Output is untrimmed.
+ * A call that outlives `timeoutMs` kills the child and fails at once, whatever still holds its pipes (#14).
  */
 export async function exec(command: string, args: string[], timeoutMs = RUN_TIMEOUT_MS): Promise<{ code: number; out: string; err: string }> {
 	const entries = (process.env.PATH ?? "").split(path.delimiter).filter(entry => entry !== SHIM_DIR);
@@ -743,11 +809,21 @@ export async function exec(command: string, args: string[], timeoutMs = RUN_TIME
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",
-			timeout: timeoutMs,
 		});
-		// Both pipes are read while it runs, so a chatty child never fills one and stalls. A child killed at the timeout has no exit code: that is a failure.
-		const [out, err] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-		return { code: child.exitCode ?? 1, out, err };
+		// Both pipes are read while it runs, so a chatty child never fills one and stalls.
+		const out = drain(child.stdout);
+		const err = drain(child.stderr);
+		const late = Promise.withResolvers<false>();
+		const deadline = setTimeout(late.resolve, timeoutMs, false);
+		const finished = await Promise.race([Promise.all([out.done, err.done, child.exited]).then(() => true), late.promise]).finally(() => clearTimeout(deadline));
+		// A child killed by a signal has no exit code: that is a failure.
+		if (finished) return { code: child.exitCode ?? 1, out: out.text(), err: err.text() };
+		// Out of time. Killing the child isn't enough: a grandchild that inherited the pipes keeps them open, and waiting for them to close would hold this call up for as long as it lives.
+		child.kill();
+		const said = { out: out.text(), err: err.text() };
+		out.close();
+		err.close();
+		return { code: child.exitCode || 1, out: said.out, err: `timed out after ${timeoutMs / 1000} s${said.err === "" ? "" : `\n${said.err}`}` };
 	} catch (error) {
 		return { code: 127, out: "", err: message(error) };
 	}
@@ -778,9 +854,9 @@ const realParts: ShipParts = {
 	putUp,
 	nextStep,
 	claimWatch,
-	heldElsewhere,
 	renewClaim,
 	releaseWatch,
+	unclaimWatch,
 	saveWatch,
 	recordPass,
 	recordPush,

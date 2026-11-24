@@ -4,12 +4,13 @@
 // A watch starts with no pass behind it (`lastHash` null, so its first step is a pass), watches from then on, and ends
 // when `nextStep` says so. Each tick (`SHIP.tickMs`) the session calls `renewClaim`, reads the PR and asks `nextStep`.
 // On a pass it calls `recordPass`, on each push `recordPush`, and saves the result with `saveWatch`; on an end it calls
-// `releaseWatch`. (`spend_cap` is the one end that isn't final: keep ticking.) The Watch lives in one file per PR, which
-// is what lets a rerun resume, a second live session be refused and a dead one be taken over.
+// `releaseWatch`. (`spend_cap` is the one end that isn't final: keep ticking.) A claim taken before the watch can start
+// (put-up claims before it pushes) that is then given up goes back with `unclaimWatch`. The Watch lives in one file per
+// PR, which is what lets a rerun resume, a second live session be refused and a dead one be taken over.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type ClaimWatch, type EndReason, type HeldElsewhere, type NextStep, type PrRef, type SaveWatch, SHIP, type Snapshot, type Watch } from "./types";
+import { type ClaimWatch, type EndReason, type NextStep, type PrRef, type SaveWatch, SHIP, type Snapshot, type Watch } from "./types";
 
 // ---- what to do next -----------------------------------------------------------------------------------------------
 
@@ -147,9 +148,6 @@ function heldBy(pr: PrRef, held: Watch | null, session: string, now: number): st
 	return `${pr.owner}/${pr.repo}#${pr.number} is already watched by session ${held.owner.session} (pid ${held.owner.pid}); run /ship stop there first`;
 }
 
-/** Why `session` may not claim the watch of `pr`, or null when it may. Reads the file and changes nothing, for a caller that must refuse before it does anything else. */
-export const heldElsewhere: HeldElsewhere = (pr, session, now) => heldBy(pr, loadWatch(pr), session, now);
-
 /**
  * The Watch this session may run, saved with it as owner; or why another live session holds it. The same session, or one
  * taking over a stale or dead owner, resumes the saved Watch: the start time, pushes per cause and what the user was told
@@ -206,4 +204,18 @@ export function releaseWatch(watch: Watch, reason: EndReason): void {
 			return _exhaustive;
 		}
 	}
+}
+
+/**
+ * Call for a claim that never became a running watch: a start that was stopped, or refused after it claimed. A claim that
+ * made the file, with no fact in it since, takes the file away again, so such a start leaves no trace. One over a saved
+ * watch keeps what GitHub can't hold and no longer counts as held, as a stopped watch does. A session that was taken
+ * over leaves the new owner's file alone.
+ */
+export function unclaimWatch(watch: Watch): void {
+	const facts = watch.lastPassAt !== null || watch.lastPushAt !== null || watch.told.length > 0 || Object.keys(watch.pushesPerCause).length > 0;
+	if (facts) return releaseWatch(watch, "stopped");
+	const held = loadWatch(watch.pr);
+	if (held !== null && !isOwner(held, watch)) return;
+	fs.rmSync(watchFile(watch.pr), { force: true });
 }
