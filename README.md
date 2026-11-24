@@ -127,6 +127,8 @@ It runs automatically only on a brand-new install; existing installs opt in with
 
 This plugin adds no memory tools, memory index or memory folder. Recommended Hindsight settings: `hindsight.autoRetain false` (session transcripts carry tool output) and `hindsight.recallTimeoutMs 5000`.
 
+**Repo memory (`extensions/repo-memory.ts`).** omp tags Hindsight memories with the folder a session starts in (`project:<folder>`), so a session opened in `~/projects` recalls nothing repo-specific. The first time the main session reads, edits or runs `bash` in another git repo, this extension recalls that repo's memories (tags `project:<folder>` and `project:<origin repo name>`, so worktrees such as `paco24-PAC2-1234` match `paco24`) and adds them to the tool result, once per repo per session. It is Hindsight-only: it runs with `memory.backend: hindsight` and the default `per-project-tagged` scoping, and with any other backend or scoping it does nothing. It reads the bank, URL and token from `~/.omp/agent/config.yml` (then `HINDSIGHT_API_URL`/`HINDSIGHT_API_TOKEN`), and waits up to 5 s for the server. Subagents and the session's own repo are skipped. Limit: it changes recall only; `retain` still tags new memories with the session's start folder.
+
 **Commit gate.** Blocks the agent's `git commit` under a gate folder until the session saved a memory: a successful `retain`, `learn` or `memory_edit` (whichever the backend has). File writes and edits never count. `[skip-mem]` in the commit message bypasses it, and so does an unattended build (`OMP_STARTER_UNATTENDED=1`). Only the `commit` subcommand is gated: `git commit-tree` or `git log --grep commit` pass. The gate checks the folder the commit really runs in (bash `cwd`, a leading `cd <dir> &&`, `git -C <dir>`). A save counts when the tool returns without an error. The block message names the tools of the current backend. A backend with no write tool has nothing that could satisfy the gate, so the gate never blocks. The setting lives in `memory.gateDirs` of `~/.omp/agent/omp-starter.json`.
 
 | Do | Don't |
@@ -414,6 +416,10 @@ Limits: a session's repo comes from the origin URL of its working folder, so a f
 ### Unreleased
 
 - **Fixed:** `/ship stop` during a start now reaches put-up. It checks the stop before it stages, commits, pushes and opens the draft PR, so a stop on a clean branch no longer ends in a push and a PR. A commit or push already running still completes. Fixes #17.
+
+### 0.48.0 — 2026-11-25
+
+- **Added:** `extensions/repo-memory.ts`. When the main session starts working in a repo other than the one it was started in, it recalls that repo's Hindsight memories (`project:<repo>` tags) once and hands them to the agent. See [Memory](#memory-starter-memory).
 - **Fixed:** a `/ship` that is still starting can be stopped. `/ship stop` or the session ending cancels it before it claims, fences or watches anything, closes the confirm it waits on and gives back any claim it took; before, `stop` said there was no watch and the watch then started anyway. The first session to find a branch's open PR claims it before it pushes, so two sessions starting together can't both push. A `gh` or `git` call that outlives its timeout fails at the timeout, with the output so far and a note that it timed out, even when a grandchild still holds its pipes. Fixes #14.
 
 ### 0.47.0 — 2026-11-24
