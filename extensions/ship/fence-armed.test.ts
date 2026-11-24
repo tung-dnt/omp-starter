@@ -961,8 +961,9 @@ describe("the shims, with real git", () => {
 			expect(originHas(BRANCH)).toBe("");
 			expect(originHas("other")).toBe("");
 			expect(sh(repo, "rev-parse", "HEAD").trim()).toBe(evil);
-			// Options that take no word, and the ones that do, still lead to the command.
-			for (const args of [["--no-pager", "log", "-1"], ["--no-optional-locks", "status", "-s"], ["-P", "log", "-1"], ["-C", "src", "-c", "color.ui=never", "--no-pager", "status", "-s"], ["--attr-source", "HEAD", "status", "-s"], ["--shallow-file", "x", "status", "-s"]]) {
+			// Options that take no word, and the ones that do, still lead to the command. (--attr-source is git 2.40's.)
+			const attrSource = spawnSync("git", ["--attr-source", "HEAD", "version"], { env: { ...process.env, PATH: savedPath } }).status === 0;
+			for (const args of [["--no-pager", "log", "-1"], ["--no-optional-locks", "status", "-s"], ["-P", "log", "-1"], ["-C", "src", "-c", "color.ui=never", "--no-pager", "status", "-s"], ...(attrSource ? [["--attr-source", "HEAD", "status", "-s"]] : []), ["--shallow-file", "x", "status", "-s"]]) {
 				const r = git(process.env, ...args);
 				expect(r.stderr, args.join(" ")).not.toContain("ship fence");
 				expect(r.status, args.join(" ")).toBe(0);
