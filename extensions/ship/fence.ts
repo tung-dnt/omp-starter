@@ -117,33 +117,41 @@ const FIELD_FLAGS = names("-f", "-F", "--field", "--raw-field");
 
 // ---- gh -------------------------------------------------------------------------------------------------------------
 
-/** gh's own commands. Anything else is an alias or an extension, which the fence can't read. */
-const GH_COMMANDS = names(
-	"agent-task", "alias", "api", "attestation", "auth", "browse", "cache", "co", "codespace", "completion", "config",
-	"copilot", "extension", "gist", "gpg-key", "help", "issue", "label", "org", "pr", "preview", "project", "release",
-	"repo", "ruleset", "run", "search", "secret", "ssh-key", "status", "variable", "version", "workflow",
-);
+/** A gh command group's subcommands by every word gh takes for them: `["create", "new"]` is `gh pr create`, which `gh pr new` is too. */
+const subs = (...commands: (string | string[])[]): Map<string, string> =>
+	new Map(
+		commands.flatMap(command => {
+			const [name = "", ...aliases] = [command].flat();
+			return [name, ...aliases].map((word): [string, string] => [word, name]);
+		}),
+	);
 
-/** Subcommands a fenced session never runs. `"all"` refuses every subcommand but the read-only ones. */
-const GH_REFUSED: Record<string, Names | "all"> = {
-	pr: names("merge", "review", "ready", "close", "reopen", "lock", "unlock"),
-	repo: names("delete", "archive", "unarchive", "edit", "rename", "sync", "fork"),
-	issue: names("delete", "transfer"),
-	release: names("create", "new", "delete", "edit", "upload", "delete-asset"),
-	workflow: names("enable", "disable", "run"),
-	run: names("cancel", "delete"),
-	cache: names("delete"),
-	auth: names("login", "logout", "refresh", "switch", "setup-git"),
-	config: names("set", "clear-cache"),
-	secret: "all",
-	variable: "all",
-	ruleset: "all",
-	alias: "all",
-	extension: "all",
-	"ssh-key": "all",
-	"gpg-key": "all",
-};
-const READ_ONLY = names("list", "view", "check", "get");
+/**
+ * What a fenced session's gh runs, and nothing else: each gh command group with the subcommands a watch, a put-up or a
+ * review needs, under the names gh 2.103.3 gives them (`gh help reference` lists the aliases). null is a command with
+ * no subcommand to tell apart: `api` (checked below), `status`, `help`, `version`, and `search`, which only reads. A
+ * list of what is refused lost to a name gh has for a refused command (`gh pr new` is `gh pr create`), to another
+ * group's command with the same effect (`gh issue close 5` closes a PR) and to commands gh adds (`gh repo deploy-key
+ * add --allow-write`), so anything not named here is refused.
+ */
+const GH_RUNS = new Map(
+	Object.entries({
+		api: null,
+		auth: subs("status", "token"),
+		cache: subs(["list", "ls"]),
+		help: null,
+		issue: subs(["list", "ls"], "view", "comment"),
+		label: subs(["list", "ls"]),
+		pr: subs("view", "checks", "diff", ["list", "ls"], "status", "comment", ["create", "new"], "edit"),
+		release: subs(["list", "ls"], "view"),
+		repo: subs("view"),
+		run: subs(["list", "ls"], "view", "rerun", "watch"),
+		search: null,
+		status: null,
+		version: null,
+		workflow: subs(["list", "ls"], "view"),
+	}),
+);
 
 /** One flag as it was given: `name` as typed (`--draft`, `-d`), and its value, which is null for a flag given bare. */
 interface GhFlag {
@@ -234,14 +242,14 @@ const GH_WORD_FLAGS = names("-R", "--repo", "--hostname");
  * flags and takes the word after a flag it doesn't know as that flag's value: `gh pr -t x merge 5` is `gh pr merge 5
  * --subject x`, and `gh -p pr -p pr api …` runs api. It skips an empty word and a lone `-` as well (`gh pr - merge`
  * merges). The fence knows the repo and host flags only, so any other flag, empty word or `-` in front of the words it
- * needs is refused: it can't tell whose word the next one is. `api` takes its own flags and words after it, and the
- * other commands without a subcommand to tell apart need only their first word.
+ * needs is refused: it can't tell whose word the next one is. A command with no subcommand to tell apart (a null in
+ * GH_RUNS) needs only its first word, and `api` takes its own flags and words after it.
  */
 function ghCommand(args: string[]): { group: string; sub: string; at: number } | string {
 	const words: string[] = [];
 	let at = 0;
 	while (at < args.length && words.length < 2) {
-		if (words.length === 1 && !Object.hasOwn(GH_REFUSED, words[0] as string)) break;
+		if (words.length === 1 && !GH_RUNS.get(words[0] as string)) break;
 		const arg = args[at++] as string;
 		if (isIn(GH_WORD_FLAGS, arg)) at++;
 		else if (arg === "--help" || arg === "--version" || /^(?:-R.|--repo=|--hostname=)/.test(arg)) continue;
@@ -296,14 +304,15 @@ function checkGhApi(args: string[]): string | null {
 export function checkGh(args: string[]): string | null {
 	const command = ghCommand(args);
 	if (typeof command === "string") return command;
-	const { group, sub, at } = command;
+	const { group, at } = command;
 	if (group === "") return null;
-	if (!isIn(GH_COMMANDS, group)) return refused(`gh ${group} is not a gh command the fence knows (aliases and extensions are refused)`);
+	const subcommands = GH_RUNS.get(group);
+	if (subcommands === undefined) return refused(`gh ${group} is not something /ship runs`);
 	if (group === "api") return checkGhApi(args.slice(at));
-	const rule = GH_REFUSED[group];
-	if (rule === "all" ? !isIn(READ_ONLY, sub) : rule !== undefined && isIn(rule, sub)) {
-		return refused(`gh ${group} ${sub} is refused: merging, approving, undrafting, closing and settings are the user's`);
-	}
+	// A group with no subcommand (or only a repo or help flag) prints its help.
+	if (subcommands === null || command.sub === "") return null;
+	const sub = subcommands.get(command.sub);
+	if (sub === undefined) return refused(`gh ${group} ${command.sub} is not something /ship runs`);
 	if (group === "pr" && sub === "create") {
 		const f = pflag(args, GH_PR_CREATE);
 		if (f.unknown !== undefined) return refused(`gh pr create ${f.unknown} is not a flag the fence knows`);
@@ -311,7 +320,7 @@ export function checkGh(args: string[]): string | null {
 	}
 	// Judged by the tokens alone: `-b -R -B=main` has a --base that a reading of which word is whose value would lose.
 	if (group === "pr" && sub === "edit" && args.some(arg => arg === "--base" || arg.startsWith("--base=") || (/^-[^-]/.test(arg) && (arg.split("=", 1)[0] as string).includes("B")))) return refused("a pull request's base is the user's to change");
-	if ((group === "pr" || group === "issue") && sub === "comment") {
+	if (sub === "comment") {
 		const f = pflag(args, GH_COMMENT);
 		if (f.unknown !== undefined) return refused(`gh ${group} comment ${f.unknown} is not a flag the fence knows`);
 		const body = lastOf(f, "-b", "--body")?.value;

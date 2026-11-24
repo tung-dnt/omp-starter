@@ -1170,6 +1170,28 @@ describe("the shims, with real git", () => {
 			}
 		}, 30_000);
 
+		test("gh runs only what a watch needs: the commands that got past the list of refused ones, and gh's other names for them, are refused and send nothing", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			stubGh();
+			const make = ["--title", "t", "--body", "b", "-R", "o/r", "--head", "o:feat", "--base", "main"];
+			for (const args of [
+				// `gh pr new` is `gh pr create`: a ready PR when it isn't a draft. `gh issue close` closes a PR by its number.
+				["pr", "new", ...make], ["pr", "new", ...make, "--draft=false"], ["pr", "-R", "o/r", "new", ...make], ["issue", "close", "5", "-R", "o/r"], ["issue", "reopen", "6", "-R", "o/r"],
+				["pr", "revert", "7", "-R", "o/r"], ["pr", "update-branch", "8", "-R", "o/r"], ["repo", "deploy-key", "add", "k.pub", "--allow-write", "-R", "o/r"], ["repo", "create", "evil-repo", "--public"], ["repo", "new", "evil-repo", "--public"],
+				["label", "create", "bug"], ["gist", "create", "--public", "notes.txt"], ["gist", "new", "notes.txt"], ["issue", "develop", "9", "-b", "main", "--name", "x"],
+				// The rest of the groups, by their short names too.
+				["pr", "co", "5"], ["co", "5"], ["issue", "new", "--title", "t"], ["release", "new", "v1"], ["repo", "ls"], ["secret", "list"], ["ext", "install", "x/y"], ["cs", "ls"], ["rs", "ls"], ["config", "get", "editor"], ["browse", "-n"],
+			]) refuseGh(...args);
+			expect(holes).toEqual([]);
+			expect(ran()).toEqual([]);
+			const allowed = [
+				["pr", "new", "--draft", ...make], ["pr", "ls"], ["run", "ls"], ["issue", "ls"], ["run", "watch", "123"], ["workflow", "list"], ["workflow", "view", "ci.yml"], ["release", "list"], ["release", "view"], ["label", "list"], ["cache", "list"],
+				["search", "prs", "x"], ["status"], ["auth", "token", "-u", "blindx-tony-do"], ["version"], ["help", "pr"],
+			];
+			for (const args of allowed) expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
+			expect(ghRuns()).toBe(allowed.length);
+		}, 30_000);
+
 		test("the same shims still run what was always allowed", () => {
 			armFence({ pushBranch: BRANCH, root: repo });
 			stubGh();

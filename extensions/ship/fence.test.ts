@@ -13,7 +13,7 @@ const comment = (text: string) => `${MARKER}\n${text}`;
 
 describe("gh", () => {
 	test("reads and /ship's own writes pass", () => {
-		for (const line of ["pr view 5 --json url,state", "pr checks 5", "pr create --draft --title t --body b", "pr create -d -f", "pr edit 5 --body new", "run view 123 --log-failed", "run rerun 123 --failed", "auth status", "auth token -u blindx-tony-do", "secret list", "-R owner/repo pr view 5", ""]) {
+		for (const line of ["pr view 5 --json url,state", "pr checks 5", "pr create --draft --title t --body b", "pr create -d -f", "pr edit 5 --body new", "run view 123 --log-failed", "run rerun 123 --failed", "auth status", "auth token -u blindx-tony-do", "-R owner/repo pr view 5", ""]) {
 			expect(gh(line)).toBeNull();
 		}
 		expect(checkGh(["pr", "comment", "5", "--body", comment("Fixed the failing test.")])).toBeNull();
@@ -29,6 +29,59 @@ describe("gh", () => {
 		}
 		expect(gh("pr create --title t --body b")).toContain("as a draft");
 		expect(gh("pr edit 5 --base main")).toContain("base");
+	});
+
+	test("gh runs what a watch, a put-up and a review need, under every name gh gives those commands", () => {
+		const marked = comment("Fixed the failing test.");
+		for (const args of [
+			["pr", "view", "5"], ["pr", "checks", "5"], ["pr", "diff", "5"], ["pr", "list"], ["pr", "ls", "--state", "open"], ["pr", "status"], ["pr", "comment", "5", "--body", marked], ["pr", "edit", "5", "--title", "t"],
+			["pr", "create", "--draft", "--title", "t"], ["pr", "new", "--draft", "--title", "t"], ["-R", "o/r", "pr", "new", "--draft", "--fill"],
+			["run", "view", "1", "--log-failed"], ["run", "list"], ["run", "ls"], ["run", "rerun", "1", "--failed"], ["run", "watch", "1"],
+			["issue", "view", "3"], ["issue", "list"], ["issue", "ls"], ["issue", "comment", "3", "--body", marked],
+			["repo", "view"], ["auth", "status"], ["auth", "token", "-u", "blindx-tony-do"], ["workflow", "list"], ["workflow", "ls"], ["workflow", "view", "ci.yml"],
+			["release", "list"], ["release", "ls"], ["release", "view", "v1"], ["label", "list"], ["label", "ls"], ["cache", "list"], ["cache", "ls"],
+			["search", "prs", "x"], ["search", "code", "x"], ["status"], ["api", "user"], ["help", "pr", "merge"], ["version"], ["--version"], ["pr"], ["pr", "--help"], [],
+		]) {
+			expect(checkGh(args), args.join(" ")).toBeNull();
+		}
+	});
+
+	test("every other gh command is refused, whatever group it is in and whatever gh calls it", () => {
+		// What the attack verification of #19 got past the list of refused subcommands: a close or a reopen by `gh issue`, a revert, a branch update, a write key, a new repo, and the rest of what no list had named.
+		for (const line of [
+			"issue close 5 -R o/r", "issue reopen 6 -R o/r", "pr revert 7 -R o/r", "pr update-branch 8 -R o/r", "repo deploy-key add k.pub --allow-write -R o/r", "repo create evil-repo --public",
+			"label create bug --color ff0000", "gist create --public notes.txt", "issue develop 9 -b main --name x",
+		]) {
+			expect(gh(line), line).toContain("is not something /ship runs");
+		}
+		// The other subcommands of the groups /ship does use, and gh's other names for them.
+		for (const line of [
+			"pr checkout 5", "pr co 5", "co 5", "pr close 5", "pr merge 5", "pr ready 5", "pr reopen 5", "pr review 5 --approve", "pr lock 5", "pr unlock 5",
+			"issue create --title t", "issue new --title t", "issue edit 5 --title t", "issue delete 5", "issue lock 5", "issue pin 5", "issue transfer 5 o/r", "issue status", "issue artifact list",
+			"run cancel 1", "run delete 1", "run download 1", "repo new evil-repo", "repo list", "repo ls", "repo delete o/r --yes", "repo archive o/r", "repo edit --visibility public", "repo rename x", "repo sync", "repo fork", "repo clone o/r", "repo set-default o/r",
+			"repo autolink create k u", "repo deploy-key list", "auth login", "auth logout", "auth refresh", "auth switch", "auth setup-git", "workflow run ci.yml", "workflow enable ci.yml", "workflow disable ci.yml",
+			"release create v1", "release new v1", "release delete v1", "release edit v1", "release upload v1 f", "release download v1", "label edit bug", "label delete bug", "label clone o/r", "cache delete --all",
+		]) {
+			expect(gh(line), line).toContain("is not something /ship runs");
+		}
+		// The groups /ship has no use for, by every name gh has for them.
+		for (const line of [
+			"secret list", "secret set TOKEN", "variable list", "variable set X", "ruleset list", "rs ls", "alias list", "alias set m 'pr merge'", "extension list", "ext install foo/bar", "extensions list", "ssh-key list", "ssh-key add k.pub", "gpg-key list",
+			"config get editor", "config list", "config set editor vim", "codespace list", "cs ls", "project list", "org list", "discussion list", "skill list", "skills install x", "agent-task list", "agent list", "attestation verify f", "at verify f",
+			"gist list", "gist delete 1", "browse -n", "completion -s bash", "licenses", "preview prompter", "copilot", "m 5", "pull 5", "PR view 5", "pr-view 5", "constructor", "__proto__ x", "toString", "pr constructor", "pr __proto__", "pr hasOwnProperty",
+		]) {
+			expect(gh(line), line).toContain("is not something /ship runs");
+		}
+		expect(gh("pr view")).toBeNull();
+	});
+
+	test("gh pr new is gh pr create, and opens a draft or nothing", () => {
+		const make = "--title t --body b -R o/r --head o:feat --base main";
+		for (const line of [`pr new ${make}`, `pr new ${make} --draft=false`, `pr new --draft=0 ${make}`, `pr -R o/r new ${make}`, `-R o/r pr new ${make}`, "pr new -tdraft --body b", "pr new --title --draft", "pr new -d=false --fill"]) {
+			expect(gh(line), line).toContain("as a draft");
+		}
+		for (const line of [`pr new --draft ${make}`, `pr new -d ${make}`, `pr new ${make} --draft=true`, "pr -R o/r new -fd", "pr new --draft=false --draft --fill"]) expect(gh(line), line).toBeNull();
+		expect(gh("pr new --draft --no-such-flag")).toContain("not a flag the fence knows");
 	});
 
 	test("gh api writes other than comments, replies and re-requests are refused", () => {
@@ -103,7 +156,7 @@ describe("gh", () => {
 		]) {
 			expect(gh(line) ?? "allowed", line).not.toContain("in front of gh's command words");
 		}
-		expect(gh("-R o/r pr -R o/r merge 5")).toContain("gh pr merge is refused");
+		expect(gh("-R o/r pr -R o/r merge 5")).toContain("gh pr merge is not something /ship runs");
 		// cobra skips an empty word and a lone `-` when it looks for the command, and passes them on as the command's words: `gh pr - merge` merges.
 		for (const args of [["pr", "-", "merge"], ["pr", "", "merge"], ["-", "pr", "merge", "5"], ["", "pr", "merge", "5"], ["pr", "-", "review", "--approve"], ["pr", "--repo", "--", "-", "lock", "5"], ["pr", "--repo", "x", "", "close"]]) {
 			expect(checkGh(args), JSON.stringify(args)).toContain("in front of gh's command words");
@@ -548,5 +601,76 @@ describe.skipIf(realGh === null)("the fence reads gh's argv as the installed gh 
 			expect(checkGh(full), args.join(" ")).toContain("in front of gh's command words");
 		}
 		expect(ghSays(["pr", "-t", "x", "frobnicate", "5", "-R", "localhost:1/o/r"])).not.toContain("connection refused");
+	});
+
+	test("each command the attack verification of #19 got through is one gh runs on its own, and the fence refuses it", () => {
+		fs.writeFileSync(path.join(config, "k.pub"), "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0 k@example\n");
+		fs.writeFileSync(path.join(config, "notes.txt"), "notes\n");
+		const make = ["--title", "t", "--body", "b", "--head", "o:feat", "--base", "main"];
+		const repo = ["-R", "localhost:1/o/r"];
+		for (const args of [
+			["pr", "new", ...make, ...repo], ["pr", "new", ...make, "--draft=false", ...repo], ["issue", "close", "5", ...repo], ["issue", "reopen", "6", ...repo], ["pr", "revert", "7", ...repo], ["pr", "update-branch", "8", ...repo],
+			["repo", "deploy-key", "add", "k.pub", "--allow-write", ...repo], ["repo", "create", "evil-repo", "--public"], ["label", "create", "bug", ...repo], ["gist", "create", "--public", "notes.txt"], ["issue", "develop", "9", "-b", "main", "--name", "x", ...repo],
+		]) {
+			expect(ghSays(args), args.join(" ")).toContain("connection refused");
+			expect(checkGh(args), args.join(" ")).not.toBeNull();
+		}
+	});
+
+	/** gh's command tree as `gh help reference` prints it: each command's words, and the other names it answers to. */
+	const ghTree = (): { words: string[]; aliases: string[][] }[] => {
+		const lines = ghSays(["help", "reference"]).split("\n");
+		const tree: { words: string[]; aliases: string[][] }[] = [];
+		for (const [i, line] of lines.entries()) {
+			const heading = /^#{2,4} gh (.+)$/.exec(line);
+			if (heading) {
+				const words: string[] = [];
+				for (const word of (heading[1] as string).split(" ")) {
+					if (/^[-<[{]/.test(word)) break;
+					words.push(word);
+				}
+				tree.push({ words, aliases: [] });
+			} else if (line === "Aliases") {
+				const names = lines.slice(i + 1).find(next => next !== "") ?? "";
+				tree.at(-1)?.aliases.push(...names.split(", ").map(name => name.replace(/^gh /, "").split(" ")));
+			}
+		}
+		return tree;
+	};
+	/** What a command is given for the fence to have no other word about it: a draft, a marked comment. */
+	const PROBE: Record<string, string[]> = { "pr create": ["--draft"], "pr comment": ["--body", `${MARKER}\nDone.`], "issue comment": ["--body", `${MARKER}\nDone.`] };
+	const lets = (words: string[], probe: string[] = PROBE[words.slice(0, 2).join(" ")] ?? []): boolean => checkGh([...words.slice(0, 2), ...probe]) === null;
+	const RUNS = [
+		"pr view", "pr checks", "pr diff", "pr list", "pr status", "pr comment", "pr create", "pr edit", "run view", "run list", "run rerun", "run watch", "issue view", "issue list", "issue comment", "repo view",
+		"auth status", "auth token", "workflow list", "workflow view", "release list", "release view", "label list", "cache list",
+	];
+
+	test("of every command in gh's own tree, the fence lets through the ones /ship runs and no other", () => {
+		const tree = ghTree();
+		expect(tree.length).toBeGreaterThan(100);
+		const wrong: string[] = [];
+		for (const { words } of tree) {
+			const [group = "", sub] = words;
+			// A group alone only prints its help.
+			if (sub === undefined && tree.some(node => node.words.length > 1 && node.words[0] === group)) continue;
+			const runs = ["api", "search", "status"].includes(group) || RUNS.includes(words.slice(0, 2).join(" "));
+			if (lets(words) !== runs) wrong.push(`gh ${words.join(" ")} ${runs ? "is refused" : "gets through"}`);
+		}
+		expect(wrong).toEqual([]);
+		for (const run of RUNS) expect(tree.some(node => node.words.slice(0, 2).join(" ") === run), `gh ${run} is a command gh has`).toBe(true);
+	});
+
+	test("an alias is judged as the command gh runs for it", () => {
+		const wrong: string[] = [];
+		let aliases = 0;
+		for (const node of ghTree()) {
+			const probe = PROBE[node.words.slice(0, 2).join(" ")] ?? [];
+			for (const alias of node.aliases) {
+				aliases++;
+				if (lets(alias, probe) !== lets(node.words, probe)) wrong.push(`gh ${alias.join(" ")} is gh ${node.words.join(" ")}, and ${lets(node.words, probe) ? "only that one runs" : "only the alias gets through"}`);
+			}
+		}
+		expect(aliases).toBeGreaterThan(20);
+		expect(wrong).toEqual([]);
 	});
 });
