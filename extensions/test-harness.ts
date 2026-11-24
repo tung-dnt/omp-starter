@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as typebox from "@oh-my-pi/omptype/typebox";
 import * as zod from "@oh-my-pi/omptype/zod";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { resetMemoryWritten } from "./lib/memory-write-flag";
@@ -86,6 +87,8 @@ export interface FakePi {
 	commands: Map<string, FakeCommand>;
 	/** Every `pi.exec` call, in order. */
 	execCalls: { command: string; args: string[] }[];
+	/** Every `pi.sendUserMessage` call, in order. */
+	sentMessages: { content: unknown; options: unknown }[];
 	/** Calls the handler registered for `event` (one handler per event: extensions register each once) and returns its result. */
 	emit(event: string, payload: object, ctx: object): unknown;
 	/** Runs a registered tool the way the host does and returns its text. */
@@ -101,8 +104,12 @@ export function fakePi(exec?: FakeExec): FakePi {
 	const tools = new Map<string, FakeTool>();
 	const commands = new Map<string, FakeCommand>();
 	const execCalls: { command: string; args: string[] }[] = [];
+	const sentMessages: { content: unknown; options: unknown }[] = [];
 	const host = {
 		zod,
+		typebox,
+		logger: { debug() {}, info() {}, warn() {}, error() {} },
+		sendUserMessage: async (content: unknown, options?: unknown) => void sentMessages.push({ content, options }),
 		on: (event: string, handler: Handler) => void handlers.set(event, handler),
 		registerTool: (tool: FakeTool) => void tools.set(tool.name, tool),
 		registerCommand: (name: string, command: FakeCommand) => void commands.set(name, command),
@@ -117,6 +124,7 @@ export function fakePi(exec?: FakeExec): FakePi {
 		tools,
 		commands,
 		execCalls,
+		sentMessages,
 		emit(event, payload, ctx) {
 			const handler = handlers.get(event);
 			if (!handler) throw new Error(`no handler registered for "${event}"`);
@@ -210,11 +218,19 @@ export interface FakeContext {
 	ui: ScriptedUi;
 	sessionManager: { getSessionId(): string };
 	setInterval(callback: () => void, ms: number): number;
+	setTimeout(callback: () => void, ms: number): number;
 	clearTimer(timer: number): void;
 	/** Intervals still registered through `setInterval`. */
 	timers: Map<number, () => void>;
+	/** One-shot callbacks from `setTimeout` that have not fired or been cleared. */
+	timeouts: Map<number, () => void>;
 	/** Runs every registered interval callback once. */
 	tick(): void;
+	/** Fires and removes every pending `setTimeout` callback. */
+	fireTimeouts(): void;
+	/** What `isIdle()` answers; tests flip it to simulate a running turn. */
+	idle: boolean;
+	isIdle(): boolean;
 }
 
 export interface ContextOptions {
@@ -225,12 +241,15 @@ export interface ContextOptions {
 	mode?: string;
 	hasUI?: boolean;
 	ui?: ScriptedUi;
+	/** `isIdle()` answer; default true. */
+	idle?: boolean;
 }
 
 export function fakeContext(options: ContextOptions): FakeContext {
 	const timers = new Map<number, () => void>();
+	const timeouts = new Map<number, () => void>();
 	let nextTimer = 1;
-	return {
+	const ctx: FakeContext = {
 		cwd: options.cwd,
 		mode: options.mode ?? "tui",
 		hasUI: options.hasUI ?? true,
@@ -243,10 +262,24 @@ export function fakeContext(options: ContextOptions): FakeContext {
 			timers.set(id, callback);
 			return id;
 		},
-		clearTimer: timer => void timers.delete(timer),
+		setTimeout(callback) {
+			const id = nextTimer++;
+			timeouts.set(id, callback);
+			return id;
+		},
+		clearTimer: timer => void (timers.delete(timer) || timeouts.delete(timer)),
 		timers,
+		timeouts,
 		tick: () => [...timers.values()].forEach(callback => callback()),
+		fireTimeouts() {
+			const due = [...timeouts.values()];
+			timeouts.clear();
+			for (const callback of due) callback();
+		},
+		idle: options.idle ?? true,
+		isIdle: () => ctx.idle,
 	};
+	return ctx;
 }
 
 // ── Child process ────────────────────────────────────────────────────────────

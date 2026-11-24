@@ -29,6 +29,26 @@ export interface ToolingState {
 	results: Partial<Record<LanguageId, LanguageToolingResult>>;
 }
 
+/** Path policy (`extensions/path-policy.ts`), hand-edited. Each list replaces its default; globs use `~` and `**`. */
+export interface PolicyState {
+	/** `true` turns the extension off. */
+	off?: boolean;
+	/** Files a read, search or write may not touch without confirmation. */
+	secretReads?: string[];
+	/** Files a write or edit may not touch without confirmation. */
+	protectedWrites?: string[];
+	/** Exceptions checked first: a path matching one is never held. */
+	allow?: string[];
+}
+
+/** Desktop notifications (`extensions/notify.ts`), hand-edited. */
+export interface NotifyState {
+	/** `true` turns notifications off. */
+	off?: boolean;
+	/** A finished turn notifies only when it ran at least this long; default 20. */
+	minSeconds?: number;
+}
+
 export interface SetupState {
 	agentSkills?: "done" | "skipped";
 	models?: "done" | "skipped";
@@ -37,6 +57,8 @@ export interface SetupState {
 	/** Memory backend and commit gate (`/starter memory`). */
 	memory?: MemoryState;
 	tooling?: ToolingState;
+	policy?: PolicyState;
+	notify?: NotifyState;
 }
 
 export const HOME = os.homedir();

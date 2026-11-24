@@ -256,6 +256,52 @@ A build nobody watches is an omp session started with `OMP_STARTER_UNATTENDED=1`
 
 **Verify:** `bun test extensions/unattended.test.ts extensions/memory-commit-gate.test.ts`.
 
+## Safety kit
+
+Four extensions that cover Claude Code features omp lacks. They need no wizard step; tune them by hand in `~/.omp/agent/omp-starter.json`.
+
+### Path policy (`policy`)
+
+`extensions/path-policy.ts` holds `read`, `grep`, `glob`, `ast_grep`, `write`, `edit` and `ast_edit` calls, including calls made from `eval`, that name a protected path. In the interactive main session it asks once per path ("Allow for this session?"); subagents, unattended and headless sessions are refused, because nobody can answer them.
+
+| List | Default | Checked for |
+|---|---|---|
+| `secretReads` | `**/.env`, `**/.env.*`, `**/*.pem`, `**/*.key`, `~/.ssh/**`, `~/.aws/credentials`, `~/.omp/agent/secrets.yml`, `**/secrets.yml` | reads, searches and writes |
+| `protectedWrites` | `**/.git/**`, `~/.zshrc`, `~/.bashrc`, `~/.profile`, `~/.zprofile`, `~/.omp/agent/config.yml`, `~/.omp/agent/keybindings.yml` | writes and edits |
+| `allow` | `**/.env.example`, `**/.env.sample`, `**/.env.vault` | checked first; a match is never held |
+
+A list you set replaces its default. `"policy": { "off": true }` turns it off. A symlink is judged by its target as well as its name. `bash` is not covered: put hard stops for shell commands in omp's `bash.patterns` (deny rules apply in every approval mode and in subagents). A search over a folder (`grep .`) is not held even when the folder holds a secret file; only paths that match a rule are.
+
+### File undo (`/undo`)
+
+omp's `checkpoint` and `rewind` prune the conversation only; they never touch files. `extensions/file-undo.ts` saves each file the first time a `write`, `edit` or `ast_edit` touches it during a prompt, and, in a git repo, a `git stash create` snapshot when the prompt starts (it does not change the work tree or the stash list).
+
+| Command | Effect |
+|---|---|
+| `/undo` | Restores the files the last prompt's edit tools changed (deletes files they created). A file someone changed after the agent's edit is kept unless you confirm. Lists files that differ from the snapshot but were changed some other way (bash). |
+| `/undo all` | Also restores those tracked files from the prompt's git snapshot, after one confirm. Untracked files made since are listed, never deleted. |
+| `/undo list` | The saved prompts (up to 20) with age, file count and snapshot. |
+
+History lives in memory: a new or switched session starts empty. `/undo` waits for the turn to end.
+
+### Notifications (`notify`)
+
+On macOS, `extensions/notify.ts` posts a desktop notification (through `osascript`) from the main interactive session when a turn that ran at least `minSeconds` (default 20) ends, when `ask` waits for your answer, and when a tool waits for approval. At most one per 5 seconds. `"notify": { "off": true }` turns it off; unattended sessions never notify.
+
+### Timed prompts (`/every`)
+
+omp's built-in loop mode repeats a prompt after each turn; `extensions/every.ts` sends one on a clock instead.
+
+| Command | Effect |
+|---|---|
+| `/every 10m check CI on my PR` | Repeats the prompt every 10 minutes (minimum 60s). |
+| `/every in 2h remind me to push` | Sends it once after 2 hours. |
+| `/every list`, `/every stop <id>\|all` | Shows or cancels jobs. |
+
+The model can do the same with the `schedule_prompt`, `list_scheduled_prompts` and `cancel_scheduled_prompt` tools (main session only, refused in unattended sessions). Durations: `30s`, `10m`, `2h`, `1d`, `1h30m`. At most 20 jobs; each expires after 7 days. A due prompt arrives as `[scheduled j1] …`, queued as a follow-up while a turn runs. Jobs are session-scoped: a new or switched session clears them and they end with the process. Missed ticks do not catch up.
+
+**Verify:** `bun test extensions/path-policy.test.ts extensions/file-undo.test.ts extensions/notify.test.ts extensions/every.test.ts`.
+
 ## Usage report
 
 A read-only report on how agents actually use the native todo, mined from omp's session transcripts. It calls no model and no network.
@@ -285,6 +331,11 @@ The numbering starts at M5: M1 to M4 measured memory notes that omp's memory bac
 Limits: a session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names and tool names; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.42.0 — 2026-11-24
+
+- **Added:** safety kit, four extensions without a wizard step (see [Safety kit](#safety-kit)): `path-policy` holds reads and writes of secret and protected paths (asks in the main session, refuses in subagents and unattended sessions); `file-undo` adds `/undo`, restoring files the last prompt's edit tools changed, with a git snapshot for bash changes; `notify` posts macOS notifications when a long turn ends or omp waits for you; `every` adds `/every` and the `schedule_prompt` tools for timed prompts.
+- Existing installs: nothing to do. To keep a path readable, add it to `policy.allow` in `~/.omp/agent/omp-starter.json`; to turn a part off, set `policy.off` or `notify.off`.
 
 ### 0.41.0 — 2026-11-23
 
