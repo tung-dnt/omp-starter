@@ -309,10 +309,10 @@ Both commands are your own (`~/.omp/agent/commands/epic.md`, `skill://story`); t
 
 | Extension | When | What it does |
 |---|---|---|
-| `epic-guard` | From `/epic` until `/epic-done`, `/story` or `/build` | Refuses `write`, `edit` and `ast_edit` calls on repo files outside `.specify/`, `specs/` and `.omp/commands/speckit.*`, in subagents too. Paths outside the repo pass. Saved in the session, so it survives the restart `/epic` asks for after `specify init`. |
+| `epic-guard` | From `/epic` until `/epic-done`, `/story` or `/build` | Refuses `write`, `edit` and `ast_edit` calls on repo files outside `plans/` (where `/epic` writes `plans/<NNN-name>.md`), in subagents too. Paths outside the repo pass. Saved in the session, so it survives a restart or resume. |
 | `story-plan` | `/story` typed in the interactive TUI | Enters omp's plan mode before the turn, so clarifying and the acceptance criteria are read-only; approving the plan in Plan Review starts the build. Print, RPC and unattended sessions run `/story` as before. |
 
-`/epic` cannot use plan mode itself: plan mode refuses the spec-kit writes and the `tasks.md` commit it needs. `epic-guard` leaves `bash` alone, so `specify init` still runs; a shell write of code is not caught.
+`/epic` cannot use plan mode itself: plan mode refuses the plan-file write and the commit it needs. `epic-guard` leaves `bash` alone, so a shell write of code is not caught.
 
 **Verify:** `bun test extensions/epic-guard.test.ts`.
 
@@ -345,6 +345,10 @@ The numbering starts at M5: M1 to M4 measured memory notes that omp's memory bac
 Limits: a session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names and tool names; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.44.1 — 2026-11-24
+
+- **Fixed:** `epic-guard` allowed only spec-kit paths (`.specify/`, `specs/`), but `/epic` now writes a pstack plan to `plans/<NNN-name>.md`, so the guard refused `/epic`'s own plan. It now allows `plans/` only.
 
 ### 0.44.0 — 2026-11-24
 

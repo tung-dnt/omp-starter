@@ -34,14 +34,15 @@ test("outside /epic nothing is held", () => {
 	expect(s.write("src/app.ts")).toBeUndefined();
 });
 
-test("/epic holds code writes, in subagents too, and lets spec-kit files through", () => {
+test("/epic holds code writes, in subagents too, and lets its plan through", () => {
 	const s = session();
 	s.type("/epic payments rework");
 	const held = s.write("src/app.ts");
 	expect(held?.block).toBe(true);
 	expect(held?.reason).toContain("src/app.ts");
 	expect(s.write("src/app.ts", s.scout)?.block).toBe(true);
-	for (const ok of ["specs/001-pay/spec.md", ".specify/memory/constitution.md", ".omp/commands/speckit.plan.md", "/tmp/scratch.md", "local://notes.md"]) expect(s.write(ok)).toBeUndefined();
+	for (const ok of ["plans/001-pay.md", "/tmp/scratch.md", "local://notes.md"]) expect(s.write(ok)).toBeUndefined();
+	for (const held of ["specs/001-pay/spec.md", "src/plans/x.ts"]) expect(s.write(held)?.block).toBe(true);
 	const edit = s.fake.emit("tool_call", { toolName: "edit", input: { input: "[src/pay.ts#ABCD]\nPUT 1.=1:\n+x" } }, s.main) as Held | undefined;
 	expect(edit?.block).toBe(true);
 });

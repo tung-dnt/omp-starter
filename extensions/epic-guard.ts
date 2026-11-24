@@ -1,6 +1,6 @@
 // `/epic` never implements: from `/epic` until `/epic-done`, `/story` or `/build`, write and edit calls inside the repo are
-// held unless they target spec-kit files (`.specify/`, `specs/`, `.omp/commands/speckit.*`). Subagents are held too.
-// The state is saved in the session, so it survives the omp restart the epic skill asks for after `specify init`.
+// held unless they target the epic plan folder `plans/`. Subagents are held too.
+// The state is saved in the session, so it survives a restart or resume of the same session.
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { repoRoot } from "./lib/repo";
@@ -8,7 +8,8 @@ import { resolveFrom, targetPaths } from "./lib/tool-input";
 
 const ENTRY = "epic-guard";
 const KEY = Symbol.for("omp-starter.epic-guard");
-const SPEC_ONLY = /^(?:\.specify\/|specs\/|\.omp\/commands\/speckit\.[^/]+$)/;
+/** Where `/epic` writes its plan (`plans/<NNN-name>.md`, skills/epic/SKILL.md). */
+export const PLAN_ONLY = /^plans\//;
 const STARTS = /^\/epic(?:\s|$)/;
 const ENDS = /^\/(?:story|build)(?:\s|$)/;
 
@@ -33,7 +34,7 @@ function restore(ctx: ExtensionContext): void {
 	store[KEY] = on;
 }
 
-/** Repo files outside the spec-kit folders a write or edit call names; paths outside the repo and internal URLs pass. */
+/** Repo files outside `plans/` a write or edit call names; paths outside the repo and internal URLs pass. */
 export function heldPaths(toolName: string, input: Record<string, unknown>, cwd: string): string[] {
 	const named = toolName === "ast_edit" ? (Array.isArray(input.paths) ? input.paths : []) : toolName === "write" || toolName === "edit" ? targetPaths(toolName, input) : [];
 	const root = repoRoot(cwd) ?? cwd;
@@ -42,7 +43,7 @@ export function heldPaths(toolName: string, input: Record<string, unknown>, cwd:
 		if (typeof p !== "string" || !p || p.includes("://")) continue;
 		const rel = path.relative(root, resolveFrom(cwd, p));
 		if (rel.startsWith("..") || path.isAbsolute(rel)) continue;
-		if (!SPEC_ONLY.test(rel.split(path.sep).join("/"))) held.push(rel);
+		if (!PLAN_ONLY.test(rel.split(path.sep).join("/"))) held.push(rel);
 	}
 	return held;
 }
@@ -60,18 +61,18 @@ export default function epicGuard(pi: ExtensionAPI): void {
 		const text = event.text.trimStart();
 		if (STARTS.test(text)) {
 			setActive(pi, true);
-			ctx.ui.notify("epic: spec only. Writes outside .specify/, specs/ and .omp/commands/speckit.* are held until /epic-done, /story or /build.", "info");
+			ctx.ui.notify("epic: plan only. Writes outside plans/ are held until /epic-done, /story or /build.", "info");
 		} else if (ENDS.test(text) && active()) {
 			setActive(pi, false);
 		}
 	});
 
 	pi.registerCommand("epic-done", {
-		description: "End /epic's spec-only guard so code can be edited again",
+		description: "End /epic's plan-only guard so code can be edited again",
 		handler: async (_args, ctx) => {
 			const was = active();
 			setActive(pi, false);
-			ctx.ui.notify(was ? "epic: spec-only guard off." : "epic: the spec-only guard was not on.", "info");
+			ctx.ui.notify(was ? "epic: plan-only guard off." : "epic: the plan-only guard was not on.", "info");
 		},
 	});
 
@@ -82,8 +83,8 @@ export default function epicGuard(pi: ExtensionAPI): void {
 		return {
 			block: true,
 			reason:
-				`/epic is spec-only and never implements: ${held.join(", ")} is outside .specify/, specs/ and .omp/commands/speckit.*. ` +
-				"Do not write it another way (bash, eval). Record the work as a story in tasks.md instead; the user ends the guard with /epic-done, /story or /build.",
+				`/epic only writes its plan and never implements: ${held.join(", ")} is outside plans/. ` +
+				"Do not write it another way (bash, eval). Record the work as a story in the plan instead; the user ends the guard with /epic-done, /story or /build.",
 		};
 	});
 }
