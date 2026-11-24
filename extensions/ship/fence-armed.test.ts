@@ -175,6 +175,9 @@ describe("tool calls while armed", () => {
 			"PATH=/usr/bin:/bin git push origin main",
 			"export PATH=/usr/bin",
 			"env -u OMP_SHIP_FENCE gh pr merge 5",
+			"GH_CONFIG_DIR=/tmp/x gh pr view 5",
+			"export GH_CONFIG_DIR=/tmp/x",
+			"env GH_CONFIG_DIR=/tmp/x gh pr view 5",
 			"env -i git push origin main",
 			"OMP_SHIP_FENCE= git push origin main",
 			"command -p git push origin main",
@@ -313,7 +316,7 @@ describe("the shims, with real git", () => {
 			expect(originHas(BRANCH)).toBe("");
 		});
 
-		test("a state file from before the URL was recorded refuses the push and says to run /ship again", () => {
+		test("a state file from before the URL was recorded refuses the push and says to restart omp and run /ship", () => {
 			armFence({ pushBranch: BRANCH, root: repo, pr: PR });
 			const file = process.env[FENCE_ENV] as string;
 			const old = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
@@ -321,7 +324,7 @@ describe("the shims, with real git", () => {
 			fs.writeFileSync(file, JSON.stringify(old));
 			const push = git(process.env, "push", "origin", BRANCH);
 			expect(push.status).toBe(1);
-			expect(push.stderr).toContain("run /ship again");
+			expect(push.stderr).toContain("restart omp, then run /ship");
 			expect(originHas(BRANCH)).toBe("");
 		});
 	});

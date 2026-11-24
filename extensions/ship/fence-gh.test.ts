@@ -168,7 +168,7 @@ describe.skipIf(realGh === null)("the shims, with the installed gh and a mock Gi
 	const github = startGithub();
 	let savedPath: string | undefined;
 	let repo: string;
-	let config: string;
+	let xdg: string;
 	let blinxBin: string;
 	let secretPng: string;
 	let bodyFile: string;
@@ -188,10 +188,10 @@ describe.skipIf(realGh === null)("the shims, with the installed gh and a mock Gi
 		git("add", "-A");
 		git("commit", "--quiet", "-m", "init");
 		git("switch", "--quiet", "-c", BRANCH);
-		// gh's own config: the wrapper's account, whose token the wrapper reads out of it.
-		config = path.join(home, "ghcfg");
-		fs.mkdirSync(config);
-		fs.writeFileSync(path.join(config, "hosts.yml"), `${HOST}:\n    users:\n        blindx-tony-do:\n            oauth_token: ${BLINX_TOKEN}\n    oauth_token: ${BLINX_TOKEN}\n    user: blindx-tony-do\n    git_protocol: https\n`);
+		// gh's own config (XDG_CONFIG_HOME, since GH_CONFIG_DIR is refused): the wrapper's account, whose token the wrapper reads out of it.
+		xdg = path.join(home, "xdg");
+		fs.mkdirSync(path.join(xdg, "gh"), { recursive: true });
+		fs.writeFileSync(path.join(xdg, "gh", "hosts.yml"), `${HOST}:\n    users:\n        blindx-tony-do:\n            oauth_token: ${BLINX_TOKEN}\n    oauth_token: ${BLINX_TOKEN}\n    user: blindx-tony-do\n    git_protocol: https\n`);
 		blinxBin = path.join(home, "blinx-bin");
 		fs.mkdirSync(blinxBin);
 		fs.writeFileSync(path.join(blinxBin, "gh-blinx"), GH_BLINX, { mode: 0o755 });
@@ -213,8 +213,8 @@ describe.skipIf(realGh === null)("the shims, with the installed gh and a mock Gi
 	/** `program` as a session's shell runs it: by name, first on PATH, in the armed repository. */
 	async function run(program: string, args: string[], extra: Record<string, string | undefined> = {}): Promise<Ran> {
 		const proxy = `http://127.0.0.1:${github.port}`;
-		const env: Record<string, string | undefined> = { ...process.env, GH_HOST: HOST, GH_TOKEN: SESSION_TOKEN, HTTP_PROXY: proxy, http_proxy: proxy, HTTPS_PROXY: "http://127.0.0.1:1", https_proxy: "http://127.0.0.1:1", GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", NO_COLOR: "1", GH_CONFIG_DIR: config };
-		for (const name of ["NO_PROXY", "no_proxy", "ALL_PROXY", "GITHUB_TOKEN", "GH_REPO"]) delete env[name];
+		const env: Record<string, string | undefined> = { ...process.env, GH_HOST: HOST, GH_TOKEN: SESSION_TOKEN, HTTP_PROXY: proxy, http_proxy: proxy, HTTPS_PROXY: "http://127.0.0.1:1", https_proxy: "http://127.0.0.1:1", GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", NO_COLOR: "1", XDG_CONFIG_HOME: xdg };
+		for (const name of ["NO_PROXY", "no_proxy", "ALL_PROXY", "GITHUB_TOKEN", "GH_REPO", "GH_CONFIG_DIR"]) delete env[name];
 		Object.assign(env, extra);
 		const child = Bun.spawn([Bun.which(program, { PATH: env.PATH }) as string, ...args], { cwd: repo, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
 		const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
@@ -262,7 +262,7 @@ describe.skipIf(realGh === null)("the shims, with the installed gh and a mock Gi
 		const commands = skills.flatMap(text => [...text.matchAll(/`(gh(?:-blinx)? [^`]*(?:<|--)[^`]*)`/g)].map(m => m[1] as string));
 		expect(commands.length).toBeGreaterThanOrEqual(5);
 		for (const command of commands) {
-			const filled = command.replaceAll("<file outside the repo>", bodyFile).replaceAll("<owner>", "o").replaceAll("<repo>", "r").replaceAll("<url>", `http://${HOST}/o/r/pull/5`).replaceAll("<n>", "5").replaceAll("<id>", "9");
+			const filled = command.replaceAll("<file outside the repo>", bodyFile).replaceAll("<owner>", "o").replaceAll("<repo>", "r").replaceAll("<url>", `http://${HOST}/o/r/pull/5`).replaceAll("<n>", "5").replaceAll("<id>", "9").replaceAll("<thread id>", "PRRT_watched");
 			expect(filled.replaceAll("<!--", "").replaceAll("-->", ""), `${command}: a placeholder the test doesn't fill`).not.toMatch(/<[^>]*>/);
 			expect((await run("bash", ["-c", filled])).err, filled).not.toContain("ship fence");
 		}
@@ -440,17 +440,55 @@ describe.skipIf(realGh === null)("the shims, with the installed gh and a mock Gi
 			await refuses([["api", "graphql", "-f", "query=mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}", "-F", "t=@thread.txt"], resolve("PRRT_watched", "-f", "t=PRRT_other"), resolve("PRRT_watched", "-f", "query=mutation{resolveReviewThread(input:{threadId:PRRT_other}){thread{isResolved}}}")]);
 		}, 120_000);
 
-		test("no field of a gh api write reads a file; a re-request may carry its JSON in a file", async () => {
+		test("no gh api call reads a file, whatever its method or endpoint: a field from @file and --input are refused, nothing sent", async () => {
 			const reviewers = path.join(privateHome(), "reviewers.json");
 			fs.writeFileSync(reviewers, '{"reviewers":["someone"]}');
+			const leak = `k=@${secretPng}`;
 			await refuses([
+				// The writes of a watch.
 				["api", "repos/o/r/issues/5/comments", "-f", `body=${marked}`, "-F", `note=@${secretPng}`],
 				["api", "-X", "POST", "repos/o/r/pulls/5/requested_reviewers", "-F", `reviewers[]=@${secretPng}`],
 				["api", "repos/o/r/pulls/5/comments", "-f", `body=${marked}`, "--field", `path=@${secretPng}`],
+				["api", "-X", "POST", "repos/o/r/pulls/5/requested_reviewers", "--input", reviewers],
+				["api", "-X", "POST", "repos/o/r/pulls/5/requested_reviewers", `--input=${reviewers}`],
+				// A read: -X GET turns the fields into query parameters, and --input is the request's body.
+				["api", "-X", "GET", "user", "-F", leak],
+				["api", "-XGET", "user", `-Fk=@${secretPng}`],
+				["api", "--method", "GET", "user", `--field=k=@${secretPng}`],
+				["api", "--method=GET", "user", "--field", leak],
+				["api", "-X", "GET", "user", "--input", secretPng],
+				["api", "user", "--input", secretPng],
+				["api", "repos/o/r/pulls/5", "-X", "GET", "-F", leak],
+				// Any other path, and GraphQL that is no mutation.
+				["api", "-X", "POST", "repos/o/r/issues", "-F", leak],
+				["api", "-X", "DELETE", "repos/o/r/issues/5", "--input", secretPng],
+				["api", "graphql", "-f", "query={viewer{login}}", "-F", leak],
+				["api", "graphql", "-f", "query={viewer{login}}", "--input", secretPng],
 			]);
-			expect(github.sent.some(s => s.body.includes("AWS_SECRET_ACCESS_KEY"))).toBe(false);
-			await passes(["api", "-X", "POST", "repos/o/r/pulls/5/requested_reviewers", "--input", reviewers]);
-			expect(github.sent.some(s => s.method === "POST" && s.path === "/repos/o/r/pulls/5/requested_reviewers" && s.body.includes("someone"))).toBe(true);
+			expect(github.sent.some(s => s.body.includes("AWS_SECRET_ACCESS_KEY") || s.path.includes("AWS_SECRET_ACCESS_KEY"))).toBe(false);
+			// A value on the command line, and a field that merely starts like a path, still go.
+			await passes(["api", "-X", "POST", "repos/o/r/pulls/5/requested_reviewers", "-f", "reviewers[]=someone"]);
+			await passes(["api", "-X", "GET", "repos/o/r/pulls/5", "-f", "per_page=1"]);
+		}, 90_000);
+
+		test("a gh config directory from the call's environment is refused: its config.yml can send the session's token to a local socket", async () => {
+			const dir = fs.mkdtempSync(path.join("/tmp", "gc-"));
+			const socket = path.join(dir, "s");
+			const dialed: unknown[] = [];
+			const listener = Bun.listen({ unix: socket, socket: { open: s => void dialed.push(s.remoteAddress), data() {}, close() {} } });
+			try {
+				fs.writeFileSync(path.join(dir, "config.yml"), `http_unix_socket: ${socket}\n`);
+				const extra = { GH_CONFIG_DIR: dir };
+				await refuses([["pr", "view", "5", "-R", "o/r", "--json", "state"], ["api", "user"], ["auth", "status"], ["pr", "comment", "5", "-R", "o/r", "--body", marked], ["api", "graphql", "-f", "query={viewer{login}}"]], extra);
+				await refuses([["pr", "view", "5", "-R", "o/r", "--json", "state"]], extra, "gh-blinx");
+				expect((await run("gh", ["api", "user"], extra)).err).toContain("GH_CONFIG_DIR");
+				expect(dialed).toEqual([]);
+				// Unset or empty, gh looks where it always did.
+				await passes(["pr", "view", "5", "-R", "o/r", "--json", "state"], { GH_CONFIG_DIR: "" });
+			} finally {
+				listener.stop(true);
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
 		}, 60_000);
 
 		test("a fence an older /ship armed, with no pull request recorded, refuses every write, and reads still run", async () => {
@@ -460,7 +498,7 @@ describe.skipIf(realGh === null)("the shims, with the installed gh and a mock Gi
 			fs.writeFileSync(file, JSON.stringify(older));
 			const calls = [["pr", "comment", "5", "-R", "o/r", "--body", marked], ["pr", "edit", "5", "-R", "o/r", "--title", "t"], ["issue", "comment", "5", "-R", "o/r", "--body", marked], ["run", "rerun", "123", "-R", "o/r"], ["api", "repos/o/r/issues/5/comments", "-f", `body=${marked}`], create("--body", "b")];
 			await refuses(calls);
-			expect((await run("gh", calls[0] as string[])).err).toContain("no record of the pull request /ship armed on");
+			expect((await run("gh", calls[0] as string[])).err).toContain("restart omp, then run /ship");
 			await passes(["pr", "view", "5", "-R", "o/r", "--json", "state"]);
 		}, 60_000);
 

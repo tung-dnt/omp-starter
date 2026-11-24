@@ -285,8 +285,9 @@ const NEVER_FLAGS: Record<string, string> = {
 };
 
 const TOKEN_STAYS = refused("the GitHub token stays inside gh: gh auth token and gh auth status --show-token print it");
-export const NO_WATCH = refused("the fence has no record of the pull request /ship armed on (an older /ship armed it): the user needs to run /ship again");
-const FIELD_FROM_FILE = refused("a field read from a file or stdin can't be checked: pass its value on the command line");
+export const NO_WATCH = refused("the fence has no record of the pull request /ship armed on (an older /ship armed it, and this session still runs the older extension): the user needs to restart omp, then run /ship");
+const FROM_FILE = refused("a field or request body read from a file or stdin (-F key=@file, --input) can't be checked: pass its value on the command line");
+const CONFIG_DIR = refused("GH_CONFIG_DIR is set for this command: a gh config directory can send the session's token anywhere (http_unix_socket), so gh runs with its own config only");
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
@@ -388,14 +389,16 @@ function checkGhApi(args: string[], pr: WatchedPr | null, env: Env): string | nu
 	const call = readApi(args);
 	if (typeof call === "string") return call;
 	const { f, endpoint, fields, input, method, texts } = call;
+	// gh sends what these read, on every method and path, so no early return below may come first.
+	if (input || fields.some(field => field.reads)) return FROM_FILE;
 	if (endpoint === "graphql") {
 		const mutations = texts.filter(text => /\bmutation\b/i.test(text));
 		if (mutations.some(text => !RESOLVE_THREAD.test(text))) return refused("GraphQL mutations other than resolving one review thread are refused");
-		if (input || fields.some(field => field.key === "query" && field.value.startsWith("@"))) return refused("a GraphQL query read from a file can't be checked");
+		if (fields.some(field => field.key === "query" && field.value.startsWith("@"))) return refused("a GraphQL query read from a file can't be checked");
 		if (mutations.length === 0) return null;
 		if (pr === null) return NO_WATCH;
 		if (mutations.length > 1 || resolvedThread(call) === null) return refused("one review thread is resolved at a time, named by its id in the query or in a field that holds only the id");
-		return fields.some(field => field.reads) ? FIELD_FROM_FILE : checkApiHost(f, pr, env);
+		return checkApiHost(f, pr, env);
 	}
 	if (method === "GET") return null;
 	for (const { path, comment } of API_WRITES) {
@@ -408,9 +411,7 @@ function checkGhApi(args: string[], pr: WatchedPr | null, env: Env): string | nu
 		if (!same(owner, pr.owner) || !same(repo, pr.repo) || Number(number) !== pr.number) {
 			return refused(`gh api writes to ${owner}/${repo}#${number}, not to the pull request /ship watches (${pr.owner}/${pr.repo}#${pr.number})`);
 		}
-		if (fields.some(field => field.reads)) return FIELD_FROM_FILE;
 		if (!comment) return null;
-		if (input) return refused("a comment body read from a file can't be checked; pass it with -f body=");
 		const bodies = fields.filter(field => field.key === "body");
 		if (bodies.length !== 1) return refused("a comment carries exactly one body field");
 		const [body] = bodies as [(typeof bodies)[number]];
@@ -486,6 +487,7 @@ function checkWrite(kind: string, { spec, target }: Write, args: string[], pr: W
 
 /** `args` is gh's argv without the program name; `pr` the pull request the fence is armed on (null when none was recorded); `env` what the call runs with. */
 export function checkGh(args: string[], pr: WatchedPr | null, env: Env = {}): string | null {
+	if (env.GH_CONFIG_DIR) return CONFIG_DIR;
 	const command = ghCommand(args);
 	if (typeof command === "string") return command;
 	const { group, at } = command;

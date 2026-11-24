@@ -59,6 +59,8 @@ The snapshot holds only comments from the user, people with write access, and th
   - in a review thread: `gh api repos/<owner>/<repo>/pulls/<n>/comments/<id>/replies -f body="$(printf '<!-- omp-ship -->\n…')"`, where `<id>` is the number after `discussion_r` in the comment's url.
 - Write only on this PR. The pass header names it (`<owner>/<repo>#<n>`): give that number and `-R <owner>/<repo>` (or the PR's URL), as above. A comment, edit, rerun or API write on another PR or repository, an assignee (Copilot too), and printing the token (`gh auth token`, `--show-token`) are refused.
 - Resolve a review thread only after you made the change it asked for and replied. Leave threads you only answered.
+  - Resolve it with exactly this command, `<thread id>` being the `id` of the thread in the snapshot (it starts with `PRRT_`): `gh api graphql -f query='mutation($id: ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id=<thread id>`. Give the id with `-f`, not `-F`, and no other mutation or document is accepted. The fence asks GitHub which PR holds the thread and refuses one that is not this PR's.
+- `gh api` reads no file: a field given as `-F key=@file` and `--input` are refused, on every endpoint. Give each value on the command line.
 
 ## Ready
 

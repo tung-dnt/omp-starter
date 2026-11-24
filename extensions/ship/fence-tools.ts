@@ -51,7 +51,7 @@ export function protectedTargets(toolName: string, input: Record<string, unknown
 }
 
 /** Variables that point gh and git elsewhere, or switch the fence off. */
-const FENCE_VARS = /^(?:PATH|OMP_SHIP_FENCE\w*|GIT_CONFIG\w*|GIT_EXEC_PATH|GIT_DIR|GIT_WORK_TREE|BUN_BE_BUN)$/;
+const FENCE_VARS = /^(?:PATH|OMP_SHIP_FENCE\w*|GIT_CONFIG\w*|GIT_EXEC_PATH|GIT_DIR|GIT_WORK_TREE|BUN_BE_BUN|GH_CONFIG_DIR)$/;
 const assignment = (word: string) => /^([A-Za-z_][A-Za-z0-9_]*)\+?=/.exec(word)?.[1];
 /** Programs that run the next word as a command. */
 const WRAPPERS: Record<string, true> = Object.fromEntries(["command", "builtin", "exec", "nohup", "time", "sudo", "xargs", "xcrun", "nice", "stdbuf", "caffeinate", "{", "!"].map(w => [w, true]));
@@ -63,7 +63,7 @@ function commandProblem(words: string[]): string | null {
 	for (;;) {
 		const name = assignment(words[k] ?? "");
 		if (name === undefined) break;
-		if (FENCE_VARS.test(name)) return "PATH, the fence's variables and git's config variables stay as they are";
+		if (FENCE_VARS.test(name)) return "PATH, the fence's variables, git's config variables and GH_CONFIG_DIR stay as they are";
 		k++;
 	}
 	while (k < words.length) {
@@ -83,7 +83,7 @@ function commandProblem(words: string[]): string | null {
 		while (k < words.length && (words[k] as string).startsWith("-")) k++;
 	}
 	const program = words[k] ?? "";
-	if (Object.hasOwn(SETTERS, program) && words.slice(k + 1).some(w => FENCE_VARS.test(assignment(w) ?? w))) return "PATH, the fence's variables and git's config variables stay as they are";
+	if (Object.hasOwn(SETTERS, program) && words.slice(k + 1).some(w => FENCE_VARS.test(assignment(w) ?? w))) return "PATH, the fence's variables, git's config variables and GH_CONFIG_DIR stay as they are";
 	// `/usr/bin/git`, `./git`, `~/.local/bin/gh`, `/usr/bin/g?t`, or a program computed by `$(which -a git …)`.
 	if (program.includes("/") && /^(?:gh|git|git-lfs|gh-blinx)$|[*?[]/.test(path.basename(program))) return "call gh, git and git-lfs by name, not by path";
 	if (/^[$`]/.test(program) && /\b(?:git|gh)\b/.test(words.join(" "))) return "call gh and git by name, not by a computed path";

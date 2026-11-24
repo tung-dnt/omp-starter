@@ -157,7 +157,7 @@ export function checkPushRepo(dir: string, state: FenceState, git: Git = realGit
 	if (!state.gitDirs.includes(here)) {
 		return refused(`this push runs in ${dir}, which is not the repository /ship armed in${state.root === null ? "" : ` (${state.root})`}: push from there`);
 	}
-	if (state.originUrl === null) return refused("the fence has no record of where origin led when /ship armed (an older /ship armed it, or origin had no URL): the user needs to run /ship again");
+	if (state.originUrl === null) return refused("the fence has no record of where origin led when /ship armed (an older /ship armed it, or origin had no URL; the older extension may still run in this session): the user needs to restart omp, then run /ship");
 	const now = git(dir, "remote", "get-url", "--push", "origin");
 	if (now.code !== 0 || now.out.trim() !== state.originUrl) {
 		return refused(`origin's URL is not what it was when /ship armed (${state.originUrl}), so this push would go elsewhere`);
