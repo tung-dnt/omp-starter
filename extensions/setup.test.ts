@@ -59,6 +59,13 @@ describe("renderContextFile", () => {
 		expect(renderContextFile({ memory: gated("local") })).toContain("a successful `learn`");
 		expect(renderContextFile({ memory: gated(undefined) })).toContain("a successful memory tool call such as `retain` or `learn`");
 	});
+
+	test("the skill triggers follow the gate only when pstack is installed", () => {
+		const memory: MemoryState = { status: "done", backend: "hindsight", gateDirs: [HOME] };
+		expect(renderContextFile({ memory }) ?? "").not.toContain("# Skill triggers");
+		const text = renderContextFile({ memory }, true) ?? "";
+		expect(text.indexOf("# Skill triggers")).toBeGreaterThan(text.indexOf("# Commit gate"));
+	});
 });
 
 // ── The extension: /starter and the startup wizard ───────────────────────────

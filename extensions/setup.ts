@@ -1,7 +1,7 @@
 // First-run setup wizard: a skill-kit picker (pstack, Matt Pocock, addy, spec-kit), Claude-first subscription presets,
 // an optional TypeSafe Jev judge, and omp's memory backend with the commit gate.
 // Runs automatically in the TUI until each step is done or skipped; `/starter` reruns it.
-// `renderContextFile` composes the AGENTS.md this plugin writes: memory rules and the commit gate.
+// `renderContextFile` composes the AGENTS.md this plugin writes: memory rules, the commit gate and pstack skill triggers.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -10,8 +10,8 @@ import { setupModels } from "./lib/routing";
 import { EVERY_SESSION_FILE, gateSection, memorySection, setupMemory } from "./lib/memory";
 import { HOME, STATE_FILE, readState, readTooling, saveTooling, tildify, updateState, type SetupState } from "./lib/state";
 import type { ToolsUi } from "./lib/tooling";
-import { checkPluginUpdates } from "./lib/plugin-updates";
-import { setupSkillKits } from "./lib/skill-kits";
+import { checkPluginUpdates, readPluginInstallations } from "./lib/plugin-updates";
+import { PSTACK_TRIGGERS, setupSkillKits } from "./lib/skill-kits";
 
 export interface WizardUi {
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -29,13 +29,14 @@ export type Exec = (
 ) => Promise<{ stdout: string; stderr: string; code: number }>;
 
 /**
- * The content of the AGENTS.md this plugin owns (`~/.omp/agent/AGENTS.md`): the memory rules for `memory.backend` and
- * the commit gate. Undefined when nothing belongs in it.
+ * The content of the AGENTS.md this plugin owns (`~/.omp/agent/AGENTS.md`): the memory rules for `memory.backend`,
+ * the commit gate, and the skill triggers when pstack is installed. Undefined when nothing belongs in it.
  */
-export function renderContextFile(state: Pick<SetupState, "memory">): string | undefined {
+export function renderContextFile(state: Pick<SetupState, "memory">, pstack = false): string | undefined {
 	const sections = [
 		state.memory?.status === "done" && memorySection(state.memory.backend),
 		gateSection(state.memory),
+		pstack && PSTACK_TRIGGERS,
 	].filter((section): section is string => Boolean(section));
 	return sections.length ? sections.join("\n") : undefined;
 }
@@ -65,8 +66,9 @@ async function retireContextFile(ui: WizardUi, file: string): Promise<boolean> {
 }
 
 /** Brings the every-session AGENTS.md in line with `state`: writes it, or retires it when nothing belongs in it. False when the user kept the old file. */
-async function writeContextFile(ui: WizardUi, state: Pick<SetupState, "memory">): Promise<boolean> {
-	const content = renderContextFile(state);
+async function writeContextFile(ui: WizardUi, exec: Exec, state: Pick<SetupState, "memory">): Promise<boolean> {
+	const pstack = await readPluginInstallations(exec).then(rows => rows.some(row => row.key === "pstack"), () => false);
+	const content = renderContextFile(state, pstack);
 	return content === undefined ? retireContextFile(ui, EVERY_SESSION_FILE) : writeWithBackup(ui, EVERY_SESSION_FILE, content);
 }
 
@@ -134,8 +136,8 @@ export default function ompStarter(pi: ExtensionAPI): void {
 			const state = readState();
 			const memory = await setupMemory(ui, exec, state);
 			updateState({ memory });
-			// Rewrite the every-session AGENTS.md with the memory rules and the gate.
-			if (memory.status === "done" && !(await writeContextFile(ui, { memory }))) {
+			// Rewrite the every-session AGENTS.md with the memory rules, the gate and the pstack triggers.
+			if (memory.status === "done" && !(await writeContextFile(ui, exec, { memory }))) {
 				ui.notify(`${tildify(EVERY_SESSION_FILE)} was not updated, so it has no memory rules for the new backend.`, "warning");
 			}
 		}

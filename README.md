@@ -4,7 +4,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 
 | Step | What it does |
 |---|---|
-| **Skill kits** *(optional)* | A checkbox picker for any combination of [pstack](https://github.com/cursor/plugins/tree/main/pstack), [Matt Pocock's skills](https://github.com/mattpocock/skills), [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills), [ponytail](https://github.com/DietrichGebert/ponytail) and [spec-kit](https://github.com/github/spec-kit), with a warning when the chosen kits cover the same job. See [Skill kits](#skill-kits-starter-skills). |
+| **Skill kits** *(optional)* | A checkbox picker for any combination of [pstack](https://github.com/michael-denyer/pstack-claude), [Matt Pocock's skills](https://github.com/mattpocock/skills), [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills), [ponytail](https://github.com/DietrichGebert/ponytail) and [spec-kit](https://github.com/github/spec-kit), with a warning when the chosen kits cover the same job. See [Skill kits](#skill-kits-starter-skills). |
 | **Model routing** *(Claude-first)* | Saves `claude` and `codex` subscription presets without requiring a login. When the required Claude models are available, also routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels; otherwise keeps the current routing. Using a preset requires its provider login. |
 | **TypeSafe Jev judge** *(optional)* | Routes omp's `judge` role to TypeSafe Jev after checking your API key, and stores the key in `~/.omp/agent/.env` (mode 600). Jev then answers `question` rules and picks the thinking level per prompt. Offered on a brand-new install; existing installs run `/starter jev`. See [TypeSafe Jev judge](#typesafe-jev-judge-starter-jev). |
 | **Memory** | Picks omp's memory backend (`off`, `local`, `hindsight`, `mnemopi`, `sharpshooter`), writes the matching memory rules into `~/.omp/agent/AGENTS.md`, and optionally adds a commit gate. omp itself owns the backend settings (`/settings` → Memory). Offered on a brand-new install; existing installs run `/starter memory`. See [Memory](#memory-starter-memory). |
@@ -116,7 +116,7 @@ The step picks omp's memory backend and nothing else about it. omp already owns 
 1. The select shows the current `memory.backend` (read with `omp config get`) and marks it. `omp config set memory.backend` runs only when you choose a different one.
 2. For `hindsight` the step does not ask for the server. It tells you to set the URL and token in `/settings` → Memory, or export `HINDSIGHT_API_URL` and `HINDSIGHT_API_TOKEN` (which win over the settings and keep the token out of the settings file).
 3. **Commit gate (optional):** offered when the backend has a write tool. You confirm it and name the folders (default `~/projects`).
-4. The step then rewrites `~/.omp/agent/AGENTS.md` from the memory rules of the chosen backend and the gate rules. An existing different file is backed up after you confirm.
+4. The step then rewrites `~/.omp/agent/AGENTS.md` from the memory rules of the chosen backend and the gate rules, plus a **Skill triggers** table (situation → pstack skill) when pstack is installed. An existing different file is backed up after you confirm.
 
 It runs automatically only on a brand-new install; existing installs opt in with `/starter memory`. The generated rules, per backend:
 
@@ -199,7 +199,7 @@ One form with a checkbox per kit. Checked kits get installed; an installed kit y
 
 | Kit | Installs | Notes |
 |---|---|---|
-| pstack | `pstack@cursor-plugins` (marketplace `cursor/plugins`) | omp's plugin loader skips 57 of pstack's 58 skills (their `disable-model-invocation` field), so the step adds `<plugins>/node_modules/pstack/skills` to `skills.customDirectories`. That link follows pstack upgrades. Uninstalling removes the entry. |
+| pstack | `pstack@pstack-claude` (marketplace `michael-denyer/pstack-claude`) | The Claude Code port of [pstack](https://github.com/cursor/plugins/tree/main/pstack). Its skills load natively and its omp extension tells agents how pstack's Claude tool names map to omp's. It trails upstream: a skill added there arrives only when the port picks it up. |
 | Matt Pocock | `mattpocock-skills@mattpocock` (marketplace `mattpocock/skills`) | All 27 promoted skills load. |
 | addy | `agent-skills@addy-agent-skills` (marketplace `addyosmani/agent-skills`) | All 26 skills load. |
 | ponytail | `ponytail@ponytail` (marketplace `DietrichGebert/ponytail`) | Loads through its pi extension, so the least-code ladder is injected every session (no need for the model to pick the skill). Adds `/ponytail [lite\|full\|ultra\|off]`, `/ponytail-review`, `/ponytail-audit`, `/ponytail-debt`, `/ponytail-gain` and `/ponytail-help`. `ponytail-review` overlaps the other kits' code review skills. Validation, error handling and security stay untouched; in repos with a design system its "native platform feature" rung can conflict with reuse, so its "already in this codebase" rung should win. |
@@ -413,6 +413,9 @@ Limits: a session's repo comes from the origin URL of its working folder, so a f
 
 ### Unreleased (`feat/ship`)
 
+- **Changed:** the pstack kit installs `pstack@pstack-claude` (marketplace `michael-denyer/pstack-claude`) instead of `pstack@cursor-plugins`. The port loads its skills natively, so the `skills.customDirectories` entry is no longer added, and `/starter updates` can now compare its published version.
+- **Added:** with pstack installed, `/starter memory` appends a **Skill triggers** table to `~/.omp/agent/AGENTS.md`, mapping situations to pstack skills nobody invokes by habit (`reframe`, `statechart`, `thermos`, `correct` …).
+- Existing installs: `omp plugin uninstall pstack@cursor-plugins`, remove its `node_modules/pstack/skills` entry from `skills.customDirectories`, then run `/starter skills` and `/starter memory`.
 - **Changed:** `/ship` reads GitHub in the background. The `gh` and `git` runners are async and `readPr` returns a promise, so the session no longer stalls for the 2 to 3 seconds a read took on every tick and after each pass. A tick that finds the last read still out is skipped, and a read that was under way when a pass started or ended is dropped. Fixes #7.
 - **Fixed:** `ship_start` returns the PR URL as the call's own result: the review is now queued as a follow-up, where a steer had backgrounded the tool call. A second `/ship` on a PR another session watches is refused before put-up pushes anything. A leading `~` in `ship_start`'s `cwd` and `report`, and in `/ship --report`, is your home folder. Items 1 and 3 of #9.
 - **Added:** `ship-fence`, the guard `/ship` will run behind: `gh`/`git` shims plus a tool-call check, armed and disarmed by rewriting a per-process state file, and a push check on protected files. Every session now puts `bin/ship-fence` first on `PATH`; unarmed, it passes calls straight through. See [Ship fence](#ship-fence-ship-fence). Story 1 of `plans/001-ship.md`.

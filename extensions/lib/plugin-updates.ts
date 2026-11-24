@@ -19,7 +19,8 @@ export const ADDY_PLUGIN: PluginTarget = {
 	repo: "addyosmani/agent-skills", catalog: ".claude-plugin/marketplace.json", packageNames: ["agent-skills"],
 };
 export const PSTACK_PLUGIN: PluginTarget = {
-	key: "pstack", id: "pstack@cursor-plugins", marketplace: "cursor-plugins", repo: "cursor/plugins", packageNames: ["pstack"],
+	key: "pstack", id: "pstack@pstack-claude", marketplace: "pstack-claude",
+	repo: "michael-denyer/pstack-claude", catalog: ".claude-plugin/marketplace.json", packageNames: ["pstack"],
 };
 export const MATT_PLUGIN: PluginTarget = {
 	key: "mattpocock-skills", id: "mattpocock-skills@mattpocock", marketplace: "mattpocock", repo: "mattpocock/skills", packageNames: ["mattpocock-skills"],
