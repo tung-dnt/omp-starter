@@ -348,7 +348,7 @@ A file with the same name in `~/.omp/agent/commands/` or `~/.omp/agent/skills/` 
 
 A pass fixes CI at the root cause (one re-run per job at most), merges the base instead of rebasing, does small asks from people with write access and answers them, proposes larger asks in a reply and brings them to you, acts on a bot's finding only when it confirms it in the code, and hands you security findings. At most 3 pushes per cause (a failing check by name, or the conflict), one push per round; it commits only files it changed, by name, and never touches a file you changed in the checkout. It ends with a `SHIP-STATUS: working|ready|needs-you` line that code reads. "Ready" is checks green, no conflict, every trusted comment answered; it then lists what is still yours (undraft, a required approval) and keeps watching. Code checks a `ready` against the PR first and drops it while a check is red or running, a conflict stands, or a push left no checks listed yet.
 
-The fence (below) is armed on the PR's branch for the whole watch and comes down when it ends. The watch ends on merge, close, `/ship stop`, 7 days, a base change, or the session ending. `/ship stop` and the session ending also cancel a `/ship` that is still starting: nothing is claimed, fenced or watched, though put-up may already have pushed or opened the PR. Running `/ship` again on the same PR resumes from GitHub and from `~/.omp/agent/ship/watches/<owner>-<repo>-<n>.json` and resets the pass count. The first session to find a branch's open PR claims it before it pushes; a second session on that PR is refused before it pushes anything, and told which session holds it.
+The fence (below) is armed on the PR's branch for the whole watch and comes down when it ends. The watch ends on merge, close, `/ship stop`, 7 days, a base change, or the session ending. `/ship stop` and the session ending also cancel a `/ship` that is still starting: nothing is claimed, fenced or watched. Put-up honours the stop before it stages, commits, pushes and opens the PR; a commit or push already running completes, so a stop that lands then can leave a local commit or a pushed branch, but no PR is opened after it. Running `/ship` again on the same PR resumes from GitHub and from `~/.omp/agent/ship/watches/<owner>-<repo>-<n>.json` and resets the pass count. The first session to find a branch's open PR claims it before it pushes; a second session on that PR is refused before it pushes anything, and told which session holds it.
 
 You are told through a status line, a message per pass, and (on macOS, interactive sessions, unless `notify.off`) a notification when a PR is ready, needs you, or the watch stopped on its own.
 
@@ -412,6 +412,10 @@ The numbering starts at M5: M1 to M4 measured memory notes that omp's memory bac
 Limits: a session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names and tool names; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder; its only write is the `--json` file.
 
 ## Release notes
+
+### Unreleased
+
+- **Fixed:** `/ship stop` during a start now reaches put-up. It checks the stop before it stages, commits, pushes and opens the draft PR, so a stop on a clean branch no longer ends in a push and a PR. A commit or push already running still completes. Fixes #17.
 
 ### 0.48.0 — 2026-11-25
 

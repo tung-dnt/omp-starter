@@ -16,6 +16,8 @@ export interface PutUpDeps {
 	sshHostname?: (alias: string) => string | null;
 	/** Takes this session's claim on the PR the branch already has open, or says why it can't (a live session already watches it). Asked once the PR is found, before anything is pushed. */
 	claim?: (pr: PrRef) => string | null;
+	/** Aborts when the user stops the /ship that called this. Checked before each step that changes something (add, commit, push, PR create); a step already running finishes. */
+	signal?: AbortSignal;
 }
 
 /** What one gh or git call returned. */
@@ -35,6 +37,14 @@ class Refusal extends Error {}
 
 function no(why: string): never {
 	throw new Refusal(why);
+}
+
+/** Why put-up gave up when the caller stopped it; the caller reports its own "stopped before it started watching" instead. */
+const STOPPED = "stopped before it went further";
+
+/** Gives up, changing nothing more, when the caller has stopped this put-up. */
+function unlessStopped(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) no(STOPPED);
 }
 
 /** What a failed command said, short enough to read in a refusal; hook and git errors come last. */
@@ -199,7 +209,7 @@ function rejectUnsafe(tree: Tree): void {
 }
 
 /** Commits all uncommitted work once the user has seen the files; true when it did. */
-async function commitWork(run: RunGit, message: string, confirm: PutUpDeps["confirm"]): Promise<boolean> {
+async function commitWork(run: RunGit, message: string, confirm: PutUpDeps["confirm"], signal: AbortSignal | undefined): Promise<boolean> {
 	const tree = await readTree(run);
 	if (tree.files.length === 0) return false;
 	rejectUnsafe(tree);
@@ -209,8 +219,10 @@ async function commitWork(run: RunGit, message: string, confirm: PutUpDeps["conf
 	const now = await readTree(run);
 	if (now.files.join("\0") !== tree.files.join("\0")) no("the working tree changed while waiting for the confirm; run /ship again");
 	rejectUnsafe(now);
+	unlessStopped(signal);
 	const add = await run("add", "-A");
 	if (add.code !== 0) no(`git add failed: ${brief(add)}`);
+	unlessStopped(signal);
 	const commit = await run("commit", "-m", message);
 	if (commit.code !== 0) no(`git commit failed (hooks stay on, and the files stay staged): ${brief(commit)}`);
 	return true;
@@ -283,7 +295,7 @@ function prBody(branch: string, commits: string[]): string {
 // ---- put-up ---------------------------------------------------------------------------------------------------------
 
 async function put(root: string, deps: PutUpDeps): Promise<PrRef> {
-	const { gh, confirm } = deps;
+	const { gh, confirm, signal } = deps;
 	const run: RunGit = (...args) => deps.git(root, args);
 
 	const repo = await originRepo(run, deps.sshHostname ?? sshConfigHostname);
@@ -304,14 +316,16 @@ async function put(root: string, deps: PutUpDeps): Promise<PrRef> {
 	rejectSecrets(await committedFiles(run, branch, base, from), `are already committed on ${branch}`);
 	const { commit, title } = wording(branch);
 	// With a PR already open the tree is not put-up's to commit: /ship commits only the files it changed itself (AC8).
-	const committed = existing ? false : await commitWork(run, commit, confirm);
+	const committed = existing ? false : await commitWork(run, commit, confirm, signal);
 	const commits = existing ? [] : await commitsAhead(run, base, from);
 	if (!existing && commits.length === 0) no(`${branch} has no commits beyond ${base}, so there is nothing to put up`);
 
+	unlessStopped(signal);
 	const push = await run("push", "origin", branch);
 	if (push.code !== 0) no(`git push origin ${branch} failed${committed ? " (the work is committed locally)" : ""}: ${brief(push)}`);
 	if (existing) return existing.ref;
 
+	unlessStopped(signal);
 	const created = await gh(["pr", "create", "--repo", `${repo.owner}/${repo.repo}`, "--draft", "--head", branch, "--title", title, "--body", prBody(branch, commits)]);
 	if (created.code !== 0) no(`gh pr create failed (${branch} is pushed): ${brief(created)}`);
 	return prRef(created.out) ?? prRef(created.err) ?? no(`gh pr create printed no pull request URL: ${brief(created)}`);
