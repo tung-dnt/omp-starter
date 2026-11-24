@@ -62,5 +62,9 @@ jobs:
       - name: Type check
         run: bun run typecheck
 
+      # Every entry point omp loads (package.json `omp.extensions`), so the list cannot drift from what ships.
       - name: Build
-        run: bun build extensions/setup.ts extensions/kb-commit-gate.ts extensions/kb-command.ts extensions/fable-router.ts extensions/unattended.ts --target=bun --packages=external --outdir="$RUNNER_TEMP/omp-starter-build"
+        run: |
+          mapfile -t entries < <(jq -r '.omp.extensions[]' package.json)
+          test "${#entries[@]}" -gt 0
+          bun build "${entries[@]}" --target=bun --packages=external --outdir="$RUNNER_TEMP/omp-starter-build"
