@@ -296,21 +296,86 @@ function inGitFolder(p: string, gitDirs: string[]): boolean {
 	return low.split(path.sep).includes(".git") || gitDirs.some(dir => low === dir.toLowerCase() || low.startsWith(`${dir.toLowerCase()}${path.sep}`));
 }
 
-/** The word of `argv` that names a path inside a git folder: as written, as the value of `--opt=value` or `key=value`, or glued to a short option (`-ofile`). Relative paths run from `dir`; symlinks are followed. */
-function gitFolderWord(argv: string[], dir: string, gitDirs: string[]): string | undefined {
-	return argv.find(word => {
-		const paths = [word];
-		if (word.includes("=")) paths.push(word.slice(word.indexOf("=") + 1));
-		if (/^-[^-]/.test(word)) paths.push(word.slice(2));
-		return paths.some(p => p !== "" && [path.resolve(dir, p), walk(dir, p)].some(form => inGitFolder(form, gitDirs)));
-	});
+/** Where a git subcommand takes a path it creates, fills or reads by name. */
+interface PathArgs {
+	/** Options whose value is a path. A long one also stands for any prefix of it, as git reads `--pre=x` for `--prefix=x`. */
+	options?: string[];
+	/** The positionals that are paths: all of them, or those after one of these verbs (`bundle create FILE`). */
+	positionals?: true | string[];
 }
 
-/** Why a git argv would write into a git folder, where hooks, config and refs live: it runs in one, or a word of it names a path inside one. */
-function checkGitFolder(args: string[], dir: string, policy: GitPolicy): string | null {
+/** diff's `--output=<file>`, which every command that shows a diff takes. */
+const DIFF_OUTPUT: PathArgs = { options: ["--output"] };
+/**
+ * Only the words git treats as paths are judged against the git folders, so a pattern, a message or a revision may say
+ * `.git` freely: the files and folders a subcommand writes or fills, where it moves or clones to, and the few options
+ * that read one (`commit -F`, `--template`).
+ */
+const PATH_ARGS: Record<string, PathArgs> = {
+	am: { options: ["--directory"] },
+	apply: { options: ["--directory", "--build-fake-ancestor"] },
+	archive: { options: ["--output", "-o", "--prefix"], positionals: true },
+	bundle: { positionals: ["create"] },
+	"checkout-index": { options: ["--prefix"], positionals: true },
+	clone: { options: ["--template", "--separate-git-dir"], positionals: true },
+	commit: { options: ["--file", "-F", "--template"] },
+	config: { options: ["--file", "-f"] },
+	diff: DIFF_OUTPUT, "diff-files": DIFF_OUTPUT, "diff-index": DIFF_OUTPUT, "diff-tree": DIFF_OUTPUT, log: DIFF_OUTPUT,
+	"range-diff": DIFF_OUTPUT, reflog: DIFF_OUTPUT, show: DIFF_OUTPUT, stash: DIFF_OUTPUT, whatchanged: DIFF_OUTPUT,
+	"fast-export": { options: ["--export-marks"] },
+	"format-patch": { options: ["--output", "--output-directory", "-o"], positionals: true },
+	gc: { options: ["--expire-to"] },
+	init: { positionals: true },
+	"interpret-trailers": { positionals: true },
+	mailinfo: { positionals: true },
+	mailsplit: { options: ["-o"] },
+	"merge-file": { positionals: true },
+	mv: { positionals: true },
+	"read-tree": { options: ["--prefix", "--index-output"] },
+	repack: { options: ["--expire-to", "--filter-to"] },
+	rm: { positionals: true },
+	submodule: { positionals: ["add"] },
+	worktree: { positionals: ["add", "move"] },
+};
+
+/** Every value `options` take in `args`, each occurrence counted: `--name=v`, `--name v`, `-Xv` or `-X v`. A long name stands for any prefix of it, a short one may sit anywhere in a bundle (`-qo v`), and `--` ends the options. */
+function optionValues(args: string[], options: string[]): string[] {
+	const values: string[] = [];
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i] as string;
+		if (arg === "--") break;
+		if (arg.startsWith("--")) {
+			const eq = arg.indexOf("=");
+			const name = eq < 0 ? arg : arg.slice(0, eq);
+			if (options.some(o => o.startsWith(name))) values.push(eq < 0 ? (args[++i] ?? "") : arg.slice(eq + 1));
+		} else if (arg.startsWith("-")) {
+			for (let j = 1; j < arg.length; j++) {
+				if (!options.includes(`-${arg[j]}`)) continue;
+				values.push(arg.slice(j + 1) || (args[++i] ?? ""));
+				break;
+			}
+		}
+	}
+	return values;
+}
+
+/** The words of `rest` that `sub` takes as paths. */
+function pathWords(sub: string, rest: string[]): string[] {
+	const spec = Object.hasOwn(PATH_ARGS, sub) ? PATH_ARGS[sub] : undefined;
+	if (spec === undefined) return [];
+	const [verb = "", ...others] = parse(rest, {}).positionals;
+	const positionals = spec.positionals === true ? [verb, ...others] : spec.positionals?.includes(verb) ? others : [];
+	return [...optionValues(rest, spec.options ?? []), ...positionals];
+}
+
+/**
+ * Why a git argv would write into a git folder, where hooks, config and refs live: it runs in one, or one of the paths
+ * `named` (global options and config values) or `sub` takes lies inside one. Relative paths run from `dir`; symlinks are followed.
+ */
+function checkGitFolder(sub: string, rest: string[], named: string[], dir: string, policy: GitPolicy): string | null {
 	if (inGitFolder(dir, policy.gitDirs)) return refused(`git runs in the work tree, not in the git folder ${dir}`);
-	const word = gitFolderWord(args, dir, policy.gitDirs);
-	return word === undefined ? null : refused(`git names ${word}, a path inside a git folder, where hooks and config live`);
+	const word = [...named, ...pathWords(sub, rest)].find(p => p !== "" && [path.resolve(dir, p), walk(dir, p)].some(form => inGitFolder(form, policy.gitDirs)));
+	return word === undefined ? null : refused(`git takes ${word} as a path inside a git folder, where hooks and config live`);
 }
 
 /** Refs only a fetch from the remote may set: remote-tracking refs, which a push check could be fooled by, and replacement refs, which change what git reads. */
@@ -351,19 +416,26 @@ function checkSubcommandWrites(sub: string, rest: string[], dir: string): string
 export function checkGit(args: string[], policy: GitPolicy, cwd: string): string | null {
 	let i = 0;
 	const settings: string[] = [];
+	/** What the global options name as a path: --git-dir and --work-tree. A `-C` is the folder git runs in, which `dir` judges. */
+	const named: string[] = [];
 	for (; i < args.length; i++) {
 		const arg = args[i] as string;
 		if (!arg.startsWith("-")) break;
 		if (isIn(GIT_GLOBAL_VALUE, arg)) {
-			if (arg === "-c") settings.push(args[i + 1] ?? "");
+			const given = args[i + 1] ?? "";
+			if (arg === "-c") settings.push(given);
+			else if (arg === "--git-dir" || arg === "--work-tree") named.push(given);
 			i++;
 		} else if (arg.startsWith("-c") && arg.length > 2) settings.push(arg.slice(2));
+		else if (arg.startsWith("--git-dir=") || arg.startsWith("--work-tree=")) named.push(arg.slice(arg.indexOf("=") + 1));
 	}
 	const sub = args[i] ?? "";
 	const rest = args.slice(i + 1);
 	if (sub !== "" && !isIn(GIT_COMMANDS, sub)) return refused(`git ${sub} is not a git command the fence allows`);
 	const dir = gitWorkDir(args, cwd);
-	const writes = checkGitFolder(args, dir, policy) ?? checkSubcommandWrites(sub, rest, dir);
+	// Any config value may be a path (core.worktree, format.outputDirectory, trace2.eventTarget).
+	const configPaths = settings.map(s => s.slice(s.indexOf("=") + 1));
+	const writes = checkGitFolder(sub, rest, [...named, ...configPaths], dir, policy) ?? checkSubcommandWrites(sub, rest, dir);
 	if (writes !== null) return writes;
 	const risky = settings.find(s => RISKY_CONFIG.test(s));
 	if ((sub === "push" || sub === "commit" || sub === "merge") && risky !== undefined) return refused(`git -c ${risky} with ${sub} is refused: hooks and remotes stay as configured`);

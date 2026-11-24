@@ -165,7 +165,8 @@ test("the extension refuses only while the fence is armed", async () => {
 });
 
 describe("the shims, with real git", () => {
-	const git = (env: NodeJS.ProcessEnv, ...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: repo, env, encoding: "utf8" });
+	const gitAt = (cwd: string, env: NodeJS.ProcessEnv, ...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, env, encoding: "utf8" });
+	const git = (env: NodeJS.ProcessEnv, ...args: string[]) => gitAt(repo, env, ...args);
 
 	test("unarmed, they pass everything through; armed, they refuse another branch and let the watched one go", () => {
 		expect(git(process.env, "push", "--quiet", "origin", "HEAD:refs/heads/free").status).toBe(0);
@@ -319,6 +320,15 @@ describe("the shims, with real git", () => {
 			// A `..` after a symlink leaves the link's target, so these reach .git itself.
 			["checkout-index", "--prefix=hk/../", "-f", "src/a.ts"],
 			["-C", "hk/..", "archive", "-o", "config", "HEAD"],
+			// Commands that create or fill a file at a path they are given; a long option by a prefix, a short one in a bundle, an option given twice.
+			["mailinfo", ".git/hooks/pre-commit", "/dev/null"],
+			["mv", "src/a.ts", ".git/hooks/pre-commit"],
+			["clone", bare(), ".git/hooks/clone"],
+			["config", "--file", ".git/hooks/pre-push", "core.x", "y"],
+			["format-patch", "--output-directory=.git/hooks", "-1"],
+			["checkout-index", "--pre=.git/hooks/", "-a"],
+			["archive", "-qo.git/hooks/pre-commit", "HEAD"],
+			["diff", `--output=${path.join(privateHome(), "d.patch")}`, "--output=.git/hooks/pre-commit"],
 		]) {
 			const r = git(process.env, ...args);
 			expect(r.status).toBe(1);
@@ -336,6 +346,24 @@ describe("the shims, with real git", () => {
 		expect(sh(repo, "config", "--get", "remote.origin.url")).toContain("remote.git");
 	});
 
+	test("commands that only mention .git in a pattern or a message run while armed", () => {
+		armFence({ pushBranch: BRANCH, root: repo });
+		write(path.join(repo, "docs.md"), "see .git/hooks\n");
+		sh(repo, "add", "-A");
+		for (const args of [
+			["grep", "-n", ".git/hooks"],
+			["log", "-S.git", "--oneline"],
+			["log", "--grep=/.git/", "--oneline"],
+			["commit", "-q", "-m", "…/.git/…"],
+			["commit", "-q", "--allow-empty", "-am", "docs: why /.git/ stays out of the tree"],
+			["rev-parse", "--git-path", "hooks/pre-commit"],
+		]) {
+			const r = git(process.env, ...args);
+			expect(r.stderr, args.join(" ")).not.toContain("ship fence");
+			expect(r.status, args.join(" ")).toBe(0);
+		}
+	});
+
 	test("a push run against another repo with --git-dir is refused, so the check always reads the repo that pushes", () => {
 		const gitdir = path.join(privateHome(), "other-gd");
 		const other = teammate(gitdir);
@@ -348,7 +376,14 @@ describe("the shims, with real git", () => {
 		expect(originHas(BRANCH)).toBe("");
 	});
 
-	test("a push waits for a fetch while origin holds a commit this checkout lacks; then it goes", () => {
+	/** What a refusal tells the session to run, `run git <args>;`, as an argv for git. */
+	const namedFetch = (stderr: string): string[] => {
+		const command = /run git (fetch origin [^;]+);/.exec(stderr)?.[1];
+		expect(command, stderr).toBeDefined();
+		return (command as string).split(" ");
+	};
+
+	test("a push waits for the fetch it names while origin holds a commit this checkout lacks; then it goes", () => {
 		const other = teammate();
 		write(path.join(other, "src/b.ts"), "export const b = 1;\n");
 		sh(other, "add", "-A");
@@ -359,9 +394,9 @@ describe("the shims, with real git", () => {
 		sh(repo, "commit", "--quiet", "-am", "mine");
 		const blocked = git(process.env, "push", "origin", BRANCH);
 		expect(blocked.status).toBe(1);
-		expect(blocked.stderr).toContain("fetch origin first");
+		expect(blocked.stderr).toContain(`run git fetch origin ${BRANCH};`);
 		expect(blocked.stderr).not.toContain("This is final");
-		expect(git(process.env, "fetch", "--quiet", "origin").status).toBe(0);
+		expect(git(process.env, ...namedFetch(blocked.stderr)).status).toBe(0);
 		expect(git(process.env, "merge", "--quiet", "--no-edit", `origin/${BRANCH}`).status).toBe(0);
 		expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
 
@@ -371,9 +406,69 @@ describe("the shims, with real git", () => {
 		sh(other, "push", "--quiet", "origin", "HEAD:refs/heads/main");
 		write(path.join(repo, "src/a.ts"), "export const a = 3;\n");
 		sh(repo, "commit", "--quiet", "-am", "mine again");
-		expect(git(process.env, "push", "origin", BRANCH).stderr).toContain("fetch origin first");
-		expect(git(process.env, "fetch", "--quiet", "origin").status).toBe(0);
+		const behind = git(process.env, "push", "origin", BRANCH);
+		expect(behind.stderr).toContain("run git fetch origin main;");
+		expect(git(process.env, ...namedFetch(behind.stderr)).status).toBe(0);
 		expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+	});
+
+	describe("a clone that holds only the watched branch lacks origin's default branch, which a plain `git fetch origin` never brings", () => {
+		/**
+		 * Origin's main moves on after the branch left it; the clone then takes the branch alone, as `git clone --single-branch --branch`
+		 * or `--depth 1` does. --no-local makes it fetch like a remote clone instead of copying every object.
+		 */
+		function partialClone(...flags: string[]): { dir: string; other: string } {
+			write(path.join(repo, "src/b.ts"), "export const b = 1;\n");
+			sh(repo, "add", "-A");
+			sh(repo, "commit", "--quiet", "-m", "branch work");
+			sh(repo, "push", "--quiet", "origin", BRANCH);
+			const other = teammate();
+			write(path.join(other, "README.md"), "base moved\n");
+			sh(other, "add", "-A");
+			sh(other, "commit", "--quiet", "-m", "base moves");
+			sh(other, "push", "--quiet", "origin", "HEAD:refs/heads/main");
+			const dir = path.join(privateHome(), "projects", "partial");
+			sh(privateHome(), "clone", "--quiet", "--no-local", ...flags, "--branch", BRANCH, bare(), dir);
+			expect(spawnSync("git", ["cat-file", "-e", `${sh(other, "rev-parse", "HEAD").trim()}^{commit}`], { cwd: dir }).status).not.toBe(0);
+			return { dir, other };
+		}
+
+		for (const [name, flags] of [["single-branch", ["--single-branch"]], ["shallow", ["--depth", "1"]]] as const) {
+			test(`${name}: the push names the fetch of the default branch, and goes after it`, () => {
+				const { dir } = partialClone(...flags);
+				armFence({ pushBranch: BRANCH, root: dir });
+				write(path.join(dir, "src/a.ts"), "export const a = 2;\n");
+				sh(dir, "commit", "--quiet", "-am", "mine");
+				const blocked = gitAt(dir, process.env, "push", "origin", BRANCH);
+				expect(blocked.status).toBe(1);
+				expect(blocked.stderr).toContain("run git fetch origin main;");
+				expect(blocked.stderr).not.toContain("This is final");
+				// A plain fetch leaves it missing, which is why the refusal names the ref.
+				expect(gitAt(dir, process.env, "fetch", "--quiet", "origin").status).toBe(0);
+				expect(gitAt(dir, process.env, "push", "origin", BRANCH).stderr).toContain("run git fetch origin main;");
+				expect(gitAt(dir, process.env, ...namedFetch(blocked.stderr)).status).toBe(0);
+				expect(gitAt(dir, process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+				expect(originHas(BRANCH)).toBe(sh(dir, "rev-parse", "HEAD").trim());
+			});
+		}
+
+		test("when the branch tip and the default branch are both missing, one fetch names both", () => {
+			const { dir, other } = partialClone("--single-branch");
+			sh(other, "fetch", "--quiet", "origin", BRANCH);
+			sh(other, "reset", "--quiet", "--hard", `origin/${BRANCH}`);
+			write(path.join(other, "src/c.ts"), "export const c = 1;\n");
+			sh(other, "add", "-A");
+			sh(other, "commit", "--quiet", "-m", "teammate");
+			sh(other, "push", "--quiet", "origin", BRANCH);
+			armFence({ pushBranch: BRANCH, root: dir });
+			write(path.join(dir, "src/a.ts"), "export const a = 2;\n");
+			sh(dir, "commit", "--quiet", "-am", "mine");
+			const blocked = gitAt(dir, process.env, "push", "origin", BRANCH);
+			expect(blocked.stderr).toContain(`run git fetch origin ${BRANCH} main;`);
+			expect(gitAt(dir, process.env, ...namedFetch(blocked.stderr)).status).toBe(0);
+			expect(gitAt(dir, process.env, "merge", "--quiet", "--no-edit", `origin/${BRANCH}`).status).toBe(0);
+			expect(gitAt(dir, process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+		});
 	});
 
 	test("a protected change the branch held when /ship armed, or origin's branch already holds, is not the push's", () => {
@@ -402,6 +497,21 @@ describe("the shims, with real git", () => {
 		const down: Git = (dir, ...args) => (args[0] === "ls-remote" ? { code: 128, out: "" } : realGit(dir, ...args));
 		expect(checkPushContent(repo, [BRANCH], currentState(), down)).toContain("origin");
 		expect(checkPushContent(repo, [BRANCH], { ...currentState(), pushBranch: null })).toContain("pushes nothing");
+	});
+
+	test("the fetch a refusal names comes from origin's own listing: its default branch by name, HEAD when none is named, a shell-safe word either way", () => {
+		armFence({ pushBranch: BRANCH, root: repo });
+		const oid = "1".repeat(40);
+		const origin = (listing: string): Git => (dir, ...args) => (args[0] === "ls-remote" ? { code: 0, out: listing } : args[0] === "cat-file" ? { code: 1, out: "" } : realGit(dir, ...args));
+		const refuse = (listing: string) => checkPushContent(repo, [BRANCH], currentState(), origin(listing));
+		expect(refuse(`ref: refs/heads/trunk\tHEAD\n${oid}\tHEAD\n`)).toContain("run git fetch origin trunk;");
+		expect(refuse(`ref: refs/heads/trunk\tHEAD\n${oid}\tHEAD\n${"2".repeat(40)}\trefs/heads/${BRANCH}\n`)).toContain(`run git fetch origin ${BRANCH} trunk;`);
+		expect(refuse(`${oid}\tHEAD\n`)).toContain("run git fetch origin HEAD;");
+		expect(refuse(`ref: refs/heads/x;touch$IFS/tmp/p\tHEAD\n${oid}\tHEAD\n`)).toContain("run git fetch origin 'x;touch$IFS/tmp/p';");
+		// A name that opens with `-` would be an option to fetch: it goes in full.
+		expect(refuse(`ref: refs/heads/-x\tHEAD\n${oid}\tHEAD\n`)).toContain("run git fetch origin refs/heads/-x;");
+		expect(refuse(`ref: refs/heads/--upload-pack=sh\tHEAD\n${oid}\tHEAD\n`)).toContain("run git fetch origin 'refs/heads/--upload-pack=sh';");
+		expect(refuse(`ref: refs/heads/trunk\tHEAD\n${oid}\tHEAD\n`)).not.toContain("This is final");
 	});
 
 	test("a call whose environment lost the state name is refused", () => {

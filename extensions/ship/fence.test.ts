@@ -101,6 +101,44 @@ describe("git", () => {
 		expect(checkGit(["commit", "-m", "docs: why .git stays out of the tree"], policy, "/repo")).toBeNull();
 	});
 
+	test("every command and option that creates or fills a file at a path it is given is held to the git-folder rule, by whatever spelling", () => {
+		for (const line of [
+			// Positionals that are files or folders git writes: the name of a file it fills, a place it moves to or clones into.
+			"mailinfo .git/hooks/pre-commit /tmp/patch", "mailinfo /tmp/msg .git/hooks/pre-commit", "mv a.sh .git/hooks/pre-commit", "mv -f a.sh .git/hooks/pre-commit", "mv -- a.sh .git/hooks/pre-commit", "rm -f .git/hooks/pre-commit", "rm -- .git/hooks/pre-commit",
+			"clone /tmp/hooks-repo .git/hooks", "clone --depth 1 /tmp/r .git/hooks", "init .git/hooks/x", "worktree add .git/hooks/wt", "worktree add -b x .git/hooks/wt",
+			"worktree move wt .git/hooks/wt", "submodule add /tmp/r .git/hooks/s", "submodule --quiet add /tmp/r .git/hooks/s", "interpret-trailers --in-place --trailer k:v .git/hooks/pre-commit",
+			"archive HEAD .git/hooks/x", "bundle create --version=3 .git/hooks/x HEAD", "checkout-index -a .git/hooks/x", "merge-file -L a -L b .git/hooks/x a b",
+			// Options whose value is a path: written, created or, for the few the fence reads as one, named.
+			"config --file .git/hooks/pre-push core.x y", "config -f .git/config core.x y", "config --file=.git/config core.x y", "config -f.git/config core.x y", "config core.x y --file .git/config",
+			"commit -F .git/hooks/x", "commit -aF .git/x", "commit --file=.git/x", "commit --file .git/x", "format-patch --output-directory=.git/hooks HEAD~1", "format-patch --output-directory .git/hooks HEAD~1",
+			"mailsplit -o.git/hooks mbox", "mailsplit -o .git/hooks mbox", "apply --directory=.git/hooks p.patch", "am --directory=.git/hooks p.mbox", "fast-export --export-marks=.git/hooks/x HEAD",
+			"read-tree --index-output=.git/hooks/x HEAD", "gc --expire-to=.git/hooks", "repack -d --expire-to=.git/hooks", "clone --template=.git/hooks /tmp/r x",
+			// A long option stands for any prefix of it, a short one may sit in a bundle, and every occurrence counts: git creates the file of each --output.
+			"checkout-index --pre=.git/hooks/ -a", "checkout-index --prefix .git/hooks/ -a", "archive -vo .git/hooks/x HEAD", "archive -qo.git/hooks/x HEAD",
+			"diff --output=/tmp/a --output=.git/hooks/pre-commit", "diff --output=.git/hooks/pre-commit --output=/tmp/a",
+			// Config values and global options: any value may be a path (format.outputDirectory, core.worktree, trace2.eventTarget).
+			"-c format.outputDirectory=.git/hooks format-patch HEAD~1", "-c trace2.eventTarget=.git/hooks/x status", "-ctrace2.eventTarget=.git/hooks/x status",
+			"--git-dir=.git/modules/x status", "--git-dir .git/modules/x status",
+		]) {
+			expect(git(line) ?? `${line}: allowed`).toContain("git folder");
+		}
+	});
+
+	test("words git does not take as paths may mention .git: patterns, messages, revisions and config reads", () => {
+		for (const args of [
+			["grep", "-n", ".git/hooks"], ["grep", "-e", ".git/hooks", "--", "src"], ["grep", "-rnF", "/.git/", "."],
+			["log", "-S.git"], ["log", "-S", ".git"], ["log", "-G.git/hooks"], ["log", "--grep=/.git/"], ["log", "--grep", "/.git/", "--oneline"], ["log", "--author=.git"],
+			["commit", "-m", "…/.git/…"], ["commit", "-am", "docs: /.git/ stays out"], ["commit", "--message=/.git/hooks"], ["commit", "-m", "a", "-m", ".git/hooks"],
+			["-c", "user.name=x", "commit", "-m", "/.git/"], ["tag", "-a", "v1", "-m", "see .git/hooks"], ["notes", "add", "-m", ".git/x"], ["stash", "push", "-m", "/.git/"],
+			["diff", "-S.git"], ["show", "HEAD:.gitignore"], ["rev-parse", "--git-dir"], ["rev-parse", "--git-path", "hooks/pre-commit"], ["rev-parse", "--git-common-dir"],
+			["config", "--get", "remote.origin.url"], ["config", "user.name", ".git"], ["check-ignore", "-v", ".git/config"], ["status", "--", "/.git/"], ["ls-files", "--directory"],
+			// After `--` a word is a file name, not an option; the bundle verbs other than create only read a bundle.
+			["diff", "--", "--output=.git/hooks/x"], ["bundle", "verify", ".git/x.bundle"],
+		]) {
+			expect(checkGit(args, policy, "/repo"), args.join(" ")).toBeNull();
+		}
+	});
+
 	test("update-ref, fetch and pull leave remote-tracking and replacement refs to a plain fetch from the remote", () => {
 		for (const line of [
 			"update-ref refs/remotes/origin/feat/ship-s1 HEAD", "update-ref -d refs/remotes/origin/main", "update-ref -m why refs/remotes/origin/HEAD HEAD",

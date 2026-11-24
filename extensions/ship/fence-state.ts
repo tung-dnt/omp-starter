@@ -135,34 +135,47 @@ const blobAt = (dir: string, ref: string, file: string, git: Git): string => {
 	return r.code === 0 ? r.out.trim() : "";
 };
 
-/** What origin holds now, asked of origin itself: a remote-tracking ref only says what some fetch saw, and the session can move one. Null when origin can't be read. */
-function originTips(dir: string, branch: string, git: Git): { branch?: string; base?: string } | null {
-	const listing = git(dir, "ls-remote", "origin", `refs/heads/${branch}`, "HEAD");
+/**
+ * What origin holds now, asked of origin itself: a remote-tracking ref only says what some fetch saw, and the session can
+ * move one. `baseName` is the branch origin's HEAD points at, when it names one. Null when origin can't be read.
+ */
+function originTips(dir: string, branch: string, git: Git): { branch?: string; base?: string; baseName?: string } | null {
+	const listing = git(dir, "ls-remote", "--symref", "origin", `refs/heads/${branch}`, "HEAD");
 	if (listing.code !== 0) return null;
-	const tips: { branch?: string; base?: string } = {};
+	const tips: { branch?: string; base?: string; baseName?: string } = {};
 	for (const line of listing.out.split("\n")) {
 		const [oid, ref] = line.split("\t");
 		if (!oid) continue;
-		// ls-remote matches names by their tail, so only the exact refs count.
-		if (ref === `refs/heads/${branch}`) tips.branch = oid;
+		// `ref: refs/heads/main<TAB>HEAD` names where HEAD points. ls-remote matches names by their tail, so only the exact refs count.
+		if (oid.startsWith("ref: ")) {
+			if (ref === "HEAD") tips.baseName = oid.slice("ref: ".length).replace(/^refs\/heads\//, "");
+		} else if (ref === `refs/heads/${branch}`) tips.branch = oid;
 		else if (ref === "HEAD") tips.base = oid;
 	}
 	return tips;
 }
 
+/** The fetch that brings the tips of `refs`. The names come from origin: one that opens with `-` would read as an option, so it goes in full, and one a shell would read is quoted. */
+const fetchCommand = (refs: string[]): string => {
+	const words = refs.map(ref => (ref.startsWith("-") ? `refs/heads/${ref}` : ref)).map(ref => (/^[\w./@+-]+$/.test(ref) ? ref : `'${ref.replace(/'/g, "'\\''")}'`));
+	return `git fetch origin ${words.join(" ")}`;
+};
+
 /**
  * Why a push that the argv checks allowed still can't go: it carries a change to a protected file that is neither how
  * the branch held it when /ship armed nor how origin's default branch holds it now (what merging the base brings is
  * fine). Origin is asked for its tips, and the push is compared with its watched branch, or with where the push's
- * history leaves the default branch when origin has no such branch yet.
+ * history leaves the default branch when origin has no such branch yet. A tip this checkout lacks is not a verdict but
+ * the fetch that brings it: a plain `git fetch origin` leaves out the default branch of a single-branch or shallow clone.
  */
 export function checkPushContent(dir: string, sources: string[], state: FenceState, git: Git = realGit): string | null {
 	if (state.pushBranch === null) return refused("this session pushes nothing");
 	const tips = originTips(dir, state.pushBranch, git);
 	if (tips === null) return retryable("can't read origin (git ls-remote origin failed), so can't tell what the push changes");
-	for (const oid of [tips.branch, tips.base]) {
-		if (oid !== undefined && git(dir, "cat-file", "-e", `${oid}^{commit}`).code !== 0) return retryable(`origin holds ${oid.slice(0, 9)}, which this checkout lacks, so can't tell what the push changes: fetch origin first`);
-	}
+	const lacking = ([[state.pushBranch, tips.branch], [tips.baseName ?? "HEAD", tips.base]] as const)
+		.filter(([, oid]) => oid !== undefined && git(dir, "cat-file", "-e", `${oid}^{commit}`).code !== 0)
+		.map(([name]) => name);
+	if (lacking.length > 0) return retryable(`this checkout lacks origin's ${lacking.join(" and ")}, so can't tell what the push changes: run ${fetchCommand(lacking)}`);
 	for (const src of sources) {
 		const tip = git(dir, "rev-parse", "--verify", "--quiet", `${src}^{commit}`).out.trim();
 		if (!tip) return refused(`can't read what ${src} would push`);
@@ -171,7 +184,7 @@ export function checkPushContent(dir: string, sources: string[], state: FenceSta
 		if (from) {
 			// A move is the old name's deletion and the new name's addition: --name-only alone would show only the new one.
 			const diff = git(dir, "diff-tree", "-r", "--no-renames", "--name-only", "-z", from, tip);
-			if (diff.code !== 0) return retryable(`can't compare what ${src} would push with what origin holds: fetch origin first`);
+			if (diff.code !== 0) return retryable(`can't compare what ${src} would push with what origin holds: run ${fetchCommand([tips.branch === undefined ? (tips.baseName ?? "HEAD") : state.pushBranch])}`);
 			changed = diff.out.split("\0");
 		} else changed = Object.keys(protectedBlobs(dir, tip, git));
 		const held = changed.filter(file => file && isProtectedPath(file)).filter(file => {
