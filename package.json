@@ -24,7 +24,8 @@
       "./extensions/every.ts",
       "./extensions/epic-guard.ts",
       "./extensions/plan-mode.ts",
-      "./extensions/ship-fence.ts"
+      "./extensions/ship-fence.ts",
+      "./extensions/ship.ts"
     ]
   },
   "devDependencies": {
