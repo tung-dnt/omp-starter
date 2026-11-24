@@ -20,12 +20,14 @@ export interface FenceState extends GitPolicy {
 	root: string | null;
 	/** Protected files as the branch held them when /ship armed: path to `<mode> <blob id>`. A push may keep these. */
 	snapshot: Record<string, string>;
+	/** Where a push to `origin` goes, as /ship armed (`git remote get-url --push origin`); null when it was not recorded. */
+	originUrl: string | null;
 	/** What the shims run their check with: bun, or omp's own binary with BUN_BE_BUN=1. */
 	bun: string;
 	beBun: boolean;
 }
 
-const unarmed = (): FenceState => ({ armed: false, pushBranch: null, root: null, gitDirs: [], snapshot: {}, ...checker() });
+const unarmed = (): FenceState => ({ armed: false, pushBranch: null, root: null, gitDirs: [], snapshot: {}, originUrl: null, ...checker() });
 
 function checker(): { bun: string; beBun: boolean } {
 	const found = Bun.which("bun", { PATH: pathEntries().join(path.delimiter) });
@@ -47,6 +49,7 @@ export function readState(file: string | undefined): FenceState {
 			root: typeof raw.root === "string" ? raw.root : null,
 			gitDirs: Array.isArray(raw.gitDirs) ? raw.gitDirs.filter((d): d is string => typeof d === "string") : [],
 			snapshot: raw.snapshot && typeof raw.snapshot === "object" ? (raw.snapshot as Record<string, string>) : {},
+			originUrl: typeof raw.originUrl === "string" ? raw.originUrl : null,
 			bun: typeof raw.bun === "string" ? raw.bun : checker().bun,
 			beBun: raw.beBun === true,
 		};
@@ -124,12 +127,38 @@ export function armFence(watch: { pushBranch: string; root: string }, git: Git =
 		.map(flag => git(root, "rev-parse", "--path-format=absolute", flag).out.trim())
 		.filter(Boolean)
 		.map(dir => fs.realpathSync(dir));
-	writeState(file, { ...readState(file), armed: true, pushBranch: watch.pushBranch, root, gitDirs: [...new Set(gitDirs)], snapshot: protectedEntries(root, "HEAD", git) ?? {} });
+	const origin = git(root, "remote", "get-url", "--push", "origin");
+	const originUrl = origin.code === 0 && origin.out.trim() !== "" ? origin.out.trim() : null;
+	writeState(file, { ...readState(file), armed: true, pushBranch: watch.pushBranch, root, gitDirs: [...new Set(gitDirs)], snapshot: protectedEntries(root, "HEAD", git) ?? {}, originUrl });
 }
 
 export function disarmFence(): void {
 	const file = process.env[FENCE_ENV];
-	if (file) writeState(file, { ...readState(file), armed: false, pushBranch: null, root: null, gitDirs: [], snapshot: {} });
+	if (file) writeState(file, { ...readState(file), armed: false, pushBranch: null, root: null, gitDirs: [], snapshot: {}, originUrl: null });
+}
+
+/**
+ * Why a push the argv checks allowed still can't go: it doesn't run in the repository /ship armed in, or `origin` no
+ * longer leads where it led then. The argv names `origin` and a branch, but both mean what the repository they run in
+ * makes them mean: in a clone of another repository the same words push to that one. A repository is the armed one when
+ * its common git folder is one of `gitDirs`, so the armed repo's linked worktrees count.
+ */
+export function checkPushRepo(dir: string, state: FenceState, git: Git = realGit): string | null {
+	if (state.pushBranch === null) return refused("this session pushes nothing");
+	const common = git(dir, "rev-parse", "--path-format=absolute", "--git-common-dir");
+	let here = "";
+	try {
+		here = common.code === 0 ? fs.realpathSync(common.out.trim()) : "";
+	} catch {}
+	if (!state.gitDirs.includes(here)) {
+		return refused(`this push runs in ${dir}, which is not the repository /ship armed in${state.root === null ? "" : ` (${state.root})`}: push from there`);
+	}
+	if (state.originUrl === null) return refused("the fence has no record of where origin led when /ship armed (an older /ship armed it, or origin had no URL): the user needs to run /ship again");
+	const now = git(dir, "remote", "get-url", "--push", "origin");
+	if (now.code !== 0 || now.out.trim() !== state.originUrl) {
+		return refused(`origin's URL is not what it was when /ship armed (${state.originUrl}), so this push would go elsewhere`);
+	}
+	return null;
 }
 
 /**
