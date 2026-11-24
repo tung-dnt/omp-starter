@@ -14,8 +14,8 @@ export interface PutUpDeps {
 	gh: Gh;
 	confirm?: (files: string[]) => Promise<boolean>;
 	sshHostname?: (alias: string) => string | null;
-	/** Why another live session already watches this PR, or null. Asked once the branch's open PR is known, before anything is pushed. */
-	heldElsewhere?: (pr: PrRef) => string | null;
+	/** Takes this session's claim on the PR the branch already has open, or says why it can't (a live session already watches it). Asked once the PR is found, before anything is pushed. */
+	claim?: (pr: PrRef) => string | null;
 }
 
 /** What one gh or git call returned. */
@@ -273,8 +273,8 @@ async function put(root: string, deps: PutUpDeps): Promise<PrRef> {
 	if (existing) {
 		const me = await account(gh);
 		if (existing.author.toLowerCase() !== me.toLowerCase()) no(`${existing.url} is already open for ${branch}, but ${existing.author} opened it and gh acts as ${me}`);
-		// A PR another live session watches is refused here, before the push below: a refused /ship changes nothing (AC11).
-		const held = deps.heldElsewhere?.(existing.ref);
+		// Claimed before the push below, not just checked: a PR another live session watches is refused with nothing pushed (AC11), and of two sessions starting at once only the first to claim pushes.
+		const held = deps.claim?.(existing.ref);
 		if (held) no(held);
 	}
 

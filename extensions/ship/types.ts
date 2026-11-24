@@ -134,8 +134,6 @@ export type ReadPr = (pr: PrRef, gh: Gh, trust: Trust) => Promise<Snapshot | str
 export type NextStep = (snapshot: Snapshot, watch: Watch, now: number) => Step;
 /** Story 3, `watch.ts` `claimWatch`: the watch this session may run, a stale one taken over, or why another live session holds it. */
 export type ClaimWatch = (pr: PrRef, start: { baseRef: string; headRef: string; session: string; pid: number; now: number }) => Watch | string;
-/** Story 3, `watch.ts` `heldElsewhere`: why another live session holds the watch of this PR, or null when `session` may claim it. Reads the watch file only; `claimWatch` is what takes the claim. */
-export type HeldElsewhere = (pr: PrRef, session: string, now: number) => string | null;
 /** Story 3, `watch.ts` `saveWatch`: written to a temp file and renamed into place. */
 export type SaveWatch = (watch: Watch) => void;
 
