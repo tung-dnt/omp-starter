@@ -325,6 +325,32 @@ A file with the same name in `~/.omp/agent/commands/` or `~/.omp/agent/skills/` 
 
 **Verify:** `bun test extensions/epic-guard.test.ts` (it also checks that every plan path the `epic` and `build` skills name is one the guard allows).
 
+### Ship (`/ship`)
+
+`/ship` takes your branch to a pull request that is ready to merge and watches it until it merges or closes, so you don't. It never merges (design and acceptance criteria: `plans/001-ship.md`). It works in any checkout whose `origin` is on github.com, SSH aliases such as `git@blindx.github:` included, and acts as the account that owns the repo: `gh-blinx` for `blinxsolutions`, plain `gh` otherwise. It watches only pull requests that account opened, from a checkout that is on the PR's branch, in a session that stays open (the TUI or rpc mode; print mode exits after one prompt).
+
+| Command | Effect |
+|---|---|
+| `/ship` | No PR named: puts the branch up (below), has `interrogate` review it, then watches it. |
+| `/ship <pr#>`, `/ship <pr url>` | Watches that PR. |
+| `/ship … +coderabbit` | Lets that bot's comments reach the model too. People with write access and you always do; everyone else's are counted, and you are told once. |
+| `/ship … --report <path>` | Rewrites a JSON file after each pass, for triggers that can't see the session: `state` (`watching`, `working`, `ready`, `needs-you`, `ended`), `reason` (why it ended), `pr`, `passes`, `lastLine`, `waitingFor`, `updatedAt`. |
+| `/ship status`, `/ship stop` | What this session watches; stop watching. |
+
+**Put-up** (no PR named): refuses on the default branch, a detached HEAD, and secret-looking files (`.env*` except examples, keys, `*.pem`). It lists the uncommitted files, commits them all after one confirm (hooks stay on), pushes `origin <branch>` without force and opens a draft PR; a branch carrying a Jira key gets the title `PAC2-####: …`. An unattended session, or one with no UI to confirm in (rpc), never asks: it refuses a dirty tree instead. The review follows: `interrogate` on `origin/<base>...HEAD`, report only, once per PR; the first pass checks each finding against the code, fixes the ones that hold and drops the rest. A bare `/ship` refuses while another watch runs, since put-up could push or open a PR before that check.
+
+**The watch** is code, not the model. Every 2 minutes the session reads the PR with `gh` (state, checks, review threads, comments) at no model cost. A change starts a pass, one model turn in this conversation that carries `skills/ship/SKILL.md` and a snapshot of the PR, but never sooner than 10 minutes after the last pass. When a pass ends the PR is read once more and becomes the baseline, so the pass's own reply and push don't start another pass; a comment someone else added meanwhile still does. Each pass sets the next check: 2 minutes after a push, 30 minutes while checks run, an hour when nothing runs, later while nothing changes. At most 24 passes in 24 hours per PR; at the cap it reports "needs you" and keeps reading. A pass waits for the session to be idle, so it never interrupts a turn of yours.
+
+A pass fixes CI at the root cause (one re-run per job at most), merges the base instead of rebasing, does small asks from people with write access and answers them, proposes larger asks in a reply and brings them to you, acts on a bot's finding only when it confirms it in the code, and hands you security findings. At most 3 pushes per cause (a failing check by name, or the conflict), one push per round; it commits only files it changed, by name, and never touches a file you changed in the checkout. It ends with a `SHIP-STATUS: working|ready|needs-you` line that code reads. "Ready" is checks green, no conflict, every trusted comment answered; it then lists what is still yours (undraft, a required approval) and keeps watching. Code checks a `ready` against the PR first and drops it while a check is red or running, a conflict stands, or a push left no checks listed yet.
+
+The fence (below) is armed on the PR's branch for the whole watch and comes down when it ends. The watch ends on merge, close, `/ship stop`, 7 days, a base change, or the session ending. Running `/ship` again on the same PR resumes from GitHub and from `~/.omp/agent/ship/watches/<owner>-<repo>-<n>.json` and resets the pass count; a second session on the same PR is refused and told which session holds it.
+
+You are told through a status line, a message per pass, and (on macOS, interactive sessions, unless `notify.off`) a notification when a PR is ready, needs you, or the watch stopped on its own.
+
+Limits: a read blocks the session for as long as `gh` takes (about 3 seconds on the sandbox, every 2 minutes and once after each pass). Clients that defer agent-started turns (ACP editors) hold a pass until your next prompt. The `SHIP-STATUS` line is what the model decides for code: a reply without it leaves the state at `watching`, and `needs-you` for a larger ask or a security finding comes only from it.
+
+**Verify:** `bun test extensions/ship.test.ts`; the live proof on a throwaway repo is `scripts/ship-fixture.ts` (red check, conflict and comment made for you).
+
 ### Ship fence (`ship-fence`)
 
 The guard `/ship` runs behind while it watches a pull request (see `plans/001-ship.md`). When the extension loads it names a state file for the omp process in `OMP_SHIP_FENCE` (under `~/.omp/agent/ship/fence/`) and puts `bin/ship-fence` first on `PATH`, before omp captures the environment its shells start from. `/ship` then arms and disarms the fence by rewriting that file, so the change reaches every shell at once. Unarmed, a `gh` or `git` call costs one `grep` of the file. A session started with `OMP_SHIP_FENCE` naming an armed state (an unattended trigger, or a test) is fenced from its first call.
@@ -385,7 +411,8 @@ Limits: a session's repo comes from the origin URL of its working folder, so a f
 ### Unreleased (`feat/ship`)
 
 - **Added:** `ship-fence`, the guard `/ship` will run behind: `gh`/`git` shims plus a tool-call check, armed and disarmed by rewriting a per-process state file, and a push check on protected files. Every session now puts `bin/ship-fence` first on `PATH`; unarmed, it passes calls straight through. See [Ship fence](#ship-fence-ship-fence). Story 1 of `plans/001-ship.md`.
-- **Added:** the `/ship` watch engine, code only: from one read of the PR it decides to run a pass, wait, or end the watch (a 10-minute floor between passes the PR's changes start, checks 2 minutes after a push, 30 minutes while checks run and an hour when nothing runs, backing off while nothing changes, at most 24 passes a day, 7 days), and keeps one file per PR under `~/.omp/agent/ship/watches/` that refuses a second live session and takes over a stale one. Nothing calls it yet. See [Ship watch](#ship-watch-extensionsshipwatchts). Story 3 of `plans/001-ship.md`.
+- **Added:** the `/ship` watch engine, code only: from one read of the PR it decides to run a pass, wait, or end the watch (a 10-minute floor between passes the PR's changes start, checks 2 minutes after a push, 30 minutes while checks run and an hour when nothing runs, backing off while nothing changes, at most 24 passes a day, 7 days), and keeps one file per PR under `~/.omp/agent/ship/watches/` that refuses a second live session and takes over a stale one. See [Ship watch](#ship-watch-extensionsshipwatchts). Story 3 of `plans/001-ship.md`.
+- **Added:** `/ship [<pr#>|<url>] [+bot ...] [--report <path>]`, `/ship status`, `/ship stop`: puts a branch up as a draft PR when it has none, has `interrogate` review it, then watches it from a 2-minute code timer and starts a model pass only when something changed, fixing CI, merging the base, answering comments, never merging. Status line, macOS notifications and a `--report` JSON file; unattended sessions never ask. See [Ship](#ship-ship). Stories 4 and 5 of `plans/001-ship.md`.
 
 ### 0.46.0 — 2026-11-24
 
