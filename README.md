@@ -303,6 +303,19 @@ The model can do the same with the `schedule_prompt`, `list_scheduled_prompts` a
 
 **Verify:** `bun test extensions/path-policy.test.ts extensions/file-undo.test.ts extensions/notify.test.ts extensions/every.test.ts`.
 
+### `/epic` and `/story` modes
+
+Both commands are your own (`~/.omp/agent/commands/epic.md`, `skill://story`); these two extensions only recognise their names in what you type.
+
+| Extension | When | What it does |
+|---|---|---|
+| `epic-guard` | From `/epic` until `/epic-done`, `/story` or `/build` | Refuses `write`, `edit` and `ast_edit` calls on repo files outside `.specify/`, `specs/` and `.omp/commands/speckit.*`, in subagents too. Paths outside the repo pass. Saved in the session, so it survives the restart `/epic` asks for after `specify init`. |
+| `story-plan` | `/story` typed in the interactive TUI | Enters omp's plan mode before the turn, so clarifying and the acceptance criteria are read-only; approving the plan in Plan Review starts the build. Print, RPC and unattended sessions run `/story` as before. |
+
+`/epic` cannot use plan mode itself: plan mode refuses the spec-kit writes and the `tasks.md` commit it needs. `epic-guard` leaves `bash` alone, so `specify init` still runs; a shell write of code is not caught.
+
+**Verify:** `bun test extensions/epic-guard.test.ts`.
+
 ## Usage report
 
 A read-only report on how agents actually use the native todo, mined from omp's session transcripts. It calls no model and no network.
@@ -332,6 +345,11 @@ The numbering starts at M5: M1 to M4 measured memory notes that omp's memory bac
 Limits: a session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names and tool names; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.44.0 — 2026-11-24
+
+- **Added:** `epic-guard`: `/epic` is spec-only until `/epic-done`, `/story` or `/build` (writes outside the spec-kit folders are refused, subagents included). `story-plan`: `/story` starts in plan mode in the TUI. See [`/epic` and `/story` modes](#epic-and-story-modes).
+- Existing installs: nothing to do. The commands themselves live in your agent folder; the skill texts for `epic` and `story` there describe the new behaviour.
 
 ### 0.43.0 — 2026-11-24
 
