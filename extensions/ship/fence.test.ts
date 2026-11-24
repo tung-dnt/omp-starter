@@ -69,9 +69,14 @@ describe("git", () => {
 		for (const line of ["status", "remote -v", "config --get remote.origin.url", "fetch origin", "merge --no-edit origin/main"]) expect(git(line)).toBeNull();
 	});
 
+	test("stock read and local commands run while armed", () => {
+		for (const line of ["archive HEAD", "archive --format=tar HEAD -o /tmp/x.tar", "ls-tree -r HEAD", "diff-index HEAD", "update-ref refs/x HEAD", "write-tree", "whatchanged"]) expect(git(line)).toBeNull();
+	});
+
 	test("aliases, hook-skipping merges and config that redirects a push are refused", () => {
-		expect(git("p")).toContain("aliases are refused");
-		expect(git("-c alias.p=push p origin main")).toContain("aliases are refused");
+		expect(git("p")).toContain("git p is not a git command the fence allows");
+		expect(git("-c alias.p=push p origin main")).toContain("git p is not a git command the fence allows");
+		expect(git("credential fill")).toContain("not a git command the fence allows");
 		expect(git("merge --no-verify origin/main")).toContain("hooks");
 		expect(git("-c core.hooksPath=/tmp/h merge origin/main")).toContain("hooks and remotes");
 		expect(git("--version")).toBeNull();

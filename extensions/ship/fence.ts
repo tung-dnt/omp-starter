@@ -280,7 +280,7 @@ export function checkGit(args: string[], policy: Policy): string | null {
 	}
 	const sub = args[i] ?? "";
 	const rest = args.slice(i + 1);
-	if (sub !== "" && !isIn(GIT_COMMANDS, sub)) return refused(`git ${sub} is not a git command the fence knows (aliases are refused)`);
+	if (sub !== "" && !isIn(GIT_COMMANDS, sub)) return refused(`git ${sub} is not a git command the fence allows`);
 	const risky = settings.find(s => RISKY_CONFIG.test(s));
 	if ((sub === "push" || sub === "commit" || sub === "merge") && risky !== undefined) return refused(`git -c ${risky} with ${sub} is refused: hooks and remotes stay as configured`);
 	if (sub === "push") return checkPush(rest, policy);
@@ -293,12 +293,16 @@ export function checkGit(args: string[], policy: Policy): string | null {
 /** The one mutation a watch runs: resolving a review thread, with nothing else in the same document. */
 const RESOLVE_THREAD = /^query=\s*mutation\s*(?:\(\s*\$\w+\s*:\s*ID!\s*\))?\s*\{\s*resolveReviewThread\s*\(\s*input\s*:\s*\{\s*threadId\s*:\s*\$?\w+\s*\}\s*\)\s*\{\s*thread\s*\{\s*isResolved\s*\}\s*\}\s*\}\s*$/;
 
-/** git's own commands a session may run. Anything else is an alias, which the fence can't read. */
+/** git's own commands a session may run: read-only or local. Anything else is an alias, a helper or a command that writes a remote or config. */
 const GIT_COMMANDS = names(
-	"add", "annotate", "apply", "bisect", "blame", "branch", "cat-file", "check-ignore", "checkout", "cherry", "cherry-pick",
-	"clean", "clone", "commit", "config", "count-objects", "describe", "diff", "diff-tree", "fetch", "for-each-ref",
-	"format-patch", "fsck", "gc", "grep", "hash-object", "help", "init", "lfs", "log", "ls-files", "ls-remote", "ls-tree",
-	"merge", "merge-base", "merge-tree", "mv", "name-rev", "notes", "pull", "push", "range-diff", "rebase", "reflog",
-	"remote", "reset", "restore", "rev-list", "rev-parse", "revert", "rm", "shortlog", "show", "show-ref", "stash",
-	"status", "submodule", "switch", "symbolic-ref", "tag", "update-index", "var", "verify-commit", "version", "worktree",
+	"add", "am", "annotate", "apply", "archive", "bisect", "blame", "branch", "bundle", "cat-file", "check-attr", "check-ignore",
+	"check-mailmap", "check-ref-format", "checkout", "checkout-index", "cherry", "cherry-pick", "clean", "clone", "column",
+	"commit", "commit-tree", "config", "count-objects", "describe", "diff", "diff-files", "diff-index", "diff-tree", "fast-export",
+	"fetch", "fmt-merge-msg", "for-each-ref", "format-patch", "fsck", "gc", "get-tar-commit-id", "grep", "hash-object", "help",
+	"init", "interpret-trailers", "lfs", "log", "ls-files", "ls-remote", "ls-tree", "mailinfo", "mailsplit", "merge", "merge-base",
+	"merge-file", "merge-tree", "mktag", "mktree", "mv", "name-rev", "notes", "pack-refs", "patch-id", "prune", "pull", "push",
+	"range-diff", "read-tree", "rebase", "reflog", "refs", "remote", "repack", "request-pull", "rerere", "reset", "restore",
+	"rev-list", "rev-parse", "revert", "rm", "shortlog", "show", "show-branch", "show-index", "show-ref", "stage", "stash",
+	"status", "stripspace", "submodule", "switch", "symbolic-ref", "tag", "unpack-file", "update-index", "update-ref", "var",
+	"verify-commit", "verify-pack", "verify-tag", "version", "whatchanged", "worktree", "write-tree",
 );
