@@ -16,6 +16,7 @@
       "./extensions/memory-commit-gate.ts",
       "./extensions/fable-router.ts",
       "./extensions/cross-repo-reads.ts",
+      "./extensions/repo-memory.ts",
       "./extensions/blast-radius.ts",
       "./extensions/unattended.ts",
       "./extensions/path-policy.ts",
