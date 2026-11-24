@@ -22,6 +22,19 @@ function applescriptString(text: string): string {
 	return text.replace(/[\r\n]+/g, " ").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+/** Whether this process may post desktop notifications at all: macOS, not an unattended session, and `state.notify.off` unset. */
+export function desktopNotificationsOn(platform: string = process.platform): boolean {
+	return platform === "darwin" && process.env.OMP_STARTER_UNATTENDED !== "1" && !readState().notify?.off;
+}
+
+/** Posts one notification titled `omp`, with the working folder's name as its subtitle. */
+export function postNotification(pi: ExtensionAPI, message: string, folder: string): void {
+	const script = `display notification "${applescriptString(message)}" with title "omp" subtitle "${applescriptString(folder)}" sound name "Glass"`;
+	pi.exec("osascript", ["-e", script], { timeout: 3000 }).catch((error: unknown) => {
+		pi.logger.warn(`notify: osascript failed: ${error instanceof Error ? error.message : String(error)}`);
+	});
+}
+
 function formatDuration(seconds: number): string {
 	const whole = Math.floor(seconds);
 	const minutes = Math.floor(whole / 60);
@@ -32,9 +45,8 @@ export function createNotify(options: NotifyOptions = {}): (pi: ExtensionAPI) =>
 	const platform = options.platform ?? process.platform;
 	const now = options.now ?? Date.now;
 	return pi => {
-		if (platform !== "darwin" || process.env.OMP_STARTER_UNATTENDED === "1") return;
+		if (!desktopNotificationsOn(platform)) return;
 		const settings = readState().notify;
-		if (settings?.off) return;
 		const minSeconds = settings?.minSeconds ?? DEFAULT_MIN_SECONDS;
 		let startedAt: number | undefined;
 		let lastSentAt = Number.NEGATIVE_INFINITY;
@@ -45,10 +57,7 @@ export function createNotify(options: NotifyOptions = {}): (pi: ExtensionAPI) =>
 			const at = now();
 			if (at - lastSentAt < RATE_LIMIT_MS) return;
 			lastSentAt = at;
-			const script = `display notification "${applescriptString(message)}" with title "omp" subtitle "${applescriptString(path.basename(ctx.cwd))}" sound name "Glass"`;
-			pi.exec("osascript", ["-e", script], { timeout: 3000 }).catch((error: unknown) => {
-				pi.logger.warn(`notify: osascript failed: ${error instanceof Error ? error.message : String(error)}`);
-			});
+			postNotification(pi, message, path.basename(ctx.cwd));
 		}
 
 		pi.on("agent_start", (_event, ctx) => {
