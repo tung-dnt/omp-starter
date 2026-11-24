@@ -578,9 +578,12 @@ describe("the shims, with real git", () => {
 			expect(holes).toEqual([]);
 			expect(ran()).toEqual([]);
 			expect(fs.existsSync(path.join(home, "ext-ran"))).toBe(false);
-			const kept = spawnSync("git", ["config", "--get-regexp", "^(include|core\\.(fsmonitor|pager|editor)|diff|filter|gpg)\\."], { cwd: repo, env: { ...process.env, PATH: savedPath }, encoding: "utf8" });
-			expect(kept.stdout.trim()).toBe("");
-			expect(kept.status).toBe(1);
+			// The repo's own config and the private home's: a runner's /etc/gitconfig may hold filter.lfs.* of its own.
+			for (const scope of ["--local", "--global"]) {
+				const kept = spawnSync("git", ["config", scope, "--get-regexp", "^(include|core\\.(fsmonitor|pager|editor)|diff|filter|gpg)\\."], { cwd: repo, env: { ...process.env, PATH: savedPath }, encoding: "utf8" });
+				expect(kept.stdout.trim(), scope).toBe("");
+				expect(kept.status, scope).toBe(1);
+			}
 		}, 30_000);
 
 		test("commands that only look like those still run: reads of the keys, harmless config, asking for the exec path", () => {
