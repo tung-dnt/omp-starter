@@ -411,7 +411,7 @@ Limits: a session's repo comes from the origin URL of its working folder, so a f
 
 ## Release notes
 
-### Unreleased (`feat/ship`)
+### 0.47.0 — 2026-11-24
 
 - **Changed:** the pstack kit installs `pstack@pstack-claude` (marketplace `michael-denyer/pstack-claude`) instead of `pstack@cursor-plugins`. The port loads its skills natively, so the `skills.customDirectories` entry is no longer added, and `/starter updates` can now compare its published version.
 - **Added:** with pstack installed, `/starter memory` appends a **Skill triggers** table to `~/.omp/agent/AGENTS.md`, mapping situations to pstack skills nobody invokes by habit (`reframe`, `statechart`, `thermos`, `correct` …).
