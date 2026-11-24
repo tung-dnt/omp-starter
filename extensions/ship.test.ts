@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { type Args, createShip, exec, parseArgs, readVerdict, type Report, type ShipParts } from "./ship";
 import { SHIM_DIR } from "./ship/fence-state";
 import { putUp } from "./ship/putup";
-import { type Note, SHIP, type Snapshot, type Step, type Watch } from "./ship/types";
+import { type Note, type PrRef, SHIP, type Snapshot, type Step, type Watch } from "./ship/types";
 import { claimWatch, loadWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch, unclaimWatch } from "./ship/watch";
 import { fakeContext, fakePi, privateHome, resetHome, scriptedUi, type FakeContext, type FakePi } from "./test-harness";
 
@@ -64,7 +64,7 @@ interface Rig {
 	/** What each part was asked, in order. */
 	calls: {
 		claims: { pr: unknown; start: Record<string, unknown> }[];
-		armed: { pushBranch: string; root: string }[];
+		armed: { pushBranch: string; root: string; pr: PrRef }[];
 		disarmed: number;
 		released: { reason: string }[];
 		/** Claims that a start gave back because it never became a watch. */
@@ -248,7 +248,7 @@ describe("starting a watch", () => {
 		const t = rig();
 		await t.cmd("12");
 		expect(t.calls.claims).toEqual([{ pr: PR, start: { baseRef: "main", headRef: "feat/x", session: "sess-A", pid: process.pid, now: T0 } }]);
-		expect(t.calls.armed).toEqual([{ pushBranch: "feat/x", root: ROOT }]);
+		expect(t.calls.armed).toEqual([{ pushBranch: "feat/x", root: ROOT, pr: PR }]);
 		expect(t.ctx.timers.size).toBe(1);
 		expect(t.ctx.intervals).toEqual([SHIP.tickMs]);
 	});
@@ -1324,7 +1324,7 @@ describe("the ship_start tool", () => {
 		const { text } = await t.fake.callTool("ship_start", { cwd: dir, report: "ship.json" }, t.ctx);
 		expect(text).toBe(URL);
 		expect(t.calls.puts).toEqual([{ root: ROOT, confirm: false }]);
-		expect(t.calls.armed).toEqual([{ pushBranch: "feat/x", root: ROOT }]);
+		expect(t.calls.armed).toEqual([{ pushBranch: "feat/x", root: ROOT, pr: PR }]);
 		expect(t.ctx.timers.size).toBe(1);
 		expect(fs.existsSync(path.join(dir, "ship.json"))).toBe(true);
 	});

@@ -119,7 +119,7 @@ describe("readPr", () => {
 		const { gh, calls } = replay(red);
 		await readPr(PR, gh, OTHER);
 		expect(calls.length).toBeGreaterThanOrEqual(4);
-		for (const args of calls) expect(checkGh(args)).toBeNull();
+		for (const args of calls) expect(checkGh(args, PR)).toBeNull();
 	});
 });
 

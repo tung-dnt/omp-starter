@@ -1,8 +1,12 @@
 #!/bin/sh
-# gh and git (symlinks to this file) in every omp session with omp-starter: extensions/ship/fence-state.ts puts this
-# folder first on PATH and names the session's fence state in OMP_SHIP_FENCE. While the state is not armed, the real
-# program runs at once. While armed, extensions/ship/fence-cli.ts checks the call first, run by the bun the state names
-# (or omp's own binary with BUN_BE_BUN=1). The real program is the next one on PATH.
+# gh, gh-blinx, git and git-lfs (symlinks to this file) in every omp session with omp-starter: extensions/ship/fence-state.ts
+# puts this folder first on PATH and names the session's fence state in OMP_SHIP_FENCE. While the state is not armed, the
+# real program runs at once. While armed, extensions/ship/fence-cli.ts checks the call first, run by the bun the state
+# names (or omp's own binary with BUN_BE_BUN=1). The real program is the next one on PATH.
+# gh-blinx, the wrapper that runs gh as the Blinx account, reads that account's token with a `gh auth token` of its own.
+# The session may not run that command, so this shim judges the wrapper's argv as a gh call (above) and then runs the
+# real wrapper with this folder off PATH: its own gh calls are not the session's, and what it passes on to gh is what
+# was just checked.
 name=$(basename "$0")
 self=$(dirname "$0")
 dir=$(cd "$self" && pwd -P)
@@ -16,9 +20,19 @@ if [ -z "$state" ] || [ -f "$state" ] && ! grep -q '"armed":false' "$state"; the
   fi
 fi
 IFS=:
+real=
+clean=
 for d in $PATH; do
-  [ "$d" = "$self" ] || [ "$d" = "$dir" ] && continue
-  [ -x "$d/$name" ] && [ ! "$d/$name" -ef "$0" ] && exec "$d/$name" "$@"
+  [ "$d" = "$self" ] || [ "$d" = "$dir" ] || [ "$d" -ef "$dir" ] && continue
+  clean="${clean:+$clean:}$d"
+  [ -z "$real" ] && [ -x "$d/$name" ] && [ ! "$d/$name" -ef "$0" ] && real="$d/$name"
 done
-echo "ship fence: no real $name on PATH" >&2
-exit 127
+if [ -z "$real" ]; then
+  echo "ship fence: no real $name on PATH" >&2
+  exit 127
+fi
+if [ "$name" = gh-blinx ]; then
+  PATH=$clean
+  export PATH
+fi
+exec "$real" "$@"
