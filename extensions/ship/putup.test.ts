@@ -313,12 +313,12 @@ describe("a branch that already has the user's open PR", () => {
 		expect(await putUp(s.app, deps(fakeGh({ prs: [row("Tung-DNT")] }).gh))).toEqual(PR);
 	});
 
-	test("is asked about with the PR it found, before anything is pushed, and a clear answer lets the push through", async () => {
+	test("is asked to claim the PR it found, before anything is pushed, and a clear answer lets the push through", async () => {
 		const s = checkout("feat/x");
 		commit(s, "one");
 		const order: string[] = [];
-		const heldElsewhere = (pr: PrRef) => (order.push(`asked ${pr.owner}/${pr.repo}#${pr.number}; pushed: ${onRemote(s, "feat/x")}`), null);
-		expect(await putUp(s.app, deps(fakeGh({ prs: [row(ME)] }).gh, { heldElsewhere }))).toEqual(PR);
+		const claim = (pr: PrRef) => (order.push(`asked ${pr.owner}/${pr.repo}#${pr.number}; pushed: ${onRemote(s, "feat/x")}`), null);
+		expect(await putUp(s.app, deps(fakeGh({ prs: [row(ME)] }).gh, { claim }))).toEqual(PR);
 		expect(order).toEqual(["asked acme/app#7; pushed: false"]);
 		expect(onRemote(s, "feat/x")).toBe(true);
 	});
@@ -329,18 +329,18 @@ describe("a branch that already has the user's open PR", () => {
 		writeFiles(s.app, { "notes.md": "notes\n" });
 		const held = "acme/app#7 is already watched by session sess-B (pid 4242); run /ship stop there first";
 		const { gh, calls } = fakeGh({ prs: [row(ME)] });
-		await refused(s, deps(gh, { confirm: noAsking, heldElsewhere: () => held }), /put-up refused: acme\/app#7 is already watched by session sess-B \(pid 4242\)/);
+		await refused(s, deps(gh, { confirm: noAsking, claim: () => held }), /put-up refused: acme\/app#7 is already watched by session sess-B \(pid 4242\)/);
 		expect(onRemote(s, "feat/x")).toBe(false);
 		expect(creates(calls)).toHaveLength(0);
 	});
 
-	test("is not asked about when there is no PR yet, since nobody can watch one that doesn't exist", async () => {
+	test("is not asked to claim when there is no PR yet, since nobody can watch one that doesn't exist", async () => {
 		const s = checkout("feat/x");
 		commit(s, "one");
-		const heldElsewhere = () => {
+		const claim = () => {
 			throw new Error("asked");
 		};
-		expect(await putUp(s.app, deps(fakeGh().gh, { heldElsewhere }))).toEqual(PR);
+		expect(await putUp(s.app, deps(fakeGh().gh, { claim }))).toEqual(PR);
 	});
 });
 

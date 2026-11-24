@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { pr, replay, snapshot, START } from "../../scripts/ship-watch-replay";
 import { resetHome } from "../test-harness";
 import { SHIP, type Step, type Watch } from "./types";
-import { claimWatch, heldElsewhere, loadWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch } from "./watch";
+import { claimWatch, loadWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch, unclaimWatch } from "./watch";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -170,24 +170,6 @@ describe("claiming a watch", () => {
 		expect(loadWatch(pr)?.owner.session).toBe("omp-7f3a");
 	});
 
-	test("heldElsewhere answers what a claim would, in the same words, and writes nothing", () => {
-		expect(heldElsewhere(pr, "s2", NOW)).toBeNull();
-		const held = claimed({ session: "omp-7f3a" });
-		const later = NOW + 5 * MIN;
-		const claim = claimWatch(pr, start({ session: "omp-91bc", now: later }));
-		expect(heldElsewhere(pr, "omp-91bc", later)).toBe(typeof claim === "string" ? claim : null);
-		expect(heldElsewhere(pr, "omp-91bc", later)).toContain("omp-7f3a");
-		expect(loadWatch(pr)).toEqual(held);
-	});
-
-	test("heldElsewhere has nothing to say to the holder, or about an owner that is stale or gone", () => {
-		claimed({ session: "omp-7f3a" });
-		expect(heldElsewhere(pr, "omp-7f3a", NOW + MIN)).toBeNull();
-		expect(heldElsewhere(pr, "omp-91bc", NOW + SHIP.staleOwnerMs + 1)).toBeNull();
-		claimed({ session: "omp-7f3a", pid: deadPid, now: NOW + MIN });
-		expect(heldElsewhere(pr, "omp-91bc", NOW + 2 * MIN)).toBeNull();
-	});
-
 	test("one PR has one file, named in lower case however the PR was spelled", () => {
 		claimWatch({ ...pr, owner: "Tung-DNT", repo: "Omp-Ship-Sandbox" }, start());
 		expect(fs.readdirSync(path.dirname(recordFile))).toEqual(["tung-dnt-omp-ship-sandbox-7.json"]);
@@ -240,6 +222,33 @@ describe("claiming a watch", () => {
 	test("a watch older than 7 days is not resumed", () => {
 		saveWatch({ ...watchAt({ startedAt: -8 * DAY }), pushesPerCause: { "ci:build": 3 }, owner: { session: "old", pid: deadPid, heartbeat: NOW - 8 * DAY } });
 		expect(claimed()).toMatchObject({ startedAt: NOW, pushesPerCause: {} });
+	});
+});
+
+describe("giving back a claim that never became a watch", () => {
+	test("a claim that made the file takes it away again, so a start that never ran leaves no trace and holds nothing", () => {
+		unclaimWatch(claimed());
+		expect(loadWatch(pr)).toBeNull();
+		expect(typeof claimWatch(pr, start({ session: "s2", now: NOW + MIN }))).not.toBe("string");
+	});
+
+	test.each<[string, Partial<Watch>]>([
+		["what the user was told", { told: ["reviewed"] }],
+		["pushes per cause", { pushesPerCause: { "ci:build": 2 } }],
+		["the last pass", { lastPassAt: NOW + MIN }],
+		["the last push", { lastPushAt: NOW + MIN }],
+	])("a claim over a saved watch keeps %s, and no longer counts as held", (_fact, saved) => {
+		saveWatch({ ...claimed(), ...saved });
+		unclaimWatch(claimed({ now: NOW + 2 * MIN }));
+		expect(loadWatch(pr)).toMatchObject({ startedAt: NOW, ...saved, owner: { session: "s1", heartbeat: 0 } });
+		expect(typeof claimWatch(pr, start({ session: "s2", now: NOW + 3 * MIN }))).not.toBe("string");
+	});
+
+	test("a claim another session has taken over since is left alone", () => {
+		const mine = claimed();
+		const theirs = claimed({ session: "s2", now: NOW + SHIP.staleOwnerMs + 1 });
+		unclaimWatch(mine);
+		expect(loadWatch(pr)).toEqual(theirs);
 	});
 });
 
