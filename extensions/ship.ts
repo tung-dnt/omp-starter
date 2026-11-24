@@ -85,7 +85,7 @@ export interface ShipParts {
 	saveWatch: SaveWatch;
 	recordPass(watch: Watch, snapshot: Snapshot, now: number): Watch;
 	recordPush(watch: Watch, cause: string, now: number): Watch;
-	armFence(watch: { pushBranch: string; root: string }): void;
+	armFence(watch: { pushBranch: string; root: string; pr: PrRef }): void;
 	disarmFence(): void;
 	/** The pass rules, from skills/ship/SKILL.md. */
 	rules(): string;
@@ -621,7 +621,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				if (typeof watch === "string") return refuse(`/ship: ${watch}`);
 				held = watch;
 				try {
-					parts.armFence({ pushBranch: snapshot.headRef, root });
+					parts.armFence({ pushBranch: snapshot.headRef, root, pr });
 				} catch (error) {
 					return refuse(`/ship: ${message(error)}`);
 				}

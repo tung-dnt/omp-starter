@@ -6,7 +6,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type GitPolicy, isProtectedPath, refused, retryable } from "./fence";
+import { type GitPolicy, isProtectedPath, NO_WATCH, refused, retryable, type WatchedPr } from "./fence";
 
 export const FENCE_ENV = "OMP_SHIP_FENCE";
 export const SHIM_DIR = path.resolve(import.meta.dir, "..", "..", "bin", "ship-fence");
@@ -22,12 +22,14 @@ export interface FenceState extends GitPolicy {
 	snapshot: Record<string, string>;
 	/** Where a push to `origin` goes, as /ship armed (`git remote get-url --push origin`); null when it was not recorded. */
 	originUrl: string | null;
+	/** The pull request /ship watches, which every write on GitHub is held to; null when it was not recorded (an older /ship armed the fence). */
+	pr: WatchedPr | null;
 	/** What the shims run their check with: bun, or omp's own binary with BUN_BE_BUN=1. */
 	bun: string;
 	beBun: boolean;
 }
 
-const unarmed = (): FenceState => ({ armed: false, pushBranch: null, root: null, gitDirs: [], snapshot: {}, originUrl: null, ...checker() });
+const unarmed = (): FenceState => ({ armed: false, pushBranch: null, root: null, gitDirs: [], snapshot: {}, originUrl: null, pr: null, ...checker() });
 
 function checker(): { bun: string; beBun: boolean } {
 	const found = Bun.which("bun", { PATH: pathEntries().join(path.delimiter) });
@@ -43,6 +45,7 @@ export function readState(file: string | undefined): FenceState {
 	if (!file || !fs.existsSync(file)) return unarmed();
 	try {
 		const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<FenceState>;
+		const pr = raw.pr;
 		return {
 			armed: raw.armed !== false,
 			pushBranch: typeof raw.pushBranch === "string" && raw.pushBranch !== "" ? raw.pushBranch : null,
@@ -50,6 +53,7 @@ export function readState(file: string | undefined): FenceState {
 			gitDirs: Array.isArray(raw.gitDirs) ? raw.gitDirs.filter((d): d is string => typeof d === "string") : [],
 			snapshot: raw.snapshot && typeof raw.snapshot === "object" ? (raw.snapshot as Record<string, string>) : {},
 			originUrl: typeof raw.originUrl === "string" ? raw.originUrl : null,
+			pr: pr && typeof pr.host === "string" && typeof pr.owner === "string" && typeof pr.repo === "string" && Number.isInteger(pr.number) ? { host: pr.host, owner: pr.owner, repo: pr.repo, number: pr.number } : null,
 			bun: typeof raw.bun === "string" ? raw.bun : checker().bun,
 			beBun: raw.beBun === true,
 		};
@@ -118,8 +122,8 @@ function protectedEntries(dir: string, ref: string, git: Git): Record<string, st
 	return out;
 }
 
-/** Arms the fence for a watch of `pushBranch` in `root`. Arming again replaces the watch. */
-export function armFence(watch: { pushBranch: string; root: string }, git: Git = realGit): void {
+/** Arms the fence for a watch of pull request `pr`, whose head branch `pushBranch` is checked out in `root`. Arming again replaces the watch. */
+export function armFence(watch: { pushBranch: string; root: string; pr: WatchedPr }, git: Git = realGit): void {
 	const file = process.env[FENCE_ENV];
 	if (!file) throw new Error("ship fence: the ship-fence extension is not loaded in this session");
 	const root = fs.realpathSync(watch.root);
@@ -129,12 +133,12 @@ export function armFence(watch: { pushBranch: string; root: string }, git: Git =
 		.map(dir => fs.realpathSync(dir));
 	const origin = git(root, "remote", "get-url", "--push", "origin");
 	const originUrl = origin.code === 0 && origin.out.trim() !== "" ? origin.out.trim() : null;
-	writeState(file, { ...readState(file), armed: true, pushBranch: watch.pushBranch, root, gitDirs: [...new Set(gitDirs)], snapshot: protectedEntries(root, "HEAD", git) ?? {}, originUrl });
+	writeState(file, { ...readState(file), armed: true, pushBranch: watch.pushBranch, root, gitDirs: [...new Set(gitDirs)], snapshot: protectedEntries(root, "HEAD", git) ?? {}, originUrl, pr: watch.pr });
 }
 
 export function disarmFence(): void {
 	const file = process.env[FENCE_ENV];
-	if (file) writeState(file, { ...readState(file), armed: false, pushBranch: null, root: null, gitDirs: [], snapshot: {}, originUrl: null });
+	if (file) writeState(file, { ...readState(file), armed: false, pushBranch: null, root: null, gitDirs: [], snapshot: {}, originUrl: null, pr: null });
 }
 
 /**
@@ -153,7 +157,7 @@ export function checkPushRepo(dir: string, state: FenceState, git: Git = realGit
 	if (!state.gitDirs.includes(here)) {
 		return refused(`this push runs in ${dir}, which is not the repository /ship armed in${state.root === null ? "" : ` (${state.root})`}: push from there`);
 	}
-	if (state.originUrl === null) return refused("the fence has no record of where origin led when /ship armed (an older /ship armed it, or origin had no URL): the user needs to run /ship again");
+	if (state.originUrl === null) return refused("the fence has no record of where origin led when /ship armed (an older /ship armed it, or origin had no URL; the older extension may still run in this session): the user needs to restart omp, then run /ship");
 	const now = git(dir, "remote", "get-url", "--push", "origin");
 	if (now.code !== 0 || now.out.trim() !== state.originUrl) {
 		return refused(`origin's URL is not what it was when /ship armed (${state.originUrl}), so this push would go elsewhere`);
@@ -252,4 +256,44 @@ export function checkPushRefs(dir: string, listing: string[], state: FenceState,
 		return retryable(`this push would also send ${extra.join(", ")}, since git follows tags here (push.followTags); push with git push --no-follow-tags origin ${state.pushBranch}`);
 	}
 	return refused(`this push would also send ${extra.join(", ")}; /ship pushes only ${state.pushBranch}`);
+}
+
+/** Runs `program`, found past the shims and with them off its PATH, so nothing it runs meets the fence. */
+export type RunProgram = (program: string, args: string[]) => { code: number; out: string; err: string };
+
+export const realProgram: RunProgram = (program, args) => {
+	const entries = pathEntries().join(path.delimiter);
+	const p = Bun.spawnSync([Bun.which(program, { PATH: entries }) ?? program, ...args], { env: { ...process.env, PATH: entries }, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 30_000 });
+	return { code: p.exitCode ?? 1, out: p.stdout.toString(), err: p.stderr.toString() };
+};
+
+/** What GitHub answers about the pull request a review thread is on. */
+interface ThreadReply {
+	data?: { node?: { pullRequest?: { number?: number; repository?: { name?: string; owner?: { login?: string } } } | null } | null };
+}
+
+const THREAD_PULL = "query($id:ID!){node(id:$id){...on PullRequestReviewThread{pullRequest{number repository{name owner{login}}}}}}";
+
+/**
+ * Why resolving the review thread `id` isn't on the watched pull request, or null. A thread is named by an opaque id, with
+ * no repository and no number in it, so GitHub is asked which pull request holds it: by the program the call itself runs
+ * (gh-blinx asks as its account) and on the watched host. A thread GitHub can't place is refused, and an answer that can't
+ * be had is a refusal to try again.
+ */
+export function checkThread(id: string, program: string, state: FenceState, run: RunProgram = realProgram): string | null {
+	const pr = state.pr;
+	if (pr === null) return NO_WATCH;
+	const asked = run(program, ["api", "graphql", "--hostname", pr.host, "-f", `query=${THREAD_PULL}`, "-f", `id=${id}`]);
+	if (asked.code !== 0) return retryable(`can't tell which pull request the review thread belongs to (${asked.err.trim().split("\n")[0] || `exit ${asked.code}`})`);
+	let reply: ThreadReply | null;
+	try {
+		reply = JSON.parse(asked.out);
+	} catch {
+		return retryable("can't read GitHub's answer about which pull request the review thread belongs to");
+	}
+	const held = reply?.data?.node?.pullRequest;
+	if (held === undefined || held === null) return refused("that is not a review thread on a pull request GitHub shows this account");
+	const { number, repository } = held;
+	if (number === pr.number && repository?.name?.toLowerCase() === pr.repo.toLowerCase() && repository.owner?.login?.toLowerCase() === pr.owner.toLowerCase()) return null;
+	return refused(`that review thread is on ${repository?.owner?.login}/${repository?.name}#${number}, not on the pull request /ship watches (${pr.owner}/${pr.repo}#${pr.number})`);
 }

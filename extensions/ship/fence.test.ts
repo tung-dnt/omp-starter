@@ -3,20 +3,24 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { checkCommentBody, checkGh, checkGit, type GitPolicy, isProtectedPath, MARKER, readPush } from "./fence";
+import { checkCommentBody, checkGh as check, checkGit, type GitPolicy, isProtectedPath, MARKER, readPush, readResolve, type WatchedPr } from "./fence";
 
 const policy: GitPolicy = { pushBranch: "feat/ship-s1", gitDirs: ["/repo/.git", "/main/.git", "/data/app-gitdir"] };
+/** The pull request the fence is armed on. */
+const WATCH: WatchedPr = { host: "github.com", owner: "o", repo: "r", number: 5 };
+/** gh's check as a fenced session meets it: armed on o/r#5, with `env` as the call's environment. */
+const checkGh = (args: string[], env: Record<string, string> = {}) => check(args, WATCH, env);
 const words = (line: string) => line.split(" ").filter(Boolean);
-const gh = (line: string) => checkGh(words(line));
+const gh = (line: string, env: Record<string, string> = {}) => checkGh(words(line), env);
 const git = (line: string, p: GitPolicy = policy, cwd = "/repo") => checkGit(words(line), p, cwd);
 const comment = (text: string) => `${MARKER}\n${text}`;
 
 describe("gh", () => {
 	test("reads and /ship's own writes pass", () => {
-		for (const line of ["pr view 5 --json url,state", "pr checks 5", "pr create --draft --title t --body b", "pr create -d -f", "pr edit 5 --body new", "run view 123 --log-failed", "run rerun 123 --failed", "auth status", "auth token -u blindx-tony-do", "-R owner/repo pr view 5", ""]) {
+		for (const line of ["pr view 5 --json url,state", "pr checks 5", "pr create --draft --title t --body b -R o/r", "pr create -d -f -R o/r", "pr edit 5 -R o/r --body new", "run view 123 --log-failed", "run rerun 123 -R o/r --failed", "auth status", "-R owner/repo pr view 5", ""]) {
 			expect(gh(line)).toBeNull();
 		}
-		expect(checkGh(["pr", "comment", "5", "--body", comment("Fixed the failing test.")])).toBeNull();
+		expect(checkGh(["pr", "comment", "5", "-R", "o/r", "--body", comment("Fixed the failing test.")])).toBeNull();
 		expect(checkGh(["api", "repos/o/r/issues/5/comments", "-f", `body=${comment("Done.")}`])).toBeNull();
 		expect(checkGh(["api", "-X", "POST", "repos/o/r/pulls/5/comments/9/replies", "--raw-field", `body=${comment("Done.")}`])).toBeNull();
 		expect(gh("api --method POST repos/o/r/pulls/5/requested_reviewers -f reviewers[]=x")).toBeNull();
@@ -34,11 +38,11 @@ describe("gh", () => {
 	test("gh runs what a watch, a put-up and a review need, under every name gh gives those commands", () => {
 		const marked = comment("Fixed the failing test.");
 		for (const args of [
-			["pr", "view", "5"], ["pr", "checks", "5"], ["pr", "diff", "5"], ["pr", "list"], ["pr", "ls", "--state", "open"], ["pr", "status"], ["pr", "comment", "5", "--body", marked], ["pr", "edit", "5", "--title", "t"],
-			["pr", "create", "--draft", "--title", "t"], ["pr", "new", "--draft", "--title", "t"], ["-R", "o/r", "pr", "new", "--draft", "--fill"],
-			["run", "view", "1", "--log-failed"], ["run", "list"], ["run", "ls"], ["run", "rerun", "1", "--failed"], ["run", "watch", "1"],
-			["issue", "view", "3"], ["issue", "list"], ["issue", "ls"], ["issue", "comment", "3", "--body", marked],
-			["repo", "view"], ["auth", "status"], ["auth", "token", "-u", "blindx-tony-do"], ["workflow", "list"], ["workflow", "ls"], ["workflow", "view", "ci.yml"],
+			["pr", "view", "5"], ["pr", "checks", "5"], ["pr", "diff", "5"], ["pr", "list"], ["pr", "ls", "--state", "open"], ["pr", "status"], ["pr", "comment", "5", "-R", "o/r", "--body", marked], ["pr", "edit", "5", "-R", "o/r", "--title", "t"],
+			["pr", "create", "-R", "o/r", "--draft", "--title", "t"], ["pr", "new", "--repo", "o/r", "--draft", "--title", "t"], ["-R", "o/r", "pr", "new", "--draft", "--fill"],
+			["run", "view", "1", "--log-failed"], ["run", "list"], ["run", "ls"], ["run", "rerun", "1", "-R", "o/r", "--failed"], ["run", "watch", "1"],
+			["issue", "view", "3"], ["issue", "list"], ["issue", "ls"], ["issue", "comment", "5", "-R", "o/r", "--body", marked],
+			["repo", "view"], ["auth", "status"], ["workflow", "list"], ["workflow", "ls"], ["workflow", "view", "ci.yml"],
 			["release", "list"], ["release", "ls"], ["release", "view", "v1"], ["label", "list"], ["label", "ls"], ["cache", "list"], ["cache", "ls"],
 			["search", "prs", "x"], ["search", "code", "x"], ["status"], ["api", "user"], ["help", "pr", "merge"], ["version"], ["--version"], ["pr"], ["pr", "--help"], [],
 		]) {
@@ -80,7 +84,7 @@ describe("gh", () => {
 		for (const line of [`pr new ${make}`, `pr new ${make} --draft=false`, `pr new --draft=0 ${make}`, `pr -R o/r new ${make}`, `-R o/r pr new ${make}`, "pr new -tdraft --body b", "pr new --title --draft", "pr new -d=false --fill"]) {
 			expect(gh(line), line).toContain("as a draft");
 		}
-		for (const line of [`pr new --draft ${make}`, `pr new -d ${make}`, `pr new ${make} --draft=true`, "pr -R o/r new -fd", "pr new --draft=false --draft --fill"]) expect(gh(line), line).toBeNull();
+		for (const line of [`pr new --draft ${make}`, `pr new -d ${make}`, `pr new ${make} --draft=true`, "pr -R o/r new -fd", "pr new -R o/r --draft=false --draft --fill"]) expect(gh(line), line).toBeNull();
 		expect(gh("pr new --draft --no-such-flag")).toContain("not a flag the fence knows");
 	});
 
@@ -119,7 +123,7 @@ describe("gh", () => {
 	});
 
 	test("gh pr create is a draft only when the last --draft or -d is on, as strconv.ParseBool reads it, and no value flag has taken the word", () => {
-		const make = "--title t --body b";
+		const make = "-R o/r --title t --body b";
 		for (const draft of ["--draft=0", "--draft=f", "--draft=F", "--draft=false", "--draft=False", "--draft=FALSE", "--draft=bogus", "--draft=", "--draft=tRUE", "--draft=yes", "-d=false", "-d=0", "-d=f", "-d=no", "--draft --draft=false", "-d -d=0", "--draft -d=f", "--draft=0 --draft=F", "--draft=true --draft=0"]) {
 			expect(gh(`pr create ${draft} ${make}`), draft).toContain("as a draft");
 		}
@@ -135,8 +139,8 @@ describe("gh", () => {
 			expect(gh(`pr create ${draft} ${make}`), draft).toBeNull();
 		}
 		for (const line of [
-			"pr create -fd", "pr create -df", "pr create -d -f", "pr create -fdw", "-R o/r pr create --draft --fill", "pr create --repo o/r --draft --head b --title t --body body", "pr -R o/r create --draft --fill", "pr create -tx -b y -B main -d",
-			"pr create --title --draft --draft --body b",
+			"pr create -fd -R o/r", "pr create -df -R o/r", "pr create -d -f -R o/r", "pr create -fdw -R o/r", "-R o/r pr create --draft --fill", "pr create --repo o/r --draft --head b --title t --body body", "pr -R o/r create --draft --fill", "pr create -tx -b y -B main -d -R o/r",
+			"pr create --title --draft --draft --body b -R o/r",
 		]) {
 			expect(gh(line), line).toBeNull();
 		}
@@ -167,8 +171,12 @@ describe("gh", () => {
 		for (const args of [["--base", "main"], ["--base=main"], ["-B", "main"], ["-Bmain"], ["-B=main"], ["-wB", "main"], ["-b", "-R", "-B=main"], ["-R", "o/r", "-B", "main"], ["--body", "x", "--base=main"], ["-b", "x", "-R", "-Bmain"]]) {
 			expect(checkGh(["pr", "edit", "5", ...args]), args.join(" ")).toContain("base");
 		}
-		for (const args of [["--body", "text"], ["-t", "Bug fix"], ["--title=B"], ["-R", "o/r", "--add-label", "x"], ["--repo=Blinx/x"], ["-R=owner/Beta", "--body", "x"], ["--add-reviewer", "x"], ["-F", "body.md"]]) {
-			expect(checkGh(["pr", "edit", "5", ...args]), args.join(" ")).toBeNull();
+		// A B inside a value is no base, and a repository's name may hold one.
+		for (const [args, [owner, repo]] of [
+			[["--body", "text", "-R", "o/r"], ["o", "r"]], [["-t", "Bug fix", "-R", "o/r"], ["o", "r"]], [["--title=B", "-R", "o/r"], ["o", "r"]], [["-R", "o/r", "--add-label", "x"], ["o", "r"]], [["--repo=Blinx/x"], ["Blinx", "x"]],
+			[["-R=owner/Beta", "--body", "x"], ["owner", "Beta"]], [["--add-reviewer", "x", "-R", "o/r"], ["o", "r"]],
+		] as const) {
+			expect(check(["pr", "edit", "5", ...args], { ...WATCH, owner, repo }, {}), args.join(" ")).toBeNull();
 		}
 	});
 
@@ -194,12 +202,222 @@ describe("gh", () => {
 		for (const args of [
 			["-b", good, "--body", "see https://x.example"], ["--body", good, "-b", "plain"], [`--body=${good}`, "--body=@someone"], ["-b=plain"], ["-b", good, "-b", "fixes #3"],
 		]) {
-			for (const group of ["pr", "issue"]) expect(checkGh([group, "comment", "7", ...args]), `${group} ${args.join(" ")}`).toContain("ship fence");
+			for (const group of ["pr", "issue"]) expect(checkGh([group, "comment", "5", "-R", "o/r", ...args]), `${group} ${args.join(" ")}`).toContain("ship fence");
 		}
 		for (const args of [["--body", "plain", "-b", good], [`--body=${good}`], [`-b=${good}`], ["-b", good, "-R", "o/r"], [`-b${good}`], ["--edit-last", "-b", good]]) {
-			expect(checkGh(["pr", "comment", "7", ...args]), args.join(" ")).toBeNull();
+			expect(checkGh(["pr", "comment", "5", "-R", "o/r", ...args]), args.join(" ")).toBeNull();
 		}
-		expect(checkGh(["pr", "comment", "7", "--body", good, "--no-such-flag"])).toContain("not a flag the fence knows");
+		expect(checkGh(["pr", "comment", "5", "-R", "o/r", "--body", good, "--no-such-flag"])).toContain("not a flag the fence knows");
+	});
+
+	test("no file leaves for GitHub: --attach, --body-file and -F are refused wherever a write takes them, however they are spelled", () => {
+		const marked = comment("Done.");
+		const calls = [
+			["pr", "comment", "5", "-R", "o/r", "--body", marked],
+			["issue", "comment", "5", "-R", "o/r", "--body", marked],
+			["pr", "create", "-R", "o/r", "--draft", "--title", "t"],
+			["pr", "edit", "5", "-R", "o/r", "--title", "t"],
+		];
+		for (const call of calls) {
+			expect(checkGh(call), call.join(" ")).toBeNull();
+			for (const extra of [["--attach", "f.png"], ["--attach=f.png"], ["--attach", "f.png#alt text"], ["--attach", "a.png", "--attach", "b.png"], ["-R", "o/r", "--attach=f.png"]]) {
+				expect(checkGh([...call, ...extra]), [...call, ...extra].join(" ")).toContain("--attach is refused");
+			}
+			for (const extra of [["--body-file", "f"], ["--body-file=f"], ["-F", "f"], ["-Ff"], ["-F=f"], ["-F", "-"]]) {
+				expect(checkGh([...call, ...extra]), [...call, ...extra].join(" ")).toContain("is refused: a body read from a file");
+			}
+		}
+		// A short flag in a bundle, and the same words as the value another flag takes, which no flag is.
+		expect(checkGh(["pr", "create", "-R", "o/r", "-dF", "f", "--title", "t"])).toContain("-F is refused");
+		expect(checkGh(["pr", "edit", "5", "-R", "o/r", "--body", "--attach"])).toBeNull();
+		expect(checkGh(["pr", "edit", "5", "-R", "o/r", "-t", "-F"])).toBeNull();
+		expect(checkGh(["pr", "edit", "5", "-R", "o/r", "--title=--body-file"])).toBeNull();
+		expect(checkGh(["pr", "create", "-R", "o/r", "--draft", "-b", "--attach", "-t", "--body-file"])).toBeNull();
+	});
+
+	test("a pull request is assigned to nobody, Copilot included", () => {
+		for (const extra of [["--add-assignee", "@copilot"], ["--add-assignee=@me"], ["--remove-assignee", "x"], ["--remove-assignee=@copilot"], ["--add-assignee", "a", "--title", "t"]]) {
+			expect(checkGh(["pr", "edit", "5", "-R", "o/r", ...extra]), extra.join(" ")).toContain("assigning a pull request");
+		}
+		for (const extra of [["-a", "@copilot"], ["--assignee", "@me"], ["--assignee=x"], ["-a@me"], ["-fa", "@me"], ["-a=x"]]) {
+			expect(checkGh(["pr", "create", "-R", "o/r", "--draft", ...extra]), extra.join(" ")).toContain("assigning a pull request");
+		}
+	});
+
+	test("the token stays inside gh: auth status shows none, under any spelling of --show-token, and auth token is not run", () => {
+		for (const line of [
+			"auth status --show-token", "auth status -t", "auth status -at", "auth status -ta", "auth status --show-token=true", "auth status -t=false", "auth status --json hosts --show-token", "auth status -h github.com -t",
+			"auth status --hostname github.com --show-token", "auth status -a --no-refresh --show-token", "auth token", "auth token -u blindx-tony-do", "auth token --hostname github.com", "auth token --no-refresh", "-R o/r auth token",
+		]) {
+			expect(gh(line), line).toContain("the GitHub token stays inside gh");
+		}
+		// What a value merely holds: a host whose name has a t in it, and a host named t.
+		for (const line of ["auth status", "auth status -a", "auth status --active -h github.com", "auth status --json hosts", "auth status -hgithub.com", "auth status -ht", "auth status --hostname=t", "auth status --json hosts --jq .hosts", "auth status --no-refresh"]) {
+			expect(gh(line), line).toBeNull();
+		}
+		expect(gh("auth status --frob")).toContain("not a flag the fence knows");
+	});
+
+	describe("every write names the pull request /ship watches and the repository it is in", () => {
+		const marked = comment("Done.");
+		const on = (kind: string, ...more: string[]): string[] => {
+			const [group, sub] = kind.split(" ") as [string, string];
+			return [group, sub, ...more];
+		};
+
+		test("the watched pull request is named by its number or its URL, and the repository by -R or by the URL", () => {
+			const url = "https://github.com/o/r/pull/5";
+			for (const args of [
+				on("pr comment", "5", "-R", "o/r", "--body", marked), on("pr comment", "#5", "-R", "o/r", "--body", marked), on("pr comment", "05", "-R", "O/R", "--body", marked), on("pr comment", "5", "--repo=github.com/o/r", "--body", marked),
+				on("pr comment", "5", "-Ro/r", "--body", marked), on("pr comment", url, "--body", marked), on("pr comment", `${url}/files`, "--body", marked), on("pr comment", `${url}#discussion_r1`, "--body", marked), on("pr comment", `${url}?diff=split`, "--body", marked),
+				on("pr comment", url, "-R", "o/r", "--body", marked), ["-R", "o/r", "pr", "comment", "5", "--body", marked], ["pr", "-R", "o/r", "comment", "5", "--body", marked],
+				on("pr edit", "5", "-R", "o/r", "--title", "t"), on("pr edit", url, "--title", "t", "--body", "b"), on("pr edit", "http://github.com/o/r/pull/5", "--title", "t"),
+				on("issue comment", "5", "-R", "o/r", "--body", marked), on("issue comment", url, "--body", marked), on("issue comment", "https://github.com/o/r/issues/5", "--body", marked),
+				on("run rerun", "123", "-R", "o/r"), on("run rerun", "123", "-R", "o/r", "--failed"), on("run rerun", "--job", "77", "-R", "o/r"), on("run rerun", "-d", "123", "--repo", "o/r"),
+				on("pr create", "-R", "o/r", "--draft", "--title", "t"), on("pr create", "--repo=github.com/o/r", "-d", "--fill"),
+			]) {
+				expect(checkGh(args), args.join(" ")).toBeNull();
+			}
+		});
+
+		test("another number, repository or host is refused, and so is what names no repository or no pull request", () => {
+			const url = "https://github.com/o/r/pull/5";
+			const refusals: [string[], string][] = [
+				// Another pull request.
+				[on("pr comment", "6", "-R", "o/r", "--body", marked), "not the pull request /ship watches"], [on("pr comment", "#6", "-R", "o/r", "--body", marked), "#6 is not"], [on("pr edit", "4", "-R", "o/r", "--title", "t"), "#4 is not"],
+				[on("issue comment", "4", "-R", "o/r", "--body", marked), "#4 is not"], [on("pr comment", "https://github.com/o/r/pull/6", "--body", marked), "not the pull request /ship watches"],
+				[on("pr comment", "feat/other", "-R", "o/r", "--body", marked), "name it by its number"], [on("pr comment", "+5", "-R", "o/r", "--body", marked), "name it by its number"], [on("pr edit", "https://github.com/o/r/issues/5", "--title", "t"), "not the pull request"],
+				// Another repository, however it is written, and every -R is judged: gh takes the last, and ignores it for a URL.
+				[on("pr comment", "5", "-R", "x/y", "--body", marked), "not the repository /ship watches"], [on("pr comment", "5", "-R", "o/y", "--body", marked), "not the repository"], [on("pr comment", "5", "-R", "x/r", "--body", marked), "not the repository"],
+				[on("pr comment", "5", "-R", "github.com/x/y", "--body", marked), "not the repository"], [on("pr comment", "5", "-R", "other.example/o/r", "--body", marked), "not the repository"], [on("pr comment", "5", "-R", "o/r", "-R", "x/y", "--body", marked), "not the repository"],
+				[on("pr comment", "5", "-R", "x/y", "-R", "o/r", "--body", marked), "not the repository"], [on("pr comment", "5", "-R", "https://github.com/o/r", "--body", marked), "not the repository"], [on("pr comment", "5", "-R", "", "--body", marked), "not the repository"],
+				[on("pr comment", "5", "-R", "o", "--body", marked), "not the repository"], [on("pr comment", "5", "-R", "o/r/", "--body", marked), "not the repository"], [on("pr comment", "5", "-R", "a/b/c/d", "--body", marked), "not the repository"],
+				[on("pr edit", url, "-R", "x/y", "--title", "t"), "not the repository"], [on("pr edit", "5", "-R", "x/y", "--title", "t"), "not the repository"], [on("issue comment", "5", "-R", "x/y", "--body", marked), "not the repository"],
+				[on("run rerun", "123", "-R", "x/y"), "not the repository"], [on("run rerun", "--job", "7", "-R", "x/y"), "not the repository"], [on("pr create", "-R", "x/y", "--draft", "--title", "t"), "not the repository"],
+				// Another host: a URL, a repository's own host, or the default host GH_HOST names.
+				[on("pr comment", "https://evil.example/o/r/pull/5", "--body", marked), "not the pull request"], [on("pr edit", "https://github.com:443/o/r/pull/5", "--title", "t"), "not the pull request"],
+				[on("pr edit", "https://user@github.com/o/r/pull/5", "--title", "t"), "not the pull request"], [on("pr edit", "https://github.com\\@evil.example/o/r/pull/5", "--title", "t"), "not the pull request"],
+				[on("pr edit", "https://github.com/o/r/pull/5abc", "--title", "t"), "not the pull request"], [on("pr edit", "HTTPS://github.com/o/r/pull/5", "--title", "t"), "not the pull request"],
+				// What names no repository, or no pull request, or no run: the checkout and gh's config would decide, and the fence can't see them.
+				[on("pr comment", "5", "--body", marked), "name the repository"], [on("pr edit", "5", "--title", "t"), "name the repository"], [on("issue comment", "5", "--body", marked), "name the repository"], [on("run rerun", "123"), "name the repository"],
+				[on("pr create", "--draft", "--title", "t"), "name the repository"], [on("pr comment", "--body", marked, "-R", "o/r"), "name the pull request"], [on("pr edit", "--title", "t", "-R", "o/r"), "name the pull request"],
+				[on("pr comment", "5", "6", "-R", "o/r", "--body", marked), "name the pull request"], [on("run rerun", "-R", "o/r"), "name the run"], [on("run rerun", "abc", "-R", "o/r"), "name the run"], [on("run rerun", "1", "2", "-R", "o/r"), "name the run"],
+			];
+			for (const [args, why] of refusals) expect(checkGh(args), args.join(" ")).toContain(why);
+		});
+
+		test("GH_HOST is the host a repository without one goes to, so it has to be the watched host; a repository that names its host, and a URL, don't depend on it", () => {
+			const call = on("pr comment", "5", "-R", "o/r", "--body", marked);
+			for (const [env, allowed] of [[{ GH_HOST: "github.com" }, true], [{ GH_HOST: "GITHUB.com" }, true], [{ GH_HOST: "" }, true], [{}, true], [{ GH_HOST: "evil.example" }, false], [{ GH_HOST: "github.com:8443" }, false]] as const) {
+				expect(checkGh(call, env) === null, JSON.stringify(env)).toBe(allowed);
+			}
+			const away = { GH_HOST: "evil.example" };
+			expect(checkGh(on("pr comment", "5", "-R", "github.com/o/r", "--body", marked), away)).toBeNull();
+			expect(checkGh(on("pr comment", "https://github.com/o/r/pull/5", "--body", marked), away)).toBeNull();
+			expect(checkGh(call, away)).toContain("evil.example/o/r is not the repository /ship watches (github.com/o/r)");
+			expect(checkGh(on("run rerun", "123", "-R", "o/r"), away)).toContain("not the repository");
+			expect(checkGh(on("pr create", "-R", "o/r", "--draft"), away)).toContain("not the repository");
+		});
+
+		test("gh api writes only on the watched pull request, to the watched host", () => {
+			const post = (path: string, ...more: string[]) => ["api", path, "-f", `body=${marked}`, ...more];
+			for (const args of [
+				post("repos/o/r/issues/5/comments"), post("/repos/o/r/issues/5/comments?x=1"), post("repos/O/R/pulls/5/comments"), post("repos/o/r/pulls/5/comments/9/replies"), post("repos/o/r/issues/05/comments"),
+				post("repos/o/r/issues/5/comments", "--hostname", "github.com"), post("repos/o/r/issues/5/comments", "--hostname", "GITHUB.COM"), ["api", "-X", "POST", "repos/o/r/pulls/5/requested_reviewers", "-f", "reviewers[]=x"],
+			]) {
+				expect(checkGh(args), args.join(" ")).toBeNull();
+			}
+			expect(checkGh(post("repos/o/r/issues/5/comments"), { GH_HOST: "github.com" })).toBeNull();
+			// --hostname wins over GH_HOST, as in gh.
+			expect(checkGh(post("repos/o/r/issues/5/comments", "--hostname", "github.com"), { GH_HOST: "evil.example" })).toBeNull();
+			for (const args of [
+				post("repos/x/y/issues/5/comments"), post("repos/o/y/issues/5/comments"), post("repos/o/r/issues/6/comments"), post("repos/o/r/pulls/6/comments"), post("repos/x/r/pulls/5/comments/9/replies"), post("repos/o/r/pulls/6/comments/9/replies"),
+				["api", "-X", "POST", "repos/o/r/pulls/6/requested_reviewers", "-f", "reviewers[]=x"], ["api", "-X", "POST", "repos/x/y/pulls/5/requested_reviewers", "-f", "reviewers[]=x"],
+				post("repos/{owner}/{repo}/issues/5/comments"), post("https://api.github.com/repos/o/r/issues/5/comments"),
+			]) {
+				expect(checkGh(args), args.join(" ")).toContain("ship fence");
+			}
+			expect(checkGh(post("repos/o/r/issues/6/comments"))).toContain("not to the pull request /ship watches (o/r#5)");
+			for (const [args, env] of [
+				[post("repos/o/r/issues/5/comments", "--hostname", "evil.example"), {}], [post("repos/o/r/issues/5/comments", "--hostname", "github.com", "--hostname", "evil.example"), {}], [post("repos/o/r/issues/5/comments"), { GH_HOST: "evil.example" }],
+			] as const) {
+				expect(checkGh(args, env), `${args.join(" ")} ${JSON.stringify(env)}`).toContain("not the host /ship watches");
+			}
+			// Resolving a review thread names no repository, so it is held to the host alone.
+			const resolve = ["api", "graphql", "-f", "query=mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}", "-f", "t=X"];
+			expect(checkGh(resolve)).toBeNull();
+			expect(checkGh([...resolve, "--hostname", "evil.example"])).toContain("not the host /ship watches");
+			expect(checkGh(resolve, { GH_HOST: "evil.example" })).toContain("not the host /ship watches");
+		});
+
+		test("reads are not pinned, and a fence that recorded no pull request refuses every write", () => {
+			for (const args of [["pr", "view", "9", "-R", "x/y"], ["pr", "checks", "9", "-R", "x/y"], ["pr", "list", "-R", "x/y"], ["run", "view", "9", "-R", "x/y"], ["issue", "view", "9", "-R", "x/y"], ["api", "repos/x/y/pulls/9"], ["api", "graphql", "-f", "query=query{viewer{login}}"]]) {
+				expect(checkGh(args, { GH_HOST: "evil.example" }), args.join(" ")).toBeNull();
+				expect(check(args, null, {}), args.join(" ")).toBeNull();
+			}
+			const resolve = ["api", "graphql", "-f", "query=mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}", "-f", "t=X"];
+			for (const args of [on("pr comment", "5", "-R", "o/r", "--body", marked), on("pr edit", "5", "-R", "o/r", "--title", "t"), on("issue comment", "5", "-R", "o/r", "--body", marked), on("run rerun", "123", "-R", "o/r"), on("pr create", "-R", "o/r", "--draft"), resolve, ["api", "repos/o/r/issues/5/comments", "-f", `body=${marked}`]]) {
+				expect(check(args, null, {}), args.join(" ")).toContain("no record of the pull request /ship armed on");
+			}
+		});
+
+		test("the review thread a resolve names is read as gh reads it: one id, in the query or in the one field that holds only it; anything else resolves nothing the fence will let through", () => {
+			const doc = "query=mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}";
+			const named = (id: string) => `query=mutation{resolveReviewThread(input:{threadId:${id}}){thread{isResolved}}}`;
+			for (const [args, id] of [
+				[["api", "graphql", "-f", doc, "-f", "t=PRRT_a"], "PRRT_a"], [["api", "graphql", "-f", doc, "-F", "t=PRRT_a"], "PRRT_a"], [["api", "graphql", `-f${doc}`, "-ft=PRRT_a"], "PRRT_a"], [["api", "graphql", "--raw-field", doc, "--field", "t=PRRT-a_1"], "PRRT-a_1"],
+				[["api", "graphql", "-f", named("PRRT_lit")], "PRRT_lit"], [["--hostname", "github.com", "api", "graphql", "-f", named("PRRT_lit")], "PRRT_lit"], [["api", "graphql", "-f", "query=query{viewer{login}}", "-f", named("PRRT_lit")], "PRRT_lit"],
+			] as const) {
+				expect(readResolve([...args]), args.join(" ")).toBe(id);
+				expect(checkGh([...args]), args.join(" ")).toBeNull();
+			}
+			// Not a resolve: no thread, and the call is what it was.
+			for (const args of [["pr", "view", "5"], ["api", "user"], ["api", "graphql", "-f", "query=query{viewer{login}}"], ["api", "repos/o/r/issues/5/comments", "-f", `body=${comment("x")}`]]) {
+				expect(readResolve(args), args.join(" ")).toBeNull();
+				expect(checkGh(args), args.join(" ")).toBeNull();
+			}
+			// A resolve that names its thread in a way the fence can't read: no thread, and the check refuses it.
+			for (const args of [
+				["api", "graphql", "-f", doc], ["api", "graphql", "-f", doc, "-f", "t=a", "-f", "t=b"], ["api", "graphql", "-f", doc, "-f", "t=a b"], ["api", "graphql", "-f", doc, "-f", "t="],
+				["api", "graphql", "-f", doc, "-f", "t=a", "-f", named("PRRT_x")], ["api", "graphql", "-f", named("PRRT_x"), "-f", named("PRRT_y")],
+			]) {
+				expect(readResolve(args), args.join(" ")).toBeNull();
+				expect(checkGh(args), args.join(" ")).toContain("one review thread is resolved at a time");
+			}
+		});
+
+		test("no field of a write reads a file, whichever key it is for, and a GraphQL mutation's variable doesn't either", () => {
+			for (const args of [
+				["api", "repos/o/r/issues/5/comments", "-f", `body=${comment("x")}`, "-F", "note=@secret.txt"], ["api", "-X", "POST", "repos/o/r/pulls/5/requested_reviewers", "-F", "reviewers[]=@secret.txt"],
+				["api", "repos/o/r/pulls/5/comments", "-f", `body=${comment("x")}`, "--field", "path=@-"], ["api", "repos/o/r/issues/5/comments", "-F", "body=@c.md"],
+			]) {
+				expect(checkGh(args), args.join(" ")).toContain("from a file");
+			}
+		});
+
+		test("no gh api call reads a file on any method or endpoint: --input and -F key=@file are refused before every early return", () => {
+			for (const args of [
+				["api", "-X", "POST", "repos/o/r/pulls/5/requested_reviewers", "--input", "reviewers.json"], ["api", "-X", "POST", "repos/o/r/pulls/5/requested_reviewers", "--input=reviewers.json"],
+				["api", "-X", "GET", "user", "-F", "k=@secret.txt"], ["api", "-XGET", "user", "-Fk=@secret.txt"], ["api", "--method", "GET", "user", "--field=k=@-"], ["api", "user", "--input", "secret.txt"], ["api", "user", "--input", "-"],
+				["api", "-X", "POST", "repos/o/r/issues", "-F", "k=@secret.txt"], ["api", "-X", "DELETE", "repos/o/r/issues/5", "--input", "secret.txt"],
+				["api", "graphql", "-f", "query={viewer{login}}", "-F", "k=@secret.txt"], ["api", "graphql", "-f", "query={viewer{login}}", "--input", "secret.txt"],
+				["api", "graphql", "-f", "query=mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}", "-F", "t=@thread.txt"],
+				["api", "repos/o/r/issues/5/comments", "--input", "body.json"],
+			]) {
+				expect(checkGh(args), args.join(" ")).toContain("from a file");
+			}
+			// Values on the command line, and -f, which sends its text as it is, go.
+			for (const args of [["api", "-X", "GET", "user", "-f", "k=@secret.txt"], ["api", "-X", "GET", "user", "-F", "k=1"], ["api", "-X", "POST", "repos/o/r/pulls/5/requested_reviewers", "-f", "reviewers[]=someone"]]) {
+				expect(checkGh(args), args.join(" ")).toBeNull();
+			}
+		});
+
+		test("a call with GH_CONFIG_DIR set is refused, whatever gh command it is: its config.yml can send the token to a socket", () => {
+			for (const args of [["pr", "view", "5"], ["api", "user"], ["auth", "status"], ["pr", "comment", "5", "-R", "o/r", "--body", comment("x")], []]) {
+				expect(checkGh(args, { GH_CONFIG_DIR: "/tmp/evil" }), args.join(" ")).toContain("GH_CONFIG_DIR");
+				expect(checkGh(args, { GH_CONFIG_DIR: "" }) ?? "", args.join(" ")).not.toContain("GH_CONFIG_DIR");
+			}
+		});
 	});
 });
 
@@ -591,7 +809,7 @@ describe.skipIf(realGh === null)("the fence reads gh's argv as the installed gh 
 		for (const value of [...parsed, "tRUE", "TRue", "fALSE", "yes", "no", "on", "off", "y", "n", "", "2", "-1", " true", "true "]) {
 			expect(ghSays(["pr", "create", `--draft=${value}`, "--dry-run"]).includes("invalid argument"), JSON.stringify(value)).toBe(!parsed.includes(value));
 		}
-		expect(parsed.filter(value => checkGh(["pr", "create", `--draft=${value}`, "--title", "t", "--body", "b"]) === null)).toEqual(["1", "t", "T", "true", "True", "TRUE"]);
+		expect(parsed.filter(value => checkGh(["pr", "create", `--draft=${value}`, "-R", "o/r", "--title", "t", "--body", "b"]) === null)).toEqual(["1", "t", "T", "true", "True", "TRUE"]);
 	});
 
 	test("a flag in front of the command words moves the command gh runs, and the fence refuses it", () => {
@@ -637,12 +855,18 @@ describe.skipIf(realGh === null)("the fence reads gh's argv as the installed gh 
 		}
 		return tree;
 	};
-	/** What a command is given for the fence to have no other word about it: a draft, a marked comment. */
-	const PROBE: Record<string, string[]> = { "pr create": ["--draft"], "pr comment": ["--body", `${MARKER}\nDone.`], "issue comment": ["--body", `${MARKER}\nDone.`] };
+	/** What a command is given for the fence to have no other word about it: a draft, a marked comment, the watched pull request and its repository. */
+	const PROBE: Record<string, string[]> = {
+		"pr create": ["-R", "o/r", "--draft"],
+		"pr edit": ["5", "-R", "o/r"],
+		"pr comment": ["5", "-R", "o/r", "--body", `${MARKER}\nDone.`],
+		"issue comment": ["5", "-R", "o/r", "--body", `${MARKER}\nDone.`],
+		"run rerun": ["123", "-R", "o/r"],
+	};
 	const lets = (words: string[], probe: string[] = PROBE[words.slice(0, 2).join(" ")] ?? []): boolean => checkGh([...words.slice(0, 2), ...probe]) === null;
 	const RUNS = [
 		"pr view", "pr checks", "pr diff", "pr list", "pr status", "pr comment", "pr create", "pr edit", "run view", "run list", "run rerun", "run watch", "issue view", "issue list", "issue comment", "repo view",
-		"auth status", "auth token", "workflow list", "workflow view", "release list", "release view", "label list", "cache list",
+		"auth status", "workflow list", "workflow view", "release list", "release view", "label list", "cache list",
 	];
 
 	test("of every command in gh's own tree, the fence lets through the ones /ship runs and no other", () => {

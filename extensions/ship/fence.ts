@@ -1,5 +1,6 @@
 // The /ship fence, part 1: what a fenced session's gh and git may do, judged from their argv, plus the comment rules
-// and the repo files /ship never edits. Argv alone decides, apart from where the paths it names lead. fence-state.ts
+// and the repo files /ship never edits. Argv alone decides, apart from where the paths it names lead and, for what gh
+// writes on GitHub, the pull request the watch follows (`WatchedPr`, recorded when the fence is armed). fence-state.ts
 // arms the fence and checks what a push carries; fence-tools.ts judges omp tool calls. Each check returns null
 // (allowed) or the reason, which the model reads.
 import * as fs from "node:fs";
@@ -11,6 +12,14 @@ export interface GitPolicy {
 	pushBranch: string | null;
 	/** The repo's git folders, absolute: hooks, config and refs live there (a linked worktree's hooks live in the main repo's). */
 	gitDirs: string[];
+}
+
+/** The pull request a watch follows, as gh names it. Every write a fenced session makes on GitHub is held to it. */
+export interface WatchedPr {
+	host: string;
+	owner: string;
+	repo: string;
+	number: number;
 }
 
 /** First line of every comment or reply /ship writes, so the watch can tell its own words apart. */
@@ -132,12 +141,13 @@ const subs = (...commands: (string | string[])[]): Map<string, string> =>
  * no subcommand to tell apart: `api` (checked below), `status`, `help`, `version`, and `search`, which only reads. A
  * list of what is refused lost to a name gh has for a refused command (`gh pr new` is `gh pr create`), to another
  * group's command with the same effect (`gh issue close 5` closes a PR) and to commands gh adds (`gh repo deploy-key
- * add --allow-write`), so anything not named here is refused.
+ * add --allow-write`), so anything not named here is refused. `auth token` is not named: it prints the token, and the
+ * one program that reads it, gh-blinx, does so with a gh of its own that its shim keeps off the fenced PATH.
  */
 const GH_RUNS = new Map(
 	Object.entries({
 		api: null,
-		auth: subs("status", "token"),
+		auth: subs("status"),
 		cache: subs(["list", "ls"]),
 		help: null,
 		issue: subs(["list", "ls"], "view", "comment"),
@@ -233,6 +243,58 @@ const GH_PR_CREATE = ghSpec(
 	["-d", "--draft", "--dry-run", "-e", "--editor", "-f", "--fill", "--fill-first", "--fill-verbose", "--no-maintainer-edit", "-w", "--web"],
 );
 const GH_COMMENT = ghSpec(["--attach", "-b", "--body", "-F", "--body-file", "-R", "--repo"], ["--create-if-none", "--delete-last", "--edit-last", "-e", "--editor", "-w", "--web", "--yes"]);
+const GH_PR_EDIT = ghSpec(
+	["--add-assignee", "--add-label", "--add-project", "--add-reviewer", "--attach", "-B", "--base", "-b", "--body", "-F", "--body-file", "-m", "--milestone", "--remove-assignee", "--remove-label", "--remove-project", "--remove-reviewer", "-t", "--title", "-R", "--repo"],
+	["--remove-milestone"],
+);
+const GH_RUN_RERUN = ghSpec(["-j", "--job", "-R", "--repo"], ["-d", "--debug", "--failed"]);
+const GH_AUTH_STATUS = ghSpec(["-h", "--hostname", "--jq", "--json", "--template"], ["-a", "--active", "--no-refresh", "-t", "--show-token"]);
+
+type Env = Record<string, string | undefined>;
+
+/** The gh commands a watch writes with, by their canonical words, each with its flags and what names the thing it writes to: a pull request, an issue, a run, or only a repository. */
+interface Write {
+	spec: GhSpec;
+	target: "pr" | "issue" | "run" | "repo";
+}
+
+const GH_WRITES: Record<string, Write> = {
+	"pr create": { spec: GH_PR_CREATE, target: "repo" },
+	"pr edit": { spec: GH_PR_EDIT, target: "pr" },
+	"pr comment": { spec: GH_COMMENT, target: "pr" },
+	"issue comment": { spec: GH_COMMENT, target: "issue" },
+	"run rerun": { spec: GH_RUN_RERUN, target: "run" },
+};
+
+const BODY_FILE = "a body read from a file can't be checked; pass it with --body";
+const ASSIGNING = "assigning a pull request, to Copilot or anyone, is the user's";
+
+/**
+ * Flags a watch never uses on those commands, though gh acts on them: an attachment is uploaded from this machine (gh
+ * checks its extension and nothing else, so a secret named .png goes up, and gh then puts the link in the comment), a
+ * body file is sent as it reads (the comment rules can't see into it) and an assignee is set, Copilot included.
+ */
+const NEVER_FLAGS: Record<string, string> = {
+	"--attach": "it uploads a file from this machine to GitHub",
+	"--body-file": BODY_FILE,
+	"-F": BODY_FILE,
+	"--add-assignee": ASSIGNING,
+	"--remove-assignee": ASSIGNING,
+	"--assignee": ASSIGNING,
+	"-a": ASSIGNING,
+};
+
+const TOKEN_STAYS = refused("the GitHub token stays inside gh: gh auth token and gh auth status --show-token print it");
+export const NO_WATCH = refused("the fence has no record of the pull request /ship armed on (an older /ship armed it, and this session still runs the older extension): the user needs to restart omp, then run /ship");
+const FROM_FILE = refused("a field or request body read from a file or stdin (-F key=@file, --input) can't be checked: pass its value on the command line");
+const CONFIG_DIR = refused("GH_CONFIG_DIR is set for this command: a gh config directory can send the session's token anywhere (http_unix_socket), so gh runs with its own config only");
+
+const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+/** `[HOST/]OWNER/REPO` as `-R` takes it, read the one strict way: a URL or any other shape is not read at all. */
+const REPO_ARG = /^(?:([A-Za-z0-9.-]+)\/)?([\w.-]+)\/([\w.-]+)$/;
+/** A pull request or issue URL as gh reads one, strictly: host, owner, repository, kind of page, number. No userinfo, port or backslash, which gh and the fence could read differently. */
+const PAGE_URL = /^https?:\/\/([A-Za-z0-9.-]+)\/([\w.-]+)\/([\w.-]+)\/(pull|issues)\/(\d+)(?:[/?#]\S*)?$/;
 
 /** The repo flags and the host flag: the only flags the fence reads in front of gh's command words. */
 const GH_WORD_FLAGS = names("-R", "--repo", "--hostname");
@@ -260,16 +322,34 @@ function ghCommand(args: string[]): { group: string; sub: string; at: number } |
 	return { group, sub, at };
 }
 
-/** Writes a fenced session may make with `gh api`: comments, review replies, asking a reviewer again. */
-const API_COMMENTS = [
-	/^repos\/[^/]+\/[^/]+\/issues\/\d+\/comments$/,
-	/^repos\/[^/]+\/[^/]+\/pulls\/\d+\/comments$/,
-	/^repos\/[^/]+\/[^/]+\/pulls\/\d+\/comments\/\d+\/replies$/,
+/** Writes a fenced session may make with `gh api`, each on the pull request its path names: comments, review replies, asking a reviewer again. */
+const API_WRITES = [
+	{ path: /^repos\/([^/]+)\/([^/]+)\/issues\/(\d+)\/comments$/, comment: true },
+	{ path: /^repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)\/comments$/, comment: true },
+	{ path: /^repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)\/comments\/\d+\/replies$/, comment: true },
+	{ path: /^repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)\/requested_reviewers$/, comment: false },
 ];
-const API_REREQUEST = /^repos\/[^/]+\/[^/]+\/pulls\/\d+\/requested_reviewers$/;
+
+/** Why `gh api` wouldn't go to the watched host, or null: the host is `--hostname`, else GH_HOST, else gh's default. */
+function checkApiHost(f: GhArgs, pr: WatchedPr, env: Env): string | null {
+	const host = lastOf(f, "--hostname")?.value ?? (env.GH_HOST || pr.host);
+	return same(host, pr.host) ? null : refused(`gh api would go to ${host}, not the host /ship watches (${pr.host})`);
+}
+
+/** The parts of a `gh api` call the checks read. */
+interface ApiCall {
+	f: GhArgs;
+	endpoint: string;
+	/** The fields -f and -F (or their long names) give; `reads` marks a typed one whose value opens with `@`, which gh reads from a file or stdin. */
+	fields: { key: string; value: string; reads: boolean }[];
+	input: boolean;
+	method: string;
+	/** Every flag value and word: where a GraphQL document can stand. */
+	texts: string[];
+}
 
 /** `args` is what follows `api`. */
-function checkGhApi(args: string[]): string | null {
+function readApi(args: string[]): ApiCall | string {
 	const f = pflag(args, GH_API);
 	if (f.unknown !== undefined) return refused(`gh api ${f.unknown} is not a flag the fence knows`);
 	const endpoint = (f.words[0] ?? "").replace(/^\//, "").split("?")[0] ?? "";
@@ -282,52 +362,147 @@ function checkGhApi(args: string[]): string | null {
 	});
 	const input = f.flags.some(flag => flag.name === "--input");
 	const method = (lastOf(f, "-X", "--method")?.value ?? (fields.length > 0 || input ? "POST" : "GET")).toUpperCase();
+	return { f, endpoint, fields, input, method, texts: [...f.flags.flatMap(flag => flag.value ?? []), ...f.words] };
+}
+
+/** The review thread a GraphQL call resolves: the id it names, or the one its variable carries. Null when the call resolves none, or names the thread in a way the fence can't read. */
+function resolvedThread({ texts, fields }: ApiCall): string | null {
+	const named = texts.flatMap(text => RESOLVE_THREAD.exec(text)?.[1] ?? []);
+	const [id] = named;
+	if (named.length !== 1 || id === undefined) return null;
+	if (!id.startsWith("$")) return id;
+	const carried = fields.filter(field => field.key === id.slice(1));
+	const [only] = carried;
+	return carried.length === 1 && only !== undefined && !only.reads && /^[\w-]+$/.test(only.value) ? only.value : null;
+}
+
+/** The review thread `args` resolve, when they are a `gh api graphql` call that does: what the check that asks GitHub which pull request holds it needs. */
+export function readResolve(args: string[]): string | null {
+	const command = ghCommand(args);
+	if (typeof command === "string" || command.group !== "api") return null;
+	const call = readApi(args.slice(command.at));
+	return typeof call === "string" || call.endpoint !== "graphql" ? null : resolvedThread(call);
+}
+
+/** `args` is what follows `api`. */
+function checkGhApi(args: string[], pr: WatchedPr | null, env: Env): string | null {
+	const call = readApi(args);
+	if (typeof call === "string") return call;
+	const { f, endpoint, fields, input, method, texts } = call;
+	// gh sends what these read, on every method and path, so no early return below may come first.
+	if (input || fields.some(field => field.reads)) return FROM_FILE;
 	if (endpoint === "graphql") {
-		const texts = [...f.flags.flatMap(flag => flag.value ?? []), ...f.words];
-		if (texts.some(text => /\bmutation\b/i.test(text) && !RESOLVE_THREAD.test(text))) return refused("GraphQL mutations other than resolving one review thread are refused");
-		if (input || fields.some(field => field.key === "query" && field.value.startsWith("@"))) return refused("a GraphQL query read from a file can't be checked");
-		return null;
+		const mutations = texts.filter(text => /\bmutation\b/i.test(text));
+		if (mutations.some(text => !RESOLVE_THREAD.test(text))) return refused("GraphQL mutations other than resolving one review thread are refused");
+		if (fields.some(field => field.key === "query" && field.value.startsWith("@"))) return refused("a GraphQL query read from a file can't be checked");
+		if (mutations.length === 0) return null;
+		if (pr === null) return NO_WATCH;
+		if (mutations.length > 1 || resolvedThread(call) === null) return refused("one review thread is resolved at a time, named by its id in the query or in a field that holds only the id");
+		return checkApiHost(f, pr, env);
 	}
 	if (method === "GET") return null;
-	if (method === "POST" && API_REREQUEST.test(endpoint)) return null;
-	if (method === "POST" && API_COMMENTS.some(p => p.test(endpoint))) {
-		if (input) return refused("a comment body read from a file can't be checked; pass it with -f body=");
+	for (const { path, comment } of API_WRITES) {
+		const hit = method === "POST" ? path.exec(endpoint) : null;
+		if (hit === null) continue;
+		const [, owner, repo, number] = hit;
+		if (pr === null) return NO_WATCH;
+		const away = checkApiHost(f, pr, env);
+		if (away !== null) return away;
+		if (!same(owner, pr.owner) || !same(repo, pr.repo) || Number(number) !== pr.number) {
+			return refused(`gh api writes to ${owner}/${repo}#${number}, not to the pull request /ship watches (${pr.owner}/${pr.repo}#${pr.number})`);
+		}
+		if (!comment) return null;
 		const bodies = fields.filter(field => field.key === "body");
 		if (bodies.length !== 1) return refused("a comment carries exactly one body field");
 		const [body] = bodies as [(typeof bodies)[number]];
-		return body.reads ? refused("a comment body read from a file can't be checked; pass it with -f body=") : checkCommentBody(body.value);
+		return checkCommentBody(body.value);
 	}
 	return refused(`gh api ${method} ${endpoint} is refused (only comments, review replies and re-requesting a reviewer write)`);
 }
 
-/** `args` is gh's argv without the program name. */
-export function checkGh(args: string[]): string | null {
+/** `gh auth status` without a flag that prints the token. */
+function checkAuthStatus(args: string[]): string | null {
+	const f = pflag(args, GH_AUTH_STATUS);
+	if (f.unknown !== undefined) return refused(`gh auth status ${f.unknown} is not a flag the fence knows`);
+	return f.flags.some(flag => flag.name === "-t" || flag.name === "--show-token") ? TOKEN_STAYS : null;
+}
+
+/**
+ * Why the thing a write names isn't the watched pull request, or null. Nothing here looks at the checkout or at gh's
+ * config, which could lead gh anywhere: the repository has to be named, by `-R` or by the URL of the pull request, and
+ * a number or URL has to be the watched one. `-R OWNER/REPO` goes to GH_HOST when that is set, which has to be the
+ * watched host too. gh takes the last `-R` and ignores it for a URL, so every one given is judged. A run is named by
+ * its id, which says nothing of the pull request it ran for: only its repository is held to the watch.
+ */
+function checkTarget(kind: string, target: Write["target"], f: GhArgs, pr: WatchedPr | null, env: Env): string | null {
+	if (pr === null) return NO_WATCH;
+	const watched = `${pr.owner}/${pr.repo}`;
+	const named = f.flags.filter(flag => flag.name === "-R" || flag.name === "--repo");
+	for (const { value } of named) {
+		const m = REPO_ARG.exec(value ?? "");
+		const host = m?.[1] ?? (env.GH_HOST || pr.host);
+		if (m === null || !same(host, pr.host) || !same(m[2] as string, pr.owner) || !same(m[3] as string, pr.repo)) {
+			return refused(`${m === null ? JSON.stringify(value) : `${host}/${m[2]}/${m[3]}`} is not the repository /ship watches (${pr.host}/${watched}): gh ${kind} writes there only`);
+		}
+	}
+	const unnamed = retryable(`name the repository: add -R ${watched}`);
+	const [, , ...rest] = f.words;
+	if (target === "repo") return named.length > 0 ? null : unnamed;
+	if (target === "run") {
+		const job = lastOf(f, "-j", "--job")?.value;
+		if (rest.length > 1 || (rest.length === 1 ? !/^\d+$/.test(rest[0] as string) : job === undefined)) return retryable(`name the run: gh ${kind} <run id> -R ${watched}`);
+		return named.length > 0 ? null : unnamed;
+	}
+	if (rest.length !== 1) return retryable(`name the pull request /ship watches: gh ${kind} ${pr.number} -R ${watched}`);
+	const word = rest[0] as string;
+	const page = PAGE_URL.exec(word);
+	if (page !== null) {
+		const watchedPage = same(page[1] as string, pr.host) && same(page[2] as string, pr.owner) && same(page[3] as string, pr.repo) && Number(page[5]) === pr.number && (target === "issue" || page[4] === "pull");
+		return watchedPage ? null : refused(`${word} is not the pull request /ship watches (${pr.host}/${watched}#${pr.number})`);
+	}
+	const number = /^#?(\d+)$/.exec(word)?.[1];
+	if (number === undefined) return refused(`${JSON.stringify(word)} is not the pull request /ship watches: name it by its number (${pr.number}) or its URL`);
+	if (Number(number) !== pr.number) return refused(`#${Number(number)} is not the pull request /ship watches (#${pr.number}): gh ${kind} writes there only`);
+	return named.length > 0 ? null : unnamed;
+}
+
+/** A write of a watch: the flags the fence knows and none it refuses, the content rules of its kind, then the target. */
+function checkWrite(kind: string, { spec, target }: Write, args: string[], pr: WatchedPr | null, env: Env): string | null {
+	// Judged by the tokens alone: `-b -R -B=main` has a --base that a reading of which word is whose value would lose.
+	if (kind === "pr edit" && args.some(arg => arg === "--base" || arg.startsWith("--base=") || (/^-[^-]/.test(arg) && (arg.split("=", 1)[0] as string).includes("B")))) return refused("a pull request's base is the user's to change");
+	const f = pflag(args, spec);
+	if (f.unknown !== undefined) return refused(`gh ${kind} ${f.unknown} is not a flag the fence knows`);
+	if (kind === "pr create" && !isOn(lastOf(f, "-d", "--draft"))) return refused("open the pull request as a draft: gh pr create --draft");
+	for (const flag of f.flags) {
+		if (Object.hasOwn(NEVER_FLAGS, flag.name)) return refused(`gh ${kind} ${flag.name} is refused: ${NEVER_FLAGS[flag.name]}`);
+	}
+	if (kind.endsWith(" comment")) {
+		const body = lastOf(f, "-b", "--body")?.value;
+		if (typeof body !== "string") return refused("pass the comment with --body so the fence can check it");
+		const bad = checkCommentBody(body);
+		if (bad !== null) return bad;
+	}
+	return checkTarget(kind, target, f, pr, env);
+}
+
+/** `args` is gh's argv without the program name; `pr` the pull request the fence is armed on (null when none was recorded); `env` what the call runs with. */
+export function checkGh(args: string[], pr: WatchedPr | null, env: Env = {}): string | null {
+	if (env.GH_CONFIG_DIR) return CONFIG_DIR;
 	const command = ghCommand(args);
 	if (typeof command === "string") return command;
 	const { group, at } = command;
 	if (group === "") return null;
 	const subcommands = GH_RUNS.get(group);
 	if (subcommands === undefined) return refused(`gh ${group} is not something /ship runs`);
-	if (group === "api") return checkGhApi(args.slice(at));
+	if (group === "api") return checkGhApi(args.slice(at), pr, env);
 	// A group with no subcommand (or only a repo or help flag) prints its help.
 	if (subcommands === null || command.sub === "") return null;
 	const sub = subcommands.get(command.sub);
-	if (sub === undefined) return refused(`gh ${group} ${command.sub} is not something /ship runs`);
-	if (group === "pr" && sub === "create") {
-		const f = pflag(args, GH_PR_CREATE);
-		if (f.unknown !== undefined) return refused(`gh pr create ${f.unknown} is not a flag the fence knows`);
-		if (!isOn(lastOf(f, "-d", "--draft"))) return refused("open the pull request as a draft: gh pr create --draft");
-	}
-	// Judged by the tokens alone: `-b -R -B=main` has a --base that a reading of which word is whose value would lose.
-	if (group === "pr" && sub === "edit" && args.some(arg => arg === "--base" || arg.startsWith("--base=") || (/^-[^-]/.test(arg) && (arg.split("=", 1)[0] as string).includes("B")))) return refused("a pull request's base is the user's to change");
-	if (sub === "comment") {
-		const f = pflag(args, GH_COMMENT);
-		if (f.unknown !== undefined) return refused(`gh ${group} comment ${f.unknown} is not a flag the fence knows`);
-		const body = lastOf(f, "-b", "--body")?.value;
-		if (typeof body !== "string") return refused("pass the comment with --body so the fence can check it");
-		return checkCommentBody(body);
-	}
-	return null;
+	if (sub === undefined) return group === "auth" && command.sub === "token" ? TOKEN_STAYS : refused(`gh ${group} ${command.sub} is not something /ship runs`);
+	const kind = `${group} ${sub}`;
+	if (kind === "auth status") return checkAuthStatus(args);
+	const write = Object.hasOwn(GH_WRITES, kind) ? GH_WRITES[kind] : undefined;
+	return write === undefined ? null : checkWrite(kind, write, args, pr, env);
 }
 
 // ---- git ------------------------------------------------------------------------------------------------------------
@@ -784,8 +959,8 @@ export function checkGit(args: string[], policy: GitPolicy, cwd: string, env: Re
 	return null;
 }
 
-/** The one mutation a watch runs: resolving a review thread, with nothing else in the same document. */
-const RESOLVE_THREAD = /^query=\s*mutation\s*(?:\(\s*\$\w+\s*:\s*ID!\s*\))?\s*\{\s*resolveReviewThread\s*\(\s*input\s*:\s*\{\s*threadId\s*:\s*\$?\w+\s*\}\s*\)\s*\{\s*thread\s*\{\s*isResolved\s*\}\s*\}\s*\}\s*$/;
+/** The one mutation a watch runs: resolving a review thread, with nothing else in the same document. Group 1 is the id the mutation names: a literal, or a `$variable`. */
+const RESOLVE_THREAD = /^query=\s*mutation\s*(?:\(\s*\$\w+\s*:\s*ID!\s*\))?\s*\{\s*resolveReviewThread\s*\(\s*input\s*:\s*\{\s*threadId\s*:\s*(\$?\w+)\s*\}\s*\)\s*\{\s*thread\s*\{\s*isResolved\s*\}\s*\}\s*\}\s*$/;
 
 /** git's own commands a session may run: read-only or local. Anything else is an alias, a helper or a command that writes a remote or config. */
 const GIT_COMMANDS = names(
