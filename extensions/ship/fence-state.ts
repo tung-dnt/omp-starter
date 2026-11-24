@@ -18,7 +18,7 @@ export interface FenceState extends GitPolicy {
 	armed: boolean;
 	/** The checkout /ship works in; its git folders are `gitDirs`. */
 	root: string | null;
-	/** Protected files as the branch held them when /ship armed: path to blob id. A push may keep these. */
+	/** Protected files as the branch held them when /ship armed: path to `<mode> <blob id>`. A push may keep these. */
 	snapshot: Record<string, string>;
 	/** What the shims run their check with: bun, or omp's own binary with BUN_BE_BUN=1. */
 	bun: string;
@@ -99,16 +99,18 @@ export const realGit: Git = (dir, ...args) => {
 	return { code: p.exitCode ?? 1, out: p.stdout.toString() };
 };
 
-/** Protected files in `ref`'s tree: path to blob id. */
-function protectedBlobs(dir: string, ref: string, git: Git): Record<string, string> {
+/** Protected files in `ref`'s tree: path to `<mode> <blob id>`, so that a change of mode or type alone is a change. Null when the tree can't be read. */
+function protectedEntries(dir: string, ref: string, git: Git): Record<string, string> | null {
+	const listing = git(dir, "ls-tree", "-r", "-z", "--full-tree", ref);
+	if (listing.code !== 0) return null;
 	const out: Record<string, string> = {};
-	const listing = git(dir, "ls-tree", "-r", "-z", ref);
-	if (listing.code !== 0) return out;
 	for (const entry of listing.out.split("\0")) {
 		const tab = entry.indexOf("\t");
 		if (tab < 0) continue;
 		const file = entry.slice(tab + 1);
-		if (isProtectedPath(file)) out[file] = entry.slice(0, tab).split(" ")[2] ?? "";
+		if (!isProtectedPath(file)) continue;
+		const [mode, , oid] = entry.slice(0, tab).split(" ");
+		out[file] = `${mode} ${oid}`;
 	}
 	return out;
 }
@@ -122,18 +124,13 @@ export function armFence(watch: { pushBranch: string; root: string }, git: Git =
 		.map(flag => git(root, "rev-parse", "--path-format=absolute", flag).out.trim())
 		.filter(Boolean)
 		.map(dir => fs.realpathSync(dir));
-	writeState(file, { ...readState(file), armed: true, pushBranch: watch.pushBranch, root, gitDirs: [...new Set(gitDirs)], snapshot: protectedBlobs(root, "HEAD", git) });
+	writeState(file, { ...readState(file), armed: true, pushBranch: watch.pushBranch, root, gitDirs: [...new Set(gitDirs)], snapshot: protectedEntries(root, "HEAD", git) ?? {} });
 }
 
 export function disarmFence(): void {
 	const file = process.env[FENCE_ENV];
 	if (file) writeState(file, { ...readState(file), armed: false, pushBranch: null, root: null, gitDirs: [], snapshot: {} });
 }
-
-const blobAt = (dir: string, ref: string, file: string, git: Git): string => {
-	const r = git(dir, "rev-parse", "--verify", "--quiet", `${ref}:${file}`);
-	return r.code === 0 ? r.out.trim() : "";
-};
 
 /**
  * What origin holds now, asked of origin itself: a remote-tracking ref only says what some fetch saw, and the session can
@@ -162,11 +159,12 @@ const fetchCommand = (refs: string[]): string => {
 };
 
 /**
- * Why a push that the argv checks allowed still can't go: it carries a change to a protected file that is neither how
- * the branch held it when /ship armed nor how origin's default branch holds it now (what merging the base brings is
- * fine). Origin is asked for its tips, and the push is compared with its watched branch, or with where the push's
- * history leaves the default branch when origin has no such branch yet. A tip this checkout lacks is not a verdict but
- * the fetch that brings it: a plain `git fetch origin` leaves out the default branch of a single-branch or shallow clone.
+ * Why a push that the argv checks allowed still can't go: it carries a change to a protected file (its content or its
+ * mode) that is neither how the branch held it when /ship armed nor how origin's default branch holds it now (what
+ * merging the base brings is fine). Origin is asked for its tips, and the push is compared with its watched branch, or
+ * with where the push's history leaves the default branch when origin has no such branch yet. A tip this checkout lacks
+ * is not a verdict but the fetch that brings it: a plain `git fetch origin` leaves out the default branch of a
+ * single-branch or shallow clone.
  */
 export function checkPushContent(dir: string, sources: string[], state: FenceState, git: Git = realGit): string | null {
 	if (state.pushBranch === null) return refused("this session pushes nothing");
@@ -179,6 +177,7 @@ export function checkPushContent(dir: string, sources: string[], state: FenceSta
 	for (const src of sources) {
 		const tip = git(dir, "rev-parse", "--verify", "--quiet", `${src}^{commit}`).out.trim();
 		if (!tip) return refused(`can't read what ${src} would push`);
+		let pushed: Record<string, string> | null = null;
 		const from = tips.branch ?? (tips.base === undefined ? "" : git(dir, "merge-base", tip, tips.base).out.trim());
 		let changed: string[];
 		if (from) {
@@ -186,11 +185,19 @@ export function checkPushContent(dir: string, sources: string[], state: FenceSta
 			const diff = git(dir, "diff-tree", "-r", "--no-renames", "--name-only", "-z", from, tip);
 			if (diff.code !== 0) return retryable(`can't compare what ${src} would push with what origin holds: run ${fetchCommand([tips.branch === undefined ? (tips.baseName ?? "HEAD") : state.pushBranch])}`);
 			changed = diff.out.split("\0");
-		} else changed = Object.keys(protectedBlobs(dir, tip, git));
-		const held = changed.filter(file => file && isProtectedPath(file)).filter(file => {
-			const pushed = blobAt(dir, tip, file, git);
-			return pushed !== (state.snapshot[file] ?? "") && pushed !== (tips.base === undefined ? undefined : blobAt(dir, tips.base, file, git));
-		});
+		} else {
+			pushed = protectedEntries(dir, tip, git);
+			if (pushed === null) return refused(`can't read what ${src} would push`);
+			changed = Object.keys(pushed);
+		}
+		const touched = changed.filter(file => file && isProtectedPath(file));
+		if (touched.length === 0) continue;
+		pushed ??= protectedEntries(dir, tip, git);
+		if (pushed === null) return refused(`can't read what ${src} would push`);
+		const base = tips.base === undefined ? undefined : protectedEntries(dir, tips.base, git);
+		if (base === null) return refused(`can't read origin's default branch to compare what ${src} would push with`);
+		const entries = pushed;
+		const held = touched.filter(file => (entries[file] ?? "") !== (state.snapshot[file] ?? "") && (entries[file] ?? "") !== (base === undefined ? undefined : (base[file] ?? "")));
 		if (held.length > 0) return refused(`the push would change ${held.join(", ")}, which /ship never edits; leave that change to the user`);
 	}
 	return null;

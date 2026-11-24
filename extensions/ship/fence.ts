@@ -224,8 +224,32 @@ export function checkGh(args: string[]): string | null {
 // ---- git ------------------------------------------------------------------------------------------------------------
 
 const GIT_GLOBAL_VALUE = names("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env");
-/** `-c` or config settings that would bend a commit or a push: hooks, where a remote points, credentials, aliases. */
-const RISKY_CONFIG = /^(core\.hookspath|core\.sshcommand|remote\.|url\.|credential|alias\.|branch\.[^.]+\.(remote|pushremote))/i;
+
+/**
+ * Config that bends where a commit or a push goes, makes git run a program or pulls in more config. A fenced session
+ * neither writes such a key (`git config`) nor sets it for one command (`-c`, `--config-env`), whatever the subcommand:
+ * hooks, remotes, URLs, aliases and credentials; editors, pagers, ssh and proxy commands, fsmonitor, signing programs,
+ * diff, merge and filter drivers, help viewers; includes; transports (`ext::` runs a command). Names are case-blind.
+ */
+const RISKY_CONFIG = new RegExp(
+	[
+		"core\\.(?:hookspath|fsmonitor|editor|pager|askpass|sshcommand|gitproxy|alternaterefscommand)", "remote\\.", "url\\.", "alias\\.", "credential", "branch\\.[^.]+\\.(?:remote|pushremote)",
+		"sequence\\.editor", "pager\\.", "gpg\\.", "filter\\.", "diff\\.external", "diff\\..+\\.(?:command|textconv)$", "merge\\..+\\.driver$", "submodule\\..+\\.update$",
+		"uploadpack\\.", "lfs\\.(?:extension|customtransfer)\\.", "man\\.", "browser\\.", "web\\.browser", "help\\.(?:browser|format)", "include\\.", "includeif\\.", "protocol\\.",
+	].map(key => `^${key}`).join("|"),
+	"i",
+);
+
+/**
+ * What the environment sets for every git command, as `key=value` like `-c`: `GIT_CONFIG_KEY_<n>` and `_VALUE_<n>` below
+ * `GIT_CONFIG_COUNT`, and `GIT_CONFIG_PARAMETERS`, where git keeps what `-c` set for the git processes it starts
+ * (`'key=value'` or `'key'='value'`, so each quoted piece is a setting, or the key or value of one).
+ */
+function environmentSettings(env: Record<string, string | undefined>): string[] {
+	const count = Math.max(Math.min(Number.parseInt(env.GIT_CONFIG_COUNT ?? "", 10) || 0, 1024), 0);
+	const pairs = Array.from({ length: count }, (_, n) => `${env[`GIT_CONFIG_KEY_${n}`] ?? ""}=${env[`GIT_CONFIG_VALUE_${n}`] ?? ""}`);
+	return [...pairs, ...[...(env.GIT_CONFIG_PARAMETERS ?? "").matchAll(/'([^']*)'/g)].map(piece => piece[1] as string)];
+}
 
 const PUSH_VALUE_FLAGS = names("--recurse-submodules", "--repo", "--receive-pack", "--exec", "-o", "--push-option");
 const PUSH_OK_LONG = names(
@@ -278,16 +302,61 @@ function checkPush(args: string[], policy: GitPolicy): string | null {
 	return null;
 }
 
-const CONFIG_WRITE_FLAGS = ["--add", "--replace-all", "--unset", "--unset-all", "--rename-section", "--remove-section", "--edit", "-e"];
+/** git config's options that take a value (`--name=v` or `--name v`), that read and that write; git reads any prefix of a name that is not ambiguous. */
+const CONFIG_VALUE_OPTIONS = ["--file", "--blob", "--type", "--default", "--comment", "--value"];
+const CONFIG_READ_OPTIONS = ["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "--get-color", "--get-colorbool"];
+const CONFIG_WRITE_OPTIONS = ["--add", "--replace-all", "--unset", "--unset-all", "--remove-section"];
 
+/** Whether `name` is a prefix, of at least `least` characters, of one of the options in `full`: git reads any prefix of an option's name that is not ambiguous. */
+const abbreviates = (name: string, full: string[], least = 4) => name.length >= least && full.some(option => option.startsWith(name));
+
+const CONFIG_EDITOR = refused("git config --edit opens an editor on the config file, and what it saves can't be checked");
+const CONFIG_RENAME = refused("git config rename-section is refused: a section renamed to a risky one carries its keys along");
+
+/** Why a `git config` call is refused: it opens an editor on the config, renames a section, or writes a key that runs a program or reads more config. */
 function checkConfig(args: string[]): string | null {
-	const f = parse(args, names("--file", "-f", "--blob", "--type", "--default", "--comment"));
-	const [first = "", second] = f.positionals;
-	// `git config set|unset KEY` (git 2.46+) or the classic `git config KEY VALUE` / `--unset KEY`.
-	const modern = ["set", "unset", "rename-section", "remove-section"].includes(first);
-	const key = modern ? (second ?? "") : first;
-	const writes = modern || second !== undefined || has(f, ...CONFIG_WRITE_FLAGS);
-	return writes && RISKY_CONFIG.test(key) ? refused(`git config ${key} is refused`) : null;
+	/** Every word that is not an option, an option's value included, so that no spelling hides a key; and `rest`, the words no option took. */
+	const words: string[] = [];
+	const rest: string[] = [];
+	let reads = false;
+	let writes = false;
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i] as string;
+		if (arg === "--") {
+			words.push(...args.slice(i + 1));
+			rest.push(...args.slice(i + 1));
+			break;
+		}
+		if (arg.startsWith("--")) {
+			const eq = arg.indexOf("=");
+			const name = eq < 0 ? arg : arg.slice(0, eq);
+			if (abbreviates(name, ["--edit"])) return CONFIG_EDITOR;
+			if (abbreviates(name, ["--rename-section"])) return CONFIG_RENAME;
+			reads ||= abbreviates(name, CONFIG_READ_OPTIONS);
+			writes ||= abbreviates(name, CONFIG_WRITE_OPTIONS);
+			if (eq >= 0) words.push(arg.slice(eq + 1));
+			else if (abbreviates(name, CONFIG_VALUE_OPTIONS, 3)) words.push(args[++i] ?? "");
+		} else if (arg.startsWith("-") && arg.length > 1) {
+			for (let j = 1; j < arg.length; j++) {
+				if (arg[j] === "e") return CONFIG_EDITOR;
+				if (arg[j] === "l") reads = true;
+				if (arg[j] === "f") {
+					words.push(arg.slice(j + 1) || (args[++i] ?? ""));
+					break;
+				}
+			}
+		} else {
+			words.push(arg);
+			rest.push(arg);
+		}
+	}
+	// `git config set|unset KEY` (git 2.46+) or the classic `git config KEY VALUE` / `--unset KEY`; a lone `git config KEY` reads it.
+	const [verb = ""] = rest;
+	if (verb === "edit") return CONFIG_EDITOR;
+	if (verb === "rename-section") return CONFIG_RENAME;
+	const writing = ["set", "unset", "remove-section"].includes(verb) || writes || (rest.length >= 2 && !reads && verb !== "get" && verb !== "list");
+	const key = writing ? words.find(word => RISKY_CONFIG.test(word)) : undefined;
+	return key === undefined ? null : refused(`git config ${key} is refused: hooks and remotes stay as configured, and so does anything that runs a program or reads more config`);
 }
 
 /** Whether `p`, absolute, is or lies inside a git folder: any `.git`, or one of `gitDirs`. Case-blind, as macOS is. */
@@ -384,8 +453,51 @@ const FETCH_ONLY_REFS = /^(?:(?:refs\/)?remotes|refs\/replace)\//i;
 const INIT_OK = names("-q", "--quiet", "--bare", "--shared", "-b", "--initial-branch", "--object-format", "--ref-format");
 const INIT_VALUE_FLAGS = names("-b", "--initial-branch", "--object-format", "--ref-format");
 
+const C_ESCAPES: Record<string, string> = { n: "\n", t: "\t", a: "\x07", b: "\b", f: "\f", r: "\r", v: "\v" };
+/** C-style quoting in a patch header: git quotes a name with unusual characters, and `\056` is a dot. */
+const unquote = (quoted: string): string => quoted.replace(/\\(?:([0-7]{1,3})|(.))/g, (_, octal: string | undefined, char: string) => (octal ? String.fromCharCode(Number.parseInt(octal, 8)) : (C_ESCAPES[char] ?? char)));
+
+/** The names a patch header line gives to files. */
+function headerPaths(line: string): string[] {
+	const one = /^(?:--- |\+\+\+ |rename (?:from|to) |copy (?:from|to) )(.*)$/.exec(line)?.[1];
+	if (one !== undefined) {
+		const name = one.startsWith('"') ? unquote(one.slice(1, one.lastIndexOf('"') > 0 ? one.lastIndexOf('"') : undefined)) : (one.split("\t")[0] as string);
+		return name === "/dev/null" ? [] : [name];
+	}
+	// `diff --git a/x b/y`: each name quoted or up to the next space, so a name with spaces is read as pieces and any of them may give it away.
+	return [...(line.startsWith("diff --git ") ? line.slice("diff --git ".length).matchAll(/"((?:[^"\\]|\\.)*)"|(\S+)/g) : [])].map(m => (m[1] === undefined ? (m[2] as string) : unquote(m[1])));
+}
+
+/**
+ * A name in the patch file `file` that is, or lies inside, a git folder, at any `-p` strip level and under any of
+ * `bases`: git itself turns away a path with a `.git` part, but not a git folder with another name. Undefined when
+ * `file` is not a readable file; git says why.
+ */
+function patchGitPath(file: string, bases: string[], policy: GitPolicy): string | undefined {
+	let patch: string;
+	try {
+		if (!fs.statSync(file).isFile()) return undefined;
+		patch = fs.readFileSync(file, "utf8");
+	} catch {
+		return undefined;
+	}
+	for (const line of patch.split("\n")) {
+		for (const named of headerPaths(line)) {
+			const parts = named.split("/");
+			for (let strip = 0; strip < parts.length; strip++) {
+				const stripped = parts.slice(strip).join("/");
+				if (bases.some(base => inGitFolder(path.resolve(base, stripped), policy.gitDirs))) return named;
+			}
+		}
+	}
+	return undefined;
+}
+
+/** lfs commands that write or remove the repo's hooks. */
+const LFS_HOOKS = names("install", "update", "uninstall");
+
 /** Why a subcommand's own options would write where /ship may not send it: files into a git folder, or a ref only a fetch from the remote may set. */
-function checkSubcommandWrites(sub: string, rest: string[], dir: string): string | null {
+function checkSubcommandWrites(sub: string, rest: string[], dir: string, policy: GitPolicy): string | null {
 	if (sub === "init") {
 		const f = parse(rest, INIT_VALUE_FLAGS);
 		const flag = [...f.long.keys(), ...f.short].find(name => !isIn(INIT_OK, name));
@@ -409,13 +521,30 @@ function checkSubcommandWrites(sub: string, rest: string[], dir: string): string
 			if (spec.includes(":") && FETCH_ONLY_REFS.test(spec.slice(spec.indexOf(":") + 1))) return refused(`git ${sub} ${word} is refused: remote-tracking and replacement refs are set by a fetch from the remote alone`);
 		}
 	}
+	if (sub === "apply") {
+		const f = parse(rest, {});
+		// --unsafe-paths lets a patch write outside the work tree, `.git` included; git reads any prefix of the name.
+		if ([...f.long.keys()].some(name => name.length >= 3 && "--unsafe-paths".startsWith(name))) return refused("git apply --unsafe-paths is refused: it lets a patch write outside the work tree, a git folder included");
+		const bases = [dir, ...optionValues(rest, ["--directory"]).map(root => path.resolve(dir, root))];
+		for (const file of f.positionals.filter(word => word !== "-")) {
+			const named = patchGitPath(path.resolve(dir, file), bases, policy);
+			if (named !== undefined) return refused(`git apply ${file} names ${named}, a path inside a git folder, where hooks and config live`);
+		}
+	}
+	if (sub === "lfs") {
+		const verb = rest.find(word => !word.startsWith("-")) ?? "";
+		if (isIn(LFS_HOOKS, verb)) return refused(`git lfs ${verb} is refused: it writes or removes the repo's hooks`);
+	}
 	return null;
 }
 
-/** `args` is git's argv without the program name. */
-export function checkGit(args: string[], policy: GitPolicy, cwd: string): string | null {
+/** `args` is git's argv without the program name; `env` is what the call runs with, which `--config-env` reads its values from. */
+export function checkGit(args: string[], policy: GitPolicy, cwd: string, env: Record<string, string | undefined> = {}): string | null {
 	let i = 0;
+	/** What `-c` and the environment set: `key=value`. */
 	const settings: string[] = [];
+	/** What `--config-env` names: `key=VARIABLE`. */
+	const configEnv: string[] = [];
 	/** What the global options name as a path: --git-dir and --work-tree. A `-C` is the folder git runs in, which `dir` judges. */
 	const named: string[] = [];
 	for (; i < args.length; i++) {
@@ -424,21 +553,26 @@ export function checkGit(args: string[], policy: GitPolicy, cwd: string): string
 		if (isIn(GIT_GLOBAL_VALUE, arg)) {
 			const given = args[i + 1] ?? "";
 			if (arg === "-c") settings.push(given);
+			else if (arg === "--config-env") configEnv.push(given);
 			else if (arg === "--git-dir" || arg === "--work-tree") named.push(given);
 			i++;
 		} else if (arg.startsWith("-c") && arg.length > 2) settings.push(arg.slice(2));
+		else if (arg.startsWith("--config-env=")) configEnv.push(arg.slice("--config-env=".length));
 		else if (arg.startsWith("--git-dir=") || arg.startsWith("--work-tree=")) named.push(arg.slice(arg.indexOf("=") + 1));
+		// Asking for the path (`--exec-path`) is harmless; setting it moves where git finds the programs it runs.
+		else if (arg.startsWith("--exec-path=")) return refused("git --exec-path=<dir> is refused: the programs git runs stay where they are");
 	}
 	const sub = args[i] ?? "";
 	const rest = args.slice(i + 1);
 	if (sub !== "" && !isIn(GIT_COMMANDS, sub)) return refused(`git ${sub} is not a git command the fence allows`);
 	const dir = gitWorkDir(args, cwd);
-	// Any config value may be a path (core.worktree, format.outputDirectory, trace2.eventTarget).
-	const configPaths = settings.map(s => s.slice(s.indexOf("=") + 1));
-	const writes = checkGitFolder(sub, rest, [...named, ...configPaths], dir, policy) ?? checkSubcommandWrites(sub, rest, dir);
+	settings.push(...environmentSettings(env));
+	const risky = [...settings, ...configEnv].map(setting => setting.split("=", 1)[0] as string).find(key => RISKY_CONFIG.test(key));
+	if (risky !== undefined) return refused(`${risky} can't be set for one command (-c, --config-env, GIT_CONFIG_*): hooks and remotes stay as configured, and so does anything that runs a program or reads more config`);
+	// Any config value may be a path (core.worktree, format.outputDirectory, trace2.eventTarget); a --config-env value is what its variable holds.
+	const configPaths = [...settings.map(s => s.slice(s.indexOf("=") + 1)), ...configEnv.map(s => env[s.slice(s.indexOf("=") + 1)] ?? "")];
+	const writes = checkGitFolder(sub, rest, [...named, ...configPaths], dir, policy) ?? checkSubcommandWrites(sub, rest, dir, policy);
 	if (writes !== null) return writes;
-	const risky = settings.find(s => RISKY_CONFIG.test(s));
-	if ((sub === "push" || sub === "commit" || sub === "merge") && risky !== undefined) return refused(`git -c ${risky} with ${sub} is refused: hooks and remotes stay as configured`);
 	// The push check reads the repo the shim runs in; --git-dir would point the push at another one.
 	if (sub === "push" && args.slice(0, i).some(a => a === "--git-dir" || a.startsWith("--git-dir="))) return refused("git push --git-dir is refused: push from the repo itself");
 	if (sub === "push") return checkPush(rest, policy);

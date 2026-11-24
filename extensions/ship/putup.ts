@@ -95,10 +95,17 @@ async function currentBranch(run: RunGit): Promise<string> {
 	return head.out.trim();
 }
 
+/** A branch name origin may advertise and put-up may pass to git: no space, control character or `~^:?*[\`, and no leading `-`. */
+const BRANCH_NAME = /^(?!-)[^\s~^:?*[\\\x00-\x1f\x7f]+$/;
+
 async function defaultBranch(run: RunGit): Promise<string> {
 	const head = await run("symbolic-ref", "-q", "refs/remotes/origin/HEAD");
-	const name = head.code === 0 ? head.out.trim().replace(/^refs\/remotes\/origin\//, "") : "";
-	return name || no("the default branch is unknown because origin/HEAD is not set here; run `git remote set-head origin --auto` and try again");
+	const known = head.code === 0 ? head.out.trim().replace(/^refs\/remotes\/origin\//, "") : "";
+	if (known) return known;
+	// A single-branch or shallow clone never fetched the default branch, so origin/HEAD isn't set and `git remote set-head origin --auto` has nothing to point at: origin names it.
+	const asked = await run("ls-remote", "--symref", "origin", "HEAD");
+	const named = asked.code === 0 ? /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(asked.out)?.[1] : undefined;
+	return named !== undefined && BRANCH_NAME.test(named) ? named : no("the default branch is unknown because origin/HEAD is not set here and origin did not name it; run `git remote set-head origin --auto` and try again");
 }
 
 const COMMIT_TYPES = ["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"];
@@ -127,16 +134,31 @@ function rejectSecrets(paths: string[], where: string): void {
 	if (secrets.length > 0) no(`secret-looking files ${where}: ${listed(secrets)}. Take them out first, then run /ship again`);
 }
 
-/** Files the branch's own commits add or change, deletions aside: a secret removed again still sits in the pushed history. */
-async function committedFiles(run: RunGit, branch: string, base: string): Promise<string[]> {
-	const log = await run("log", "-z", "--name-only", "--format=", "--diff-filter=d", `refs/remotes/origin/${base}..HEAD`);
+/**
+ * What the branch is compared with: the base's remote-tracking ref or, when this checkout has none, the commit that
+ * `git fetch origin <base>` brings. A plain `git fetch origin` leaves the default branch out of a single-branch or
+ * shallow clone, and fetching it by name makes no tracking ref there; the fence allows that fetch too, which a
+ * `<base>:refs/remotes/origin/<base>` refspec is not.
+ */
+async function baseTip(run: RunGit, branch: string, base: string): Promise<string> {
+	const tracking = `refs/remotes/origin/${base}`;
+	if ((await run("rev-parse", "--verify", "--quiet", `${tracking}^{commit}`)).code === 0) return tracking;
+	const fetched = await run("fetch", "origin", `refs/heads/${base}`);
+	// FETCH_HEAD holds what that one fetch brought; the commit id outlives the next fetch.
+	const tip = fetched.code === 0 ? (await run("rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}")).out.trim() : "";
+	return tip || no(`can't compare ${branch} with origin/${base}: this checkout has no ${tracking}, and \`git fetch origin ${base}\` did not bring it: ${brief(fetched)}`);
+}
+
+/** Files the branch's own commits add or change, deletions aside: a secret removed again still sits in the pushed history. `from` is what `baseTip` found. */
+async function committedFiles(run: RunGit, branch: string, base: string, from: string): Promise<string[]> {
+	const log = await run("log", "-z", "--name-only", "--format=", "--diff-filter=d", `${from}..HEAD`);
 	if (log.code !== 0) no(`can't compare ${branch} with origin/${base} (git fetch origin may help): ${brief(log)}`);
 	return log.out.split("\0").filter(Boolean);
 }
 
 /** `<short sha> <subject>` of each commit on the branch beyond the base, oldest first. */
-async function commitsAhead(run: RunGit, base: string): Promise<string[]> {
-	const log = await run("log", "--reverse", "--format=%h %s", `refs/remotes/origin/${base}..HEAD`);
+async function commitsAhead(run: RunGit, base: string, from: string): Promise<string[]> {
+	const log = await run("log", "--reverse", "--format=%h %s", `${from}..HEAD`);
 	if (log.code !== 0) no(`can't list the commits beyond origin/${base}: ${brief(log)}`);
 	return log.out.split("\n").filter(Boolean);
 }
@@ -278,11 +300,12 @@ async function put(root: string, deps: PutUpDeps): Promise<PrRef> {
 		if (held) no(held);
 	}
 
-	rejectSecrets(await committedFiles(run, branch, base), `are already committed on ${branch}`);
+	const from = await baseTip(run, branch, base);
+	rejectSecrets(await committedFiles(run, branch, base, from), `are already committed on ${branch}`);
 	const { commit, title } = wording(branch);
 	// With a PR already open the tree is not put-up's to commit: /ship commits only the files it changed itself (AC8).
 	const committed = existing ? false : await commitWork(run, commit, confirm);
-	const commits = existing ? [] : await commitsAhead(run, base);
+	const commits = existing ? [] : await commitsAhead(run, base, from);
 	if (!existing && commits.length === 0) no(`${branch} has no commits beyond ${base}, so there is nothing to put up`);
 
 	const push = await run("push", "origin", branch);
