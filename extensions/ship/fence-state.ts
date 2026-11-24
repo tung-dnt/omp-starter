@@ -6,7 +6,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isProtectedPath, type PushPolicy, refused } from "./fence";
+import { type GitPolicy, isProtectedPath, refused, retryable } from "./fence";
 
 export const FENCE_ENV = "OMP_SHIP_FENCE";
 export const SHIM_DIR = path.resolve(import.meta.dir, "..", "..", "bin", "ship-fence");
@@ -14,11 +14,10 @@ export const SHIM_DIR = path.resolve(import.meta.dir, "..", "..", "bin", "ship-f
 export const FENCE_SOURCE = import.meta.dir;
 export const stateDir = (): string => path.join(os.homedir(), ".omp", "agent", "ship", "fence");
 
-export interface FenceState extends PushPolicy {
+export interface FenceState extends GitPolicy {
 	armed: boolean;
-	/** The checkout /ship works in, and its git folders (a linked worktree's hooks live in the main repo's). */
+	/** The checkout /ship works in; its git folders are `gitDirs`. */
 	root: string | null;
-	gitDirs: string[];
 	/** Protected files as the branch held them when /ship armed: path to blob id. A push may keep these. */
 	snapshot: Record<string, string>;
 	/** What the shims run their check with: bun, or omp's own binary with BUN_BE_BUN=1. */
@@ -90,10 +89,13 @@ export function installFence(): void {
 
 export type Git = (dir: string, ...args: string[]) => { code: number; out: string };
 
-/** git found on PATH past the shims, so the fence's own reads don't go through it. */
+/**
+ * git found on PATH past the shims, so the fence's own reads don't go through it. Replacement refs are off: the session
+ * can plant them with update-ref, and a push sends the real objects, not the ones a replacement shows.
+ */
 export const realGit: Git = (dir, ...args) => {
 	const git = Bun.which("git", { PATH: pathEntries().join(path.delimiter) }) ?? "git";
-	const p = Bun.spawnSync([git, "-C", dir, ...args], { stdout: "pipe", stderr: "pipe" });
+	const p = Bun.spawnSync([git, "--no-replace-objects", "-C", dir, ...args], { stdout: "pipe", stderr: "pipe" });
 	return { code: p.exitCode ?? 1, out: p.stdout.toString() };
 };
 
@@ -133,21 +135,48 @@ const blobAt = (dir: string, ref: string, file: string, git: Git): string => {
 	return r.code === 0 ? r.out.trim() : "";
 };
 
+/** What origin holds now, asked of origin itself: a remote-tracking ref only says what some fetch saw, and the session can move one. Null when origin can't be read. */
+function originTips(dir: string, branch: string, git: Git): { branch?: string; base?: string } | null {
+	const listing = git(dir, "ls-remote", "origin", `refs/heads/${branch}`, "HEAD");
+	if (listing.code !== 0) return null;
+	const tips: { branch?: string; base?: string } = {};
+	for (const line of listing.out.split("\n")) {
+		const [oid, ref] = line.split("\t");
+		if (!oid) continue;
+		// ls-remote matches names by their tail, so only the exact refs count.
+		if (ref === `refs/heads/${branch}`) tips.branch = oid;
+		else if (ref === "HEAD") tips.base = oid;
+	}
+	return tips;
+}
+
 /**
  * Why a push that the argv checks allowed still can't go: it carries a change to a protected file that is neither how
- * the branch held it when /ship armed nor how the base holds it now (what merging the base brings is fine).
+ * the branch held it when /ship armed nor how origin's default branch holds it now (what merging the base brings is
+ * fine). Origin is asked for its tips, and the push is compared with its watched branch, or with where the push's
+ * history leaves the default branch when origin has no such branch yet.
  */
 export function checkPushContent(dir: string, sources: string[], state: FenceState, git: Git = realGit): string | null {
-	const base = "refs/remotes/origin/HEAD";
+	if (state.pushBranch === null) return refused("this session pushes nothing");
+	const tips = originTips(dir, state.pushBranch, git);
+	if (tips === null) return retryable("can't read origin (git ls-remote origin failed), so can't tell what the push changes");
+	for (const oid of [tips.branch, tips.base]) {
+		if (oid !== undefined && git(dir, "cat-file", "-e", `${oid}^{commit}`).code !== 0) return retryable(`origin holds ${oid.slice(0, 9)}, which this checkout lacks, so can't tell what the push changes: fetch origin first`);
+	}
 	for (const src of sources) {
 		const tip = git(dir, "rev-parse", "--verify", "--quiet", `${src}^{commit}`).out.trim();
 		if (!tip) return refused(`can't read what ${src} would push`);
-		const remote = git(dir, "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${state.pushBranch}`).out.trim();
-		const from = remote || git(dir, "merge-base", tip, base).out.trim();
-		const changed = from ? git(dir, "diff", "--name-only", "-z", from, tip).out.split("\0") : Object.keys(protectedBlobs(dir, tip, git));
+		const from = tips.branch ?? (tips.base === undefined ? "" : git(dir, "merge-base", tip, tips.base).out.trim());
+		let changed: string[];
+		if (from) {
+			// A move is the old name's deletion and the new name's addition: --name-only alone would show only the new one.
+			const diff = git(dir, "diff-tree", "-r", "--no-renames", "--name-only", "-z", from, tip);
+			if (diff.code !== 0) return retryable(`can't compare what ${src} would push with what origin holds: fetch origin first`);
+			changed = diff.out.split("\0");
+		} else changed = Object.keys(protectedBlobs(dir, tip, git));
 		const held = changed.filter(file => file && isProtectedPath(file)).filter(file => {
 			const pushed = blobAt(dir, tip, file, git);
-			return pushed !== (state.snapshot[file] ?? "") && pushed !== blobAt(dir, base, file, git);
+			return pushed !== (state.snapshot[file] ?? "") && pushed !== (tips.base === undefined ? undefined : blobAt(dir, tips.base, file, git));
 		});
 		if (held.length > 0) return refused(`the push would change ${held.join(", ")}, which /ship never edits; leave that change to the user`);
 	}

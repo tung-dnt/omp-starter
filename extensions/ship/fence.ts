@@ -1,18 +1,25 @@
 // The /ship fence, part 1: what a fenced session's gh and git may do, judged from their argv, plus the comment rules
-// and the repo files /ship never edits. Pure. fence-state.ts arms the fence and checks what a push carries;
-// fence-tools.ts judges omp tool calls. Each check returns null (allowed) or the reason, which the model reads.
+// and the repo files /ship never edits. Argv alone decides, apart from where the paths it names lead. fence-state.ts
+// arms the fence and checks what a push carries; fence-tools.ts judges omp tool calls. Each check returns null
+// (allowed) or the reason, which the model reads.
+import * as fs from "node:fs";
 import * as path from "node:path";
 
-/** `pushBranch` null: the session pushes nothing. */
-export interface PushPolicy {
+/** What a fenced session's git is held to. */
+export interface GitPolicy {
+	/** The one branch the session pushes to origin; null: it pushes nothing. */
 	pushBranch: string | null;
+	/** The repo's git folders, absolute: hooks, config and refs live there (a linked worktree's hooks live in the main repo's). */
+	gitDirs: string[];
 }
-type Policy = PushPolicy;
 
 /** First line of every comment or reply /ship writes, so the watch can tell its own words apart. */
 export const MARKER = "<!-- omp-ship -->";
 
 export const refused = (what: string) => `ship fence: ${what}. This is final while /ship runs: tell the user instead of finding another way.`;
+
+/** A refusal that lifts once the checkout or the connection is in order: what to do, then try again. */
+export const retryable = (what: string) => `ship fence: ${what}; then try again.`;
 
 /** Repo files /ship never edits: CI and repo settings, review rules, agent instructions, secrets, hooks. Case-blind, as macOS is. */
 const PROTECTED = [
@@ -30,6 +37,20 @@ const PROTECTED = [
 
 /** `rel` is a repo-relative path with `/` separators. */
 export const isProtectedPath = (rel: string): boolean => PROTECTED.some(r => r.test(rel));
+
+/**
+ * `p` resolved through symlinks: its nearest existing ancestor's real path, plus the part that doesn't exist yet. The
+ * real path comes from the OS, which resolves a `..` after a symlink to the link's target's parent, as git's writes do.
+ */
+export function canonical(p: string): string {
+	let dir = p;
+	const rest: string[] = [];
+	while (!fs.existsSync(dir) && path.dirname(dir) !== dir) {
+		rest.unshift(path.basename(dir));
+		dir = path.dirname(dir);
+	}
+	return path.join(fs.realpathSync.native(dir), ...rest);
+}
 
 type Names = Record<string, true>;
 const names = (...list: string[]): Names => Object.fromEntries(list.map(n => [n, true]));
@@ -214,11 +235,14 @@ const PUSH_OK_LONG = names(
 );
 const PUSH_OK_SHORT = names("-u", "-q", "-v", "-n", "-4", "-6");
 
+/** `p` from `dir`, walked as the kernel does: a `..` after a symlink leaves the link's target, which `path.resolve` can't know. */
+const walk = (dir: string, p: string): string => canonical(path.isAbsolute(p) ? p : `${dir}${path.sep}${p}`);
+
 /** The folder a git argv runs in: its `-C` options applied to `cwd`. */
 export function gitWorkDir(args: string[], cwd: string): string {
 	let dir = cwd;
 	for (let i = 0; i < args.length && (args[i] as string).startsWith("-"); i++) {
-		if (args[i] === "-C") dir = path.resolve(dir, args[++i] ?? "");
+		if (args[i] === "-C") dir = walk(dir, args[++i] ?? "");
 		else if (isIn(GIT_GLOBAL_VALUE, args[i] as string)) i++;
 	}
 	return dir;
@@ -230,7 +254,7 @@ export function pushSources(pushArgs: string[]): string[] {
 	return refspecs.map(spec => (spec.includes(":") ? spec.slice(0, spec.indexOf(":")) : spec).replace(/^\+/, "") || "HEAD");
 }
 
-function checkPush(args: string[], policy: Policy): string | null {
+function checkPush(args: string[], policy: GitPolicy): string | null {
 	if (policy.pushBranch === null) return refused("this session pushes nothing");
 	const only = `git push origin ${policy.pushBranch}`;
 	const f = parse(args, PUSH_VALUE_FLAGS);
@@ -266,8 +290,61 @@ function checkConfig(args: string[]): string | null {
 	return writes && RISKY_CONFIG.test(key) ? refused(`git config ${key} is refused`) : null;
 }
 
+/** Whether `p`, absolute, is or lies inside a git folder: any `.git`, or one of `gitDirs`. Case-blind, as macOS is. */
+function inGitFolder(p: string, gitDirs: string[]): boolean {
+	const low = p.toLowerCase();
+	return low.split(path.sep).includes(".git") || gitDirs.some(dir => low === dir.toLowerCase() || low.startsWith(`${dir.toLowerCase()}${path.sep}`));
+}
+
+/** The word of `argv` that names a path inside a git folder: as written, as the value of `--opt=value` or `key=value`, or glued to a short option (`-ofile`). Relative paths run from `dir`; symlinks are followed. */
+function gitFolderWord(argv: string[], dir: string, gitDirs: string[]): string | undefined {
+	return argv.find(word => {
+		const paths = [word];
+		if (word.includes("=")) paths.push(word.slice(word.indexOf("=") + 1));
+		if (/^-[^-]/.test(word)) paths.push(word.slice(2));
+		return paths.some(p => p !== "" && [path.resolve(dir, p), walk(dir, p)].some(form => inGitFolder(form, gitDirs)));
+	});
+}
+
+/** Why a git argv would write into a git folder, where hooks, config and refs live: it runs in one, or a word of it names a path inside one. */
+function checkGitFolder(args: string[], dir: string, policy: GitPolicy): string | null {
+	if (inGitFolder(dir, policy.gitDirs)) return refused(`git runs in the work tree, not in the git folder ${dir}`);
+	const word = gitFolderWord(args, dir, policy.gitDirs);
+	return word === undefined ? null : refused(`git names ${word}, a path inside a git folder, where hooks and config live`);
+}
+
+/** Refs only a fetch from the remote may set: remote-tracking refs, which a push check could be fooled by, and replacement refs, which change what git reads. */
+const FETCH_ONLY_REFS = /^(?:(?:refs\/)?remotes|refs\/replace)\//i;
+/** git init's options that copy files into the git folder or move it. */
+const INIT_COPYING = ["--template", "--separate-git-dir"];
+
+/** Why a subcommand's own options would write where /ship may not send it: files into the git folder, or a ref only a fetch from the remote may set. */
+function checkSubcommandWrites(sub: string, rest: string[]): string | null {
+	if (sub === "init") {
+		// Abbreviations count: git reads `--templ` as `--template`.
+		const copying = [...parse(rest, {}).long.keys()].find(flag => flag.length > 2 && INIT_COPYING.some(full => full.startsWith(flag)));
+		if (copying !== undefined) return refused(`git init ${copying} is refused: it copies files into the git folder, or moves it`);
+	}
+	if (sub === "update-ref") {
+		const f = parse(rest, names("-m"));
+		// `--stdin` takes its refs from input the fence can't read.
+		const flag = [...f.long.keys()].find(name => name.startsWith("--") && name !== "--no-deref" && name !== "--create-reflog");
+		if (flag !== undefined) return refused(`git update-ref ${flag} is refused: name the ref on the command line`);
+		const ref = f.positionals[0] ?? "";
+		if (FETCH_ONLY_REFS.test(ref)) return refused(`git update-ref ${ref} is refused: remote-tracking and replacement refs are set by a fetch from the remote alone`);
+	}
+	if (sub === "fetch" || sub === "pull") {
+		for (const word of rest) {
+			// A refspec `src:dst`, as a word or as an option's value (`--refmap=src:dst`).
+			const spec = word.startsWith("--") ? word.slice(word.indexOf("=") + 1) : word;
+			if (spec.includes(":") && FETCH_ONLY_REFS.test(spec.slice(spec.indexOf(":") + 1))) return refused(`git ${sub} ${word} is refused: remote-tracking and replacement refs are set by a fetch from the remote alone`);
+		}
+	}
+	return null;
+}
+
 /** `args` is git's argv without the program name. */
-export function checkGit(args: string[], policy: Policy): string | null {
+export function checkGit(args: string[], policy: GitPolicy, cwd: string): string | null {
 	let i = 0;
 	const settings: string[] = [];
 	for (; i < args.length; i++) {
@@ -281,8 +358,12 @@ export function checkGit(args: string[], policy: Policy): string | null {
 	const sub = args[i] ?? "";
 	const rest = args.slice(i + 1);
 	if (sub !== "" && !isIn(GIT_COMMANDS, sub)) return refused(`git ${sub} is not a git command the fence allows`);
+	const writes = checkGitFolder(args, gitWorkDir(args, cwd), policy) ?? checkSubcommandWrites(sub, rest);
+	if (writes !== null) return writes;
 	const risky = settings.find(s => RISKY_CONFIG.test(s));
 	if ((sub === "push" || sub === "commit" || sub === "merge") && risky !== undefined) return refused(`git -c ${risky} with ${sub} is refused: hooks and remotes stay as configured`);
+	// The push check reads the repo the shim runs in; --git-dir would point the push at another one.
+	if (sub === "push" && args.slice(0, i).some(a => a === "--git-dir" || a.startsWith("--git-dir="))) return refused("git push --git-dir is refused: push from the repo itself");
 	if (sub === "push") return checkPush(rest, policy);
 	if ((sub === "commit" || sub === "merge") && (rest.includes("--no-verify") || (sub === "commit" && rest.some(a => /^-[a-zA-Z]*n/.test(a) && !a.startsWith("--"))))) return refused(`${sub} keeps its hooks: drop --no-verify / -n`);
 	if (sub === "remote" && ["add", "set-url", "rename", "remove", "rm"].includes(rest[0] ?? "")) return refused(`git remote ${rest[0]} is refused`);

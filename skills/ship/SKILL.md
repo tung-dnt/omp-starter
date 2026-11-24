@@ -44,6 +44,7 @@ The snapshot holds only comments from the user, people with write access, and th
 - One push per pass. Hooks stay on: never `--no-verify`.
 - At most 3 pushes for one cause (one failing check, the conflict, one comment). The pass message lists the counts. At 3, stop pushing for that cause and bring it to the user.
 - Push to the PR's head branch only, without force: `git push origin <head branch>`.
+- When the fence answers "fetch origin first" it is not a refusal, only a checkout that is behind: `git fetch origin`, merge `origin/<head branch>` if the branch moved, then push again.
 
 ## Files
 

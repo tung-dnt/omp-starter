@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { checkCommentBody, checkGh, checkGit, gitWorkDir, isProtectedPath, MARKER, type PushPolicy, pushSources } from "./fence";
+import { checkCommentBody, checkGh, checkGit, type GitPolicy, gitWorkDir, isProtectedPath, MARKER, pushSources } from "./fence";
 
-const policy: PushPolicy = { pushBranch: "feat/ship-s1" };
+const policy: GitPolicy = { pushBranch: "feat/ship-s1", gitDirs: ["/repo/.git", "/main/.git", "/data/app-gitdir"] };
 const words = (line: string) => line.split(" ").filter(Boolean);
 const gh = (line: string) => checkGh(words(line));
-const git = (line: string, p: PushPolicy = policy) => checkGit(words(line), p);
+const git = (line: string, p: GitPolicy = policy, cwd = "/repo") => checkGit(words(line), p, cwd);
 const comment = (text: string) => `${MARKER}\n${text}`;
 
 describe("gh", () => {
@@ -58,7 +58,9 @@ describe("git", () => {
 		for (const line of ["push --force origin feat/ship-s1", "push -uf origin feat/ship-s1", "push --force-with-lease origin feat/ship-s1", "push origin +feat/ship-s1", "push origin :feat/ship-s1", "push --delete origin feat/ship-s1", "push origin main", "push origin feat/ship-s1:main", "push --tags origin feat/ship-s1", "push -o merge_request.merge_when_pipeline_succeeds origin feat/ship-s1", "push --no-verify origin feat/ship-s1", "push upstream feat/ship-s1", "push", "-c core.hooksPath=/dev/null push origin feat/ship-s1"]) {
 			expect(git(line)).toContain("ship fence");
 		}
-		expect(git("push origin feat/ship-s1", { pushBranch: null })).toContain("pushes nothing");
+		expect(git("push origin feat/ship-s1", { ...policy, pushBranch: null })).toContain("pushes nothing");
+		for (const line of ["--git-dir=/tmp/y/gd push origin feat/ship-s1", "--git-dir /tmp/y/gd push origin feat/ship-s1", "-C /tmp/wt --git-dir=x push origin feat/ship-s1"]) expect(git(line)).toContain("--git-dir");
+		expect(git("--git-dir=/tmp/y/gitdir status")).toBeNull();
 	});
 
 	test("commits keep their hooks and origin stays where it points", () => {
@@ -71,6 +73,55 @@ describe("git", () => {
 
 	test("stock read and local commands run while armed", () => {
 		for (const line of ["archive HEAD", "archive --format=tar HEAD -o /tmp/x.tar", "ls-tree -r HEAD", "diff-index HEAD", "update-ref refs/x HEAD", "write-tree", "whatchanged"]) expect(git(line)).toBeNull();
+	});
+
+	test("git that would write into a git folder is refused, however the path is spelled", () => {
+		for (const line of [
+			"diff --output=.git/hooks/pre-commit HEAD~1", "diff --output .git/hooks/pre-commit HEAD~1", "log --output=./.git/hooks/x",
+			"archive -o .git/hooks/pre-commit HEAD", "archive -o.git/hooks/pre-commit HEAD", "archive --output=.git/hooks/pre-commit HEAD",
+			"checkout-index --prefix=.git/hooks/ -a", "bundle create .git/hooks/x HEAD", "format-patch -o .git/hooks HEAD~1", "merge-file .git/hooks/x a b",
+			"bundle create sub/../.git/hooks/x HEAD", "archive -o .GIT/hooks/x HEAD", "archive -o /repo/.git/hooks/x HEAD",
+			"archive -o /main/.git/hooks/x HEAD", "archive -o /elsewhere/clone/.git/hooks/x HEAD", "archive -o /data/app-gitdir/hooks/x HEAD",
+			"-C .git/hooks status", "-C sub archive -o ../.git/hooks/x HEAD", "--work-tree=.git/hooks checkout HEAD -- src/a.ts", "--work-tree .git/hooks checkout HEAD -- src/a.ts",
+			"-c core.worktree=.git/hooks checkout HEAD -- src/a.ts",
+		]) {
+			expect(git(line)).toContain("git folder");
+		}
+		expect(git("archive -o x HEAD", policy, "/repo/.git/hooks")).toContain("git folder");
+		expect(git("status", policy, "/data/app-gitdir")).toContain("git folder");
+		for (const line of ["init --template=/tmp/tpl", "init --templ /tmp/tpl", "init --separate-git-dir=/tmp/gd new"]) expect(git(line)).toContain("git init");
+		for (const line of [
+			"archive --format=tar HEAD -o /tmp/x.tar", "diff --output=/tmp/d.patch HEAD~1", "checkout-index --prefix=/tmp/out/ -a", "bundle create /tmp/x.bundle HEAD",
+			"format-patch -o /tmp/patches HEAD~1", "add .gitignore", "diff -- .github/workflows/ci.yml", "log -- .gitattributes", "-C sub archive -o out.tar HEAD",
+			"init", "init --bare /tmp/new.git", "init -q /tmp/new",
+		]) {
+			expect(git(line)).toBeNull();
+		}
+		expect(checkGit(["commit", "-m", ".gitignore: add build"], policy, "/repo")).toBeNull();
+		expect(checkGit(["commit", "-m", "docs: why .git stays out of the tree"], policy, "/repo")).toBeNull();
+	});
+
+	test("update-ref, fetch and pull leave remote-tracking and replacement refs to a plain fetch from the remote", () => {
+		for (const line of [
+			"update-ref refs/remotes/origin/feat/ship-s1 HEAD", "update-ref -d refs/remotes/origin/main", "update-ref -m why refs/remotes/origin/HEAD HEAD",
+			"update-ref --no-deref refs/remotes/origin/x HEAD", "update-ref refs/REMOTES/origin/x HEAD", "update-ref refs/replace/0123abc HEAD", "update-ref remotes/origin/x HEAD",
+			"update-ref --stdin", "update-ref -z --stdin", "update-ref --stdi",
+			"fetch . HEAD:refs/remotes/origin/feat/ship-s1", "fetch . +HEAD:refs/remotes/origin/main", "fetch origin main:refs/remotes/origin/feat/ship-s1",
+			"fetch origin main:remotes/origin/x", "fetch . refs/heads/*:refs/remotes/origin/*", "fetch . x:refs/replace/y",
+			"fetch --refmap=+refs/heads/*:refs/remotes/origin/* . refs/heads/*", "fetch --refmap +refs/heads/*:refs/remotes/origin/* . x",
+			"pull . HEAD:refs/remotes/origin/main", "-C /tmp/wt fetch . HEAD:refs/remotes/origin/x",
+		]) {
+			expect(git(line)).toContain("ship fence");
+		}
+		expect(git("update-ref refs/remotes/origin/main HEAD")).toContain("refs/remotes/origin/main");
+		expect(git("fetch . HEAD:refs/remotes/origin/main")).toContain("refs/remotes/origin/main");
+		for (const line of [
+			"update-ref refs/heads/x HEAD", "update-ref refs/x HEAD", "update-ref -d refs/heads/x", "update-ref -m why refs/heads/x HEAD", "update-ref HEAD HEAD~1", "update-ref --no-deref HEAD refs/heads/x",
+			"fetch", "fetch origin", "fetch origin main", "fetch --all --prune", "fetch -p origin", "fetch --depth 5 origin main", "fetch origin main:other", "fetch origin refs/heads/main",
+			"pull origin main", "pull --no-rebase origin main", "remote update", "remote set-head origin --auto",
+		]) {
+			expect(git(line)).toBeNull();
+		}
 	});
 
 	test("aliases, hook-skipping merges and config that redirects a push are refused", () => {
