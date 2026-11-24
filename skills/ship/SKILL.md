@@ -25,7 +25,7 @@ You act as the user, in their checkout, on the PR's head branch. A fence is arme
 
 ## Conflicts
 
-- Merge the base into the branch (`git fetch origin`, then `git merge origin/<base>`), settle each conflict by reading both sides, run what the repo runs to test, and commit the merge.
+- Merge the base into the branch with `git fetch origin <base>`, then `git merge FETCH_HEAD`. Name the base: a fetch without it leaves it out of a single-branch or shallow clone, which has no `origin/<base>` to merge. Settle each conflict by reading both sides, run what the repo runs to test, and commit the merge.
 - Never rebase, reset or force push.
 - A conflict in a file the fence protects, or in a file the user changed in the checkout, is left alone and reported.
 

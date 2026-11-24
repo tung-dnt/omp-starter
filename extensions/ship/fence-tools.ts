@@ -85,7 +85,7 @@ function commandProblem(words: string[]): string | null {
 	const program = words[k] ?? "";
 	if (Object.hasOwn(SETTERS, program) && words.slice(k + 1).some(w => FENCE_VARS.test(assignment(w) ?? w))) return "PATH, the fence's variables and git's config variables stay as they are";
 	// `/usr/bin/git`, `./git`, `~/.local/bin/gh`, `/usr/bin/g?t`, or a program computed by `$(which -a git …)`.
-	if (program.includes("/") && /^(?:gh|git|gh-blinx)$|[*?[]/.test(path.basename(program))) return "call gh and git by name, not by path";
+	if (program.includes("/") && /^(?:gh|git|git-lfs|gh-blinx)$|[*?[]/.test(path.basename(program))) return "call gh, git and git-lfs by name, not by path";
 	if (/^[$`]/.test(program) && /\b(?:git|gh)\b/.test(words.join(" "))) return "call gh and git by name, not by a computed path";
 	return null;
 }
@@ -99,7 +99,7 @@ function checkText(toolName: string, text: unknown): string | null {
 	if (/\bauth\s+token\b/.test(text)) return refused("the GitHub token stays inside gh");
 	if (toolName === "eval") {
 		if (/environ\s*\[\s*["'](?:PATH|OMP_SHIP_FENCE)|process\.env\.(?:PATH|OMP_SHIP_FENCE)\s*=|OMP_SHIP_FENCE/.test(text)) return refused("PATH and the fence's variables stay as they are");
-		if (/["'`]\/[^"'`\s]*\/(?:gh|git|gh-blinx)["'`]/.test(text)) return refused("call gh and git by name, not by path");
+		if (/["'`]\/[^"'`\s]*\/(?:gh|git|git-lfs|gh-blinx)["'`]/.test(text)) return refused("call gh, git and git-lfs by name, not by path");
 		return null;
 	}
 	for (const { words } of simpleCommands(text)) {

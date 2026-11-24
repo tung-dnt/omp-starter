@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { checkCommentBody, checkGh, checkGit, type GitPolicy, gitWorkDir, isProtectedPath, MARKER, pushSources } from "./fence";
 
 const policy: GitPolicy = { pushBranch: "feat/ship-s1", gitDirs: ["/repo/.git", "/main/.git", "/data/app-gitdir"] };
@@ -169,6 +172,161 @@ describe("git", () => {
 		expect(git("merge --no-verify origin/main")).toContain("hooks");
 		expect(git("-c core.hooksPath=/tmp/h merge origin/main")).toContain("hooks and remotes");
 		expect(git("--version")).toBeNull();
+	});
+
+	/** Keys that make git run a program, read more config, or move hooks, remotes and credentials. */
+	const RISKY_KEYS = [
+		"core.hooksPath", "core.sshCommand", "core.fsmonitor", "core.editor", "core.pager", "core.askpass", "core.gitProxy", "core.alternateRefsCommand", "sequence.editor",
+		"gpg.program", "gpg.openpgp.program", "gpg.x509.program", "gpg.ssh.program", "gpg.ssh.defaultKeyCommand",
+		"diff.external", "diff.word.textconv", "diff.word.command", "diff.my.driver.textconv", "filter.lfs.clean", "filter.lfs.smudge", "filter.lfs.process", "merge.ours.driver",
+		"include.path", "includeIf.gitdir:/x/.path", "credential.helper", "credential.https://github.com.helper", "uploadpack.packObjectsHook", "protocol.ext.allow", "protocol.allow",
+		"remote.origin.url", "remote.origin.pushurl", "url.git@github.com:.insteadOf", "alias.p", "branch.main.remote", "branch.main.pushRemote",
+		"pager.log", "man.viewer", "browser.x.cmd", "web.browser", "help.browser", "submodule.x.update", "lfs.extension.x.clean", "lfs.customtransfer.x.path",
+	];
+
+	test("config that runs a program or reads more config is refused when written and when set for one command, for every subcommand", () => {
+		for (const key of RISKY_KEYS) {
+			for (const line of [
+				`-c ${key}=x status`, `-c ${key.toUpperCase()}=x log`, `-c ${key} status`, `--config-env=${key}=VAR status`, `--config-env ${key}=VAR fetch origin`, `-c user.name=x --config-env=${key}=VAR diff`,
+				`config ${key} x`, `config --add ${key} x`, `config --global ${key} x`, `config --replace-all ${key} x`, `config --unset ${key}`, `config --unset-all ${key}`,
+				`config set ${key} x`, `config unset ${key}`, `config --file /tmp/x.cfg ${key} x`, `config -f /tmp/x.cfg ${key} x`, `config ${key.toUpperCase()} x`,
+			]) {
+				expect(git(line) ?? `${line}: allowed`, line).toContain("ship fence");
+			}
+		}
+		expect(git("-c core.hooksPath=/tmp/h merge origin/main")).toContain("hooks and remotes");
+	});
+
+	test("reads of those keys, and config that runs nothing, still go", () => {
+		for (const key of RISKY_KEYS) {
+			for (const line of [`config --get ${key}`, `config ${key}`, `config get ${key}`, `config --get-all ${key}`, `config --show-origin --get ${key}`, `config --global --get ${key}`]) {
+				expect(git(line), line).toBeNull();
+			}
+		}
+		for (const line of [
+			"config --list", "config -l", "config list", "config --list --show-origin", "config --get-regexp ^core\\.", "config --get-regexp remote\\..*\\.url", "config user.name", "config --default x --get user.name",
+			"-c user.name=x -c user.email=x@y commit -m msg", "-c commit.gpgsign=false commit -m msg", "-c core.quotepath=false status", "-c core.autocrlf=false status", "-c color.ui=never diff", "-c advice.detachedHead=false switch x",
+			"-c core.fileMode=false status", "-c diff.renames=copies diff", "-c merge.conflictStyle=zdiff3 merge --no-edit x", "-c pull.rebase=false pull origin main",
+			"config user.name x", "config --global user.email a@b.c", "config pull.rebase false", "config core.autocrlf false", "config --local core.fileMode false", "config set merge.ff false",
+		]) {
+			expect(git(line), line).toBeNull();
+		}
+	});
+
+	test("git config can't be steered past the key check by an abbreviated option, an editor or a renamed section", () => {
+		for (const line of [
+			// Options git reads by any unambiguous prefix move the key to another position.
+			"config --typ path core.fsmonitor x", "config --ty path core.fsmonitor x", "config --repl core.fsmonitor x", "config --ad core.fsmonitor x", "config -f /tmp/x.cfg --typ path core.fsmonitor x", "config --fil /tmp/x.cfg core.fsmonitor x",
+			"config --default y --typ path core.fsmonitor x",
+			// The editor opens the repo's config for anything.
+			"config --edit", "config -e", "config edit", "config --edi", "config --global -e", "config --edit --file /tmp/x.cfg",
+			// A harmless key's section renamed to a risky one carries its keys along.
+			"config --rename-section foo core", "config rename-section foo core", "config --rename foo core", "config --rename-section --global foo include",
+		]) {
+			expect(git(line) ?? `${line}: allowed`, line).toContain("ship fence");
+		}
+		expect(git("config --remove-section foo")).toBeNull();
+	});
+
+	test("--config-env values are judged as the paths they hold", () => {
+		expect(checkGit(words("--config-env=core.worktree=V checkout HEAD -- src/a.ts"), policy, "/repo", { V: ".git/hooks" })).toContain("git folder");
+		expect(checkGit(words("--config-env=core.worktree=V checkout HEAD -- src/a.ts"), policy, "/repo", { V: "/tmp/elsewhere" })).toBeNull();
+		expect(checkGit(words("--config-env=core.worktree=V checkout HEAD -- src/a.ts"), policy, "/repo", {})).toBeNull();
+	});
+
+	test("config the environment sets for every command is judged like -c: GIT_CONFIG_COUNT with its keys and values, and GIT_CONFIG_PARAMETERS", () => {
+		const status = (env: Record<string, string | undefined>) => checkGit(words("status"), policy, "/repo", env);
+		for (const env of [
+			{ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.fsmonitor", GIT_CONFIG_VALUE_0: "/tmp/p" },
+			{ GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "user.name", GIT_CONFIG_VALUE_0: "x", GIT_CONFIG_KEY_1: "Include.Path", GIT_CONFIG_VALUE_1: "/tmp/i.cfg" },
+			{ GIT_CONFIG_PARAMETERS: "'core.fsmonitor=/tmp/p'" },
+			{ GIT_CONFIG_PARAMETERS: "'user.name'='x' 'core.pager'='/tmp/p'" },
+			{ GIT_CONFIG_PARAMETERS: "'credential.helper='" },
+		]) {
+			expect(status(env) ?? `${JSON.stringify(env)}: allowed`).toContain("ship fence");
+		}
+		for (const env of [
+			{}, { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "user.name", GIT_CONFIG_VALUE_0: "x" }, { GIT_CONFIG_COUNT: "x" }, { GIT_CONFIG_COUNT: "-1", GIT_CONFIG_KEY_0: "core.fsmonitor" },
+			{ GIT_CONFIG_KEY_0: "core.fsmonitor", GIT_CONFIG_VALUE_0: "/tmp/p" }, { GIT_CONFIG_PARAMETERS: "'user.name=x' 'color.ui'='never'" },
+		]) {
+			expect(status(env), JSON.stringify(env)).toBeNull();
+		}
+		// Their values are paths like any other: this one points core.worktree into a git folder.
+		expect(status({ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.worktree", GIT_CONFIG_VALUE_0: ".git/hooks" })).toContain("git folder");
+	});
+
+	test("--exec-path=<dir> moves git's helper programs and is refused; asking for the path is not", () => {
+		for (const line of ["--exec-path=/tmp/x status", "--exec-path=/tmp/x fetch origin", "-C /tmp --exec-path=/x status", "-c user.name=x --exec-path=/x log", "--exec-path= status"]) {
+			expect(git(line) ?? `${line}: allowed`, line).toContain("ship fence");
+		}
+		expect(git("--exec-path")).toBeNull();
+		expect(git("status")).toBeNull();
+	});
+
+	describe("apply", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fence-apply-"));
+		afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+		let n = 0;
+		/** A patch file whose headers are `headers`; returns its path. */
+		const patch = (...headers: string[]): string => {
+			const file = path.join(dir, `p${n++}.patch`);
+			fs.writeFileSync(file, `${headers.join("\n")}\n@@ -0,0 +1 @@\n+x\n`);
+			return file;
+		};
+		const named = (p: string, mode = "") => [`diff --git a/${p} b/${p}`, ...(mode ? [`new file mode ${mode}`] : []), "--- /dev/null", `+++ b/${p}`];
+
+		test("--unsafe-paths lets a patch write outside the work tree, .git included; any prefix git reads for it is refused", () => {
+			const ok = patch(...named("src/a.ts"));
+			for (const line of [`apply --unsafe-paths ${ok}`, `apply --unsafe-path ${ok}`, `apply --unsafe ${ok}`, `apply --uns ${ok}`, `apply -p0 --unsafe-paths ${ok}`, `apply ${ok} --unsafe-paths`, `-C sub apply --unsafe-paths ${ok}`, "apply --unsafe-paths -"]) {
+				expect(git(line) ?? `${line}: allowed`, line).toContain("unsafe-paths");
+			}
+			for (const line of [`apply ${ok}`, `apply --check ${ok}`, `apply --stat --summary ${ok}`, `apply -R ${ok}`, `apply --3way ${ok}`, `apply --index ${ok}`, `apply -p2 ${ok}`, `apply --whitespace=fix ${ok}`, "apply -", "apply", "apply -- --unsafe-paths"]) {
+				expect(git(line), line).toBeNull();
+			}
+		});
+
+		test("a patch that names a path inside a git folder is refused, whatever the header, quoting or strip level", () => {
+			for (const headers of [
+				named(".git/hooks/pre-commit", "100755"), named(".GIT/hooks/pre-commit"), named("sub/.git/config"), named(".git/hooks/pre-commit").slice(1),
+				["--- a/.git/hooks/x", "+++ b/.git/hooks/x"], ["--- .git/hooks/x\t2020-01-01 00:00:00", "+++ .git/hooks/x\t2020-01-01 00:00:00"],
+				["diff --git a/x b/.git/hooks/x", "rename from x", "rename to .git/hooks/x"], ["diff --git a/x b/y", "copy from x", "copy to .git/hooks/x"],
+				["diff --git a/x b/y", "rename from .git/hooks/x", "rename to y"],
+				// C-style quoting spells a character as an octal escape: \056 is the dot.
+				["--- /dev/null", '+++ "b/\\056git/hooks/x"'], ['diff --git "a/\\056git/x" "b/\\056git/x"'], ['diff --git "a/y z" "b/.git/hooks/y z"'],
+				// Absolute, `..` and the git folders the fence knows by name.
+				["--- /dev/null", "+++ /repo/.git/hooks/x"], ["--- /dev/null", "+++ b/../.git/hooks/x"], ["--- /dev/null", "+++ /data/app-gitdir/hooks/x"], ["--- /dev/null", "+++ b/../../data/app-gitdir/hooks/x"],
+				["--- /dev/null", "+++ b/../main/.git/hooks/x"],
+			]) {
+				const file = patch(...headers);
+				expect(git(`apply ${file}`) ?? `${headers.join(" | ")}: allowed`).toContain("git folder");
+				expect(git(`apply --check -p0 ${file}`) ?? "allowed", headers.join(" | ")).toContain("git folder");
+			}
+			// Patch files named among other options and operands are all read.
+			const bad = patch(...named(".git/hooks/pre-commit"));
+			const good = patch(...named("src/a.ts"));
+			expect(git(`apply --whitespace=fix ${good} ${bad}`)).toContain("git folder");
+			expect(git(`apply --directory=sub ${bad}`)).toContain("git folder");
+			// --directory puts a root in front of every path.
+			expect(git(`apply --directory=../data/app-gitdir ${patch(...named("hooks/x"))}`)).toContain("git folder");
+		});
+
+		test("ordinary patches apply: files, dotfiles and folders that only look like .git", () => {
+			for (const headers of [
+				named("src/a.ts"), named(".github/workflows/ci.yml"), named(".gitignore"), named("docs/.gitattributes"), named(".gitmodules"), named("src/git/hooks.ts", "100755"), named("not.git/x"),
+				["--- a/src/a.ts", "+++ b/src/a.ts"], ["diff --git a/x b/y", "rename from src/x", "rename to src/y"],
+			]) {
+				expect(git(`apply ${patch(...headers)}`), headers.join(" | ")).toBeNull();
+			}
+			expect(git(`apply ${path.join(dir, "missing.patch")}`)).toBeNull();
+			expect(git(`apply ${dir}`)).toBeNull();
+		});
+	});
+
+	test("lfs commands that write or remove the repo's hooks are refused; the rest of lfs runs", () => {
+		for (const line of ["lfs install", "lfs install --force", "lfs install --local", "lfs install --skip-repo", "lfs update", "lfs update --force", "lfs update --manual", "lfs uninstall", "-C /tmp lfs install --force", "-c core.quotepath=false lfs install"]) {
+			expect(git(line) ?? `${line}: allowed`, line).toContain("lfs");
+		}
+		for (const line of ["lfs ls-files", "lfs pull", "lfs fetch origin", "lfs track *.psd", "lfs env", "lfs status", "lfs --version", "lfs pointer --file=x", "lfs locks"]) expect(git(line), line).toBeNull();
 	});
 
 	test("GraphQL may only resolve one review thread, with nothing riding along", () => {
