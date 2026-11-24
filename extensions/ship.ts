@@ -6,7 +6,7 @@
 // ends each pass with one SHIP-STATUS line that code branches on.
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentEndEvent, ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { desktopNotificationsOn, postNotification } from "./notify";
 import { armFence, disarmFence, SHIM_DIR } from "./ship/fence-state";
 import { parseTarget, readPr } from "./ship/pr";
@@ -464,18 +464,25 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			refresh(r);
 		}
 
-		async function start(args: Extract<Args, { kind: "start" }>, ctx: ExtensionCommandContext): Promise<void> {
-			if (ctx.mode === "print" || ctx.mode === "json") return say(ctx, "/ship needs a session that stays open (the TUI or rpc mode); this one ends after its prompt.", "error");
+		/** Tells the user why /ship didn't start, and hands the same text back for a caller that isn't a person (the ship_start tool). */
+		function refuse(ctx: ExtensionContext, text: string, level: "warning" | "error" = "error"): { refusal: string } {
+			say(ctx, text, level);
+			return { refusal: text };
+		}
+
+		async function start(args: Extract<Args, { kind: "start" }> & { cwd?: string }, ctx: ExtensionContext): Promise<{ url: string } | { refusal: string }> {
+			if (ctx.mode === "print" || ctx.mode === "json") return refuse(ctx, "/ship needs a session that stays open (the TUI or rpc mode); this one ends after its prompt.");
 			// A bare /ship means this checkout's branch, and put-up could push or open a PR for it while another is watched.
-			if (run !== null && args.target === null) return say(ctx, `/ship: already watching ${label(run.pr)}; run /ship stop first, or name a pull request: /ship <number>`, "error");
+			if (run !== null && args.target === null) return refuse(ctx, `/ship: already watching ${label(run.pr)}; run /ship stop first, or name a pull request: /ship <number>`);
 			const out = (r: { code: number; out: string }): string | null => (r.code === 0 ? r.out.trim() : null);
-			const root = out(parts.git(ctx.cwd, ["rev-parse", "--show-toplevel"]));
-			if (root === null) return say(ctx, "/ship: this folder is not in a git checkout", "error");
+			const dir = args.cwd ?? ctx.cwd;
+			const root = out(parts.git(dir, ["rev-parse", "--show-toplevel"]));
+			if (root === null) return refuse(ctx, "/ship: this folder is not in a git checkout");
 			const target = parts.parseTarget(args.target, out(parts.git(root, ["remote", "get-url", "origin"])) ?? "", parts.sshHostname);
-			if (typeof target === "string") return say(ctx, `/ship: ${target}`, "error");
+			if (typeof target === "string") return refuse(ctx, `/ship: ${target}`);
 			const gh = parts.ghFor(target.owner);
 			const me = out(gh(["api", "user", "--jq", ".login"]));
-			if (!me) return say(ctx, `/ship: can't tell which GitHub account to use for ${target.owner} (gh api user failed)`, "error");
+			if (!me) return refuse(ctx, `/ship: can't tell which GitHub account to use for ${target.owner} (gh api user failed)`);
 
 			let pr: PrRef;
 			let putUp = false;
@@ -488,31 +495,31 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 						? (files: string[]) => ctx.ui.confirm("Commit these files and open a draft PR?", `${files.slice(0, 15).join("\n")}${files.length > 15 ? `\nand ${files.length - 15} more` : ""}`)
 						: undefined;
 				const put = await parts.putUp(root, { git: parts.git, gh, confirm, sshHostname: parts.sshHostname });
-				if (typeof put === "string") return say(ctx, `/ship: ${put}`, "error");
+				if (typeof put === "string") return refuse(ctx, `/ship: ${put}`);
 				pr = put;
 				putUp = true;
 			}
-			if (run !== null && !samePr(run.pr, pr)) return say(ctx, `/ship: already watching ${label(run.pr)}; run /ship stop first`, "error");
+			if (run !== null && !samePr(run.pr, pr)) return refuse(ctx, `/ship: already watching ${label(run.pr)}; run /ship stop first`);
 
 			const trust = { me, bots: args.bots };
 			const snapshot = parts.readPr(pr, gh, trust);
-			if (typeof snapshot === "string") return say(ctx, `/ship: ${snapshot}`, "error");
-			if (snapshot.state !== "OPEN") return say(ctx, `/ship: ${label(pr)} is ${snapshot.state.toLowerCase()}; nothing to watch`, "warning");
+			if (typeof snapshot === "string") return refuse(ctx, `/ship: ${snapshot}`);
+			if (snapshot.state !== "OPEN") return refuse(ctx, `/ship: ${label(pr)} is ${snapshot.state.toLowerCase()}; nothing to watch`, "warning");
 			if (snapshot.author.toLowerCase() !== me.toLowerCase()) {
-				return say(ctx, `/ship: ${label(pr)} was opened by ${snapshot.author}, and gh acts as ${me} for ${pr.owner}; /ship only watches pull requests of that account`, "error");
+				return refuse(ctx, `/ship: ${label(pr)} was opened by ${snapshot.author}, and gh acts as ${me} for ${pr.owner}; /ship only watches pull requests of that account`);
 			}
 			const branch = out(parts.git(root, ["symbolic-ref", "--short", "-q", "HEAD"]));
-			if (branch !== snapshot.headRef) return say(ctx, `/ship: this checkout is on ${branch ?? "no branch"}, but ${label(pr)} is ${snapshot.headRef}; check that branch out first`, "error");
+			if (branch !== snapshot.headRef) return refuse(ctx, `/ship: this checkout is on ${branch ?? "no branch"}, but ${label(pr)} is ${snapshot.headRef}; check that branch out first`);
 
 			// A rerun on the same PR starts the watch over from GitHub and the state file (AC10), with the pass count reset (AC14).
 			if (run !== null) finish(run, "stopped", { quiet: true });
 			const watch = parts.claimWatch(pr, { baseRef: snapshot.baseRef, headRef: snapshot.headRef, session: ctx.sessionManager.getSessionId(), pid: process.pid, now: parts.now() });
-			if (typeof watch === "string") return say(ctx, `/ship: ${watch}`, "error");
+			if (typeof watch === "string") return refuse(ctx, `/ship: ${watch}`);
 			try {
 				parts.armFence({ pushBranch: snapshot.headRef, root });
 			} catch (error) {
 				parts.releaseWatch(watch, "stopped");
-				return say(ctx, `/ship: ${message(error)}`, "error");
+				return refuse(ctx, `/ship: ${message(error)}`);
 			}
 
 			const r: Run = {
@@ -523,7 +530,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				root,
 				watch,
 				timer: null,
-				report: args.report === null ? null : path.resolve(ctx.cwd, args.report),
+				report: args.report === null ? null : path.resolve(dir, args.report),
 				state: "watching",
 				reason: null,
 				lastLine: "started",
@@ -542,8 +549,9 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			r.timer = ctx.setInterval(() => tick(r), SHIP.tickMs);
 			say(ctx, `/ship: watching ${label(pr)} as ${me} on ${snapshot.headRef}, fence armed. The PR is read every ${SHIP.tickMs / 60_000} minutes; a model pass starts only when something changes.`);
 			// The review comes first, so the first pass has its findings to triage; the first tick follows on the timer.
-			if (putUp && !watch.told.includes(TOLD_REVIEWED)) return sendReview(r);
-			tick(r, snapshot);
+			if (putUp && !watch.told.includes(TOLD_REVIEWED)) sendReview(r);
+			else tick(r, snapshot);
+			return { url: snapshot.url };
 		}
 
 		function describe(r: Run): string {
@@ -564,7 +572,8 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				if (args.kind === "usage") return say(ctx, `${args.why}\n${USAGE}`, "warning");
 				if (args.kind === "start") {
 					try {
-						return await start(args, ctx);
+						await start(args, ctx);
+						return;
 					} catch (error) {
 						return say(ctx, `/ship: ${message(error)}`, "error");
 					}
@@ -574,6 +583,28 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				finish(run, "stopped", { quiet: true });
 			},
 		});
+
+		// A model turn can't type a slash command, so an unattended session (a /build) starts the watch through this tool.
+		if (unattended()) {
+			const { Type } = pi.typebox;
+			pi.registerTool({
+				name: "ship_start",
+				label: "Ship start",
+				description:
+					"Put the checkout's branch up as a draft pull request when it has none, have it reviewed, and watch it until it merges or closes: fix CI, merge the base, answer comments, never merge. " +
+					"Returns the pull request URL, or fails with the reason it refused (a dirty tree, the default branch, a secret-looking file, another watch).",
+				parameters: Type.Object({
+					cwd: Type.Optional(Type.String({ description: "Absolute path of the checkout to put up and watch; defaults to this session's folder." })),
+					report: Type.Optional(Type.String({ description: "Path of a JSON status file rewritten after each pass." })),
+				}),
+				approval: "write",
+				async execute(_id, params, _signal, _onUpdate, ctx) {
+					const started = await start({ kind: "start", target: null, bots: [], report: params.report ?? null, cwd: params.cwd }, ctx);
+					if ("refusal" in started) throw new Error(started.refusal);
+					return { content: [{ type: "text" as const, text: started.url }], details: undefined };
+				},
+			});
+		}
 
 		// The turn code started has ended: for a pass, read its last line and tell the user what it says.
 		pi.on("agent_end", event => {

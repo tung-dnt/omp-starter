@@ -766,3 +766,31 @@ describe("the status line a pass ends with", () => {
 
 	test.each([["no line at all"], ["SHIP-STATUS: done: x"], ["the SHIP-STATUS: ready is in the middle"]])("%j is none", text => expect(readVerdict(text)).toBeNull());
 });
+
+describe("the ship_start tool", () => {
+	test("only an unattended session has it", () => {
+		expect(rig().fake.tools.has("ship_start")).toBe(false);
+		process.env.OMP_STARTER_UNATTENDED = "1";
+		expect(rig().fake.tools.has("ship_start")).toBe(true);
+	});
+
+	test("puts the branch up in cwd, starts the watch and returns the PR URL", async () => {
+		process.env.OMP_STARTER_UNATTENDED = "1";
+		const t = rig();
+		const dir = path.join(privateHome(), "story-worktree");
+		const { text } = await t.fake.callTool("ship_start", { cwd: dir, report: "ship.json" }, t.ctx);
+		expect(text).toBe(URL);
+		expect(t.calls.puts).toEqual([{ root: ROOT, confirm: false }]);
+		expect(t.calls.armed).toEqual([{ pushBranch: "feat/x", root: ROOT }]);
+		expect(t.ctx.timers.size).toBe(1);
+		expect(fs.existsSync(path.join(dir, "ship.json"))).toBe(true);
+	});
+
+	test("a refusal is a tool error carrying its text", async () => {
+		process.env.OMP_STARTER_UNATTENDED = "1";
+		const t = rig();
+		t.answers.put = "put-up refused: main is the default branch";
+		await expect(t.fake.callTool("ship_start", {}, t.ctx)).rejects.toThrow("/ship: put-up refused: main is the default branch");
+		expect(t.calls.armed).toEqual([]);
+	});
+});
