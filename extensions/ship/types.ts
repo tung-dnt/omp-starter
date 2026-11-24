@@ -137,5 +137,5 @@ export type ClaimWatch = (pr: PrRef, start: { baseRef: string; headRef: string; 
 /** Story 3, `watch.ts` `saveWatch`: written to a temp file and renamed into place. */
 export type SaveWatch = (watch: Watch) => void;
 
-/** Story 5, `putup.ts` `putUp`: commit, push and open a draft PR for the branch in `root`; or why it refused. `confirm` is absent in unattended sessions. */
-export type PutUp = (root: string, deps: { git: Git; gh: Gh; confirm?: (files: string[]) => Promise<boolean> }) => Promise<PrRef | string>;
+/** Story 5, `putup.ts` `putUp`: commit, push and open a draft PR for the branch in `root`; or why it refused. `confirm` is absent in unattended sessions; `signal` aborts when the start is stopped, and put-up then gives up before its next add, commit, push or PR create. */
+export type PutUp = (root: string, deps: { git: Git; gh: Gh; confirm?: (files: string[]) => Promise<boolean>; signal?: AbortSignal }) => Promise<PrRef | string>;

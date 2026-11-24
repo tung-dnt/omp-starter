@@ -73,6 +73,8 @@ interface Rig {
 		reads: { trust: { me: string; bots: string[] } }[];
 		pushes: string[];
 		puts: { root: string; confirm: boolean }[];
+		/** The abort signal each put-up was given: it fires when the start is stopped. */
+		putSignals: (AbortSignal | undefined)[];
 		/** The folders git was run in. */
 		dirs: string[];
 		/** Every `git push` that was run. */
@@ -117,7 +119,7 @@ function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform
 	const setInterval = ctx.setInterval;
 	ctx.setInterval = (callback, ms) => (ctx.intervals.push(ms), setInterval(callback, ms));
 
-	const calls: Rig["calls"] = { claims: [], armed: [], disarmed: 0, released: [], unclaimed: [], saved: [], reads: [], pushes: [], puts: [], dirs: [], gitPushes: [], creates: [], open: 0, mostOpen: 0 };
+	const calls: Rig["calls"] = { claims: [], armed: [], disarmed: 0, released: [], unclaimed: [], saved: [], reads: [], pushes: [], puts: [], putSignals: [], dirs: [], gitPushes: [], creates: [], open: 0, mostOpen: 0 };
 	const answers: Rig["answers"] = { snapshots: [snap()], steps: [], claim: null, put: PR, putFiles: [], confirmed: null, renew: "held", branch: "feat/x", dirty: "", armError: null, listed: [], ahead: "", readMs: 0 };
 	const holds = { read: [] as Promise<void>[], git: [] as Promise<void>[], list: [] as Promise<void>[], user: [] as Promise<void>[], push: [] as Promise<void>[] };
 
@@ -176,6 +178,7 @@ function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform
 		},
 		putUp: async (root, deps) => {
 			calls.puts.push({ root, confirm: deps.confirm !== undefined });
+			calls.putSignals.push(deps.signal);
 			if (deps.confirm && answers.putFiles.length > 0) answers.confirmed = await deps.confirm(answers.putFiles);
 			return answers.put as typeof PR | string;
 		},
@@ -549,6 +552,23 @@ describe("a /ship that is still starting can be stopped", () => {
 		expect(t.ctx.timers.size).toBe(0);
 		expect(t.statuses).toEqual([]);
 		expect(t.ctx.ui.notifications).toHaveLength(1);
+	});
+
+	test("a put-up is given the start's signal, aborted by /ship stop", async () => {
+		const t = rig();
+		t.answers.putFiles = ["src/a.ts"];
+		t.ctx.ui.confirm = (_title, _message, options?: { signal?: AbortSignal }) => {
+			const answer = Promise.withResolvers<boolean>();
+			options?.signal?.addEventListener("abort", () => answer.resolve(false));
+			return answer.promise;
+		};
+		const starting = t.cmd("");
+		await settled();
+		const [signal] = t.calls.putSignals;
+		expect(signal?.aborted).toBe(false);
+		await t.cmd("stop");
+		expect(signal?.aborted).toBe(true);
+		await starting;
 	});
 
 	test("a second /ship waits until the stopped one has unwound, then runs", async () => {

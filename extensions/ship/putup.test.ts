@@ -344,6 +344,113 @@ describe("a branch that already has the user's open PR", () => {
 	});
 });
 
+/** git that runs the real thing, then lets a stop land as `name` returns: the stop arrives while that step runs. */
+function stoppedDuring(name: string): { signal: AbortSignal; git: Git; ran: string[] } {
+	const stop = new AbortController();
+	const ran: string[] = [];
+	const slow: Git = async (dir, args) => {
+		const answer = gitSync(dir, args);
+		ran.push(args[0] ?? "");
+		if (args[0] === name) stop.abort();
+		return answer;
+	};
+	return { signal: stop.signal, git: slow, ran };
+}
+
+describe("a stop reaches put-up", () => {
+	test("while it reads a clean branch: nothing is pushed and no PR is opened", async () => {
+		const s = checkout("feat/stop-clean");
+		commit(s, "one");
+		const during = stoppedDuring("status");
+		const { gh, calls } = fakeGh();
+
+		const result = await putUp(s.app, deps(gh, { git: during.git, signal: during.signal }));
+
+		expect(result).toMatch(/stopped/);
+		expect(during.ran).not.toContain("push");
+		expect(onRemote(s, "feat/stop-clean")).toBe(false);
+		expect(creates(calls)).toHaveLength(0);
+	});
+
+	test("before the files are staged: nothing is staged or committed", async () => {
+		const s = checkout("feat/stop-dirty");
+		writeFiles(s.app, { "notes.md": "notes\n" });
+		const before = snapshot(s);
+		const during = stoppedDuring("status");
+		const { gh, calls } = fakeGh();
+
+		const result = await putUp(s.app, deps(gh, { git: during.git, signal: during.signal, confirm: async () => true }));
+
+		expect(result).toMatch(/stopped/);
+		expect(during.ran).not.toContain("add");
+		expect(during.ran).not.toContain("commit");
+		expect(snapshot(s)).toEqual(before);
+		expect(creates(calls)).toHaveLength(0);
+	});
+
+	test("while the files are staged: nothing is committed", async () => {
+		const s = checkout("feat/stop-add");
+		writeFiles(s.app, { "notes.md": "notes\n" });
+		const head = sh(s.app, "rev-parse", "HEAD");
+		const during = stoppedDuring("add");
+		const { gh, calls } = fakeGh();
+
+		expect(await putUp(s.app, deps(gh, { git: during.git, signal: during.signal }))).toMatch(/stopped/);
+
+		expect(during.ran).not.toContain("commit");
+		expect(sh(s.app, "rev-parse", "HEAD")).toBe(head);
+		expect(onRemote(s, "feat/stop-add")).toBe(false);
+		expect(creates(calls)).toHaveLength(0);
+	});
+
+	test("while the commit runs: the commit stands, nothing is pushed and no PR is opened", async () => {
+		const s = checkout("feat/stop-commit");
+		writeFiles(s.app, { "notes.md": "notes\n" });
+		const head = sh(s.app, "rev-parse", "HEAD");
+		const during = stoppedDuring("commit");
+		const { gh, calls } = fakeGh();
+
+		expect(await putUp(s.app, deps(gh, { git: during.git, signal: during.signal }))).toMatch(/stopped/);
+
+		expect(sh(s.app, "rev-parse", "HEAD")).not.toBe(head);
+		expect(during.ran).not.toContain("push");
+		expect(onRemote(s, "feat/stop-commit")).toBe(false);
+		expect(creates(calls)).toHaveLength(0);
+	});
+
+	test("while a push runs: the push finishes and no PR is opened", async () => {
+		const s = checkout("feat/stop-push");
+		commit(s, "one");
+		const during = stoppedDuring("push");
+		const { gh, calls } = fakeGh();
+
+		expect(await putUp(s.app, deps(gh, { git: during.git, signal: during.signal }))).toMatch(/stopped/);
+
+		expect(onRemote(s, "feat/stop-push")).toBe(true);
+		expect(creates(calls)).toHaveLength(0);
+	});
+
+	test("on a branch with an open PR: nothing is pushed", async () => {
+		const s = checkout("feat/stop-open");
+		commit(s, "one");
+		const during = stoppedDuring("log");
+		const { gh } = fakeGh({ prs: [row(ME)] });
+
+		expect(await putUp(s.app, deps(gh, { git: during.git, signal: during.signal }))).toMatch(/stopped/);
+
+		expect(during.ran).not.toContain("push");
+		expect(onRemote(s, "feat/stop-open")).toBe(false);
+	});
+
+	test("that never comes leaves put-up as it was", async () => {
+		const s = checkout("feat/stop-never");
+		commit(s, "one");
+		const { gh } = fakeGh();
+
+		expect(await putUp(s.app, deps(gh, { signal: new AbortController().signal }))).toEqual(PR);
+	});
+});
+
 describe("refuses", () => {
 	test("the default branch, with work waiting to be committed", async () => {
 		const s = checkout("main");

@@ -585,6 +585,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 						git: parts.git,
 						gh,
 						confirm,
+						signal,
 						sshHostname: parts.sshHostname,
 						// Asked once put-up knows the branch's PR, before it pushes. The claim is taken here, so of two sessions starting at once only the first pushes, and a /ship that is refused pushes nothing (AC11). The PR's refs aren't read yet; the claim below records them.
 						claim: found => {
