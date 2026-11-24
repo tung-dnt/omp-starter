@@ -104,6 +104,19 @@ describe("gh", () => {
 			expect(gh(line) ?? "allowed", line).not.toContain("in front of gh's command words");
 		}
 		expect(gh("-R o/r pr -R o/r merge 5")).toContain("gh pr merge is refused");
+		// cobra skips an empty word and a lone `-` when it looks for the command, and passes them on as the command's words: `gh pr - merge` merges.
+		for (const args of [["pr", "-", "merge"], ["pr", "", "merge"], ["-", "pr", "merge", "5"], ["", "pr", "merge", "5"], ["pr", "-", "review", "--approve"], ["pr", "--repo", "--", "-", "lock", "5"], ["pr", "--repo", "x", "", "close"]]) {
+			expect(checkGh(args), JSON.stringify(args)).toContain("in front of gh's command words");
+		}
+	});
+
+	test("a pull request's base is refused wherever the flag stands, even behind a flag whose value could be taken for it", () => {
+		for (const args of [["--base", "main"], ["--base=main"], ["-B", "main"], ["-Bmain"], ["-B=main"], ["-wB", "main"], ["-b", "-R", "-B=main"], ["-R", "o/r", "-B", "main"], ["--body", "x", "--base=main"], ["-b", "x", "-R", "-Bmain"]]) {
+			expect(checkGh(["pr", "edit", "5", ...args]), args.join(" ")).toContain("base");
+		}
+		for (const args of [["--body", "text"], ["-t", "Bug fix"], ["--title=B"], ["-R", "o/r", "--add-label", "x"], ["--repo=Blinx/x"], ["-R=owner/Beta", "--body", "x"], ["--add-reviewer", "x"], ["-F", "body.md"]]) {
+			expect(checkGh(["pr", "edit", "5", ...args]), args.join(" ")).toBeNull();
+		}
 	});
 
 	test("a GraphQL query read from a file is refused under every spelling of the flag, and resolving a thread is allowed under any", () => {

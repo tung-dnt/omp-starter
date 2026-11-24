@@ -873,6 +873,10 @@ describe("the shims, with real git", () => {
 				// `-p pr` is api's preview flag twice, which keeps `pr pr` where the command words would be.
 				["-p", "pr", "-p", "pr", "api", "repos/o/r/pulls/5/merge", "-X", "PUT"], ["-p", "pr", "-p", "pr", "api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE"],
 				["--jq", "x", "pr", "merge", "5"], ["-q", "pr", "pr", "merge", "5"],
+				// cobra skips an empty word and a lone `-` on its way to the command, and passes them on as its words.
+				["pr", "-", "merge", "-R", "o/r"], ["pr", "", "merge"], ["pr", "--repo", "--", "-", "lock", "5"],
+				// A base set behind a flag whose value could be taken for it: `-b -R` is a body, and `-B=main` the base.
+				["pr", "edit", "7", "-b", "-R", "-B=main"], ["pr", "edit", "7", "--base", "main"], ["pr", "edit", "7", "-Bmain"],
 			]) refuseGh(...args);
 			expect(holes).toEqual([]);
 			expect(ran()).toEqual([]);

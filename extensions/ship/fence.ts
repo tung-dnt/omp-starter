@@ -232,9 +232,10 @@ const GH_WORD_FLAGS = names("-R", "--repo", "--hostname");
 /**
  * gh's command words, and where the rest of its words begin. gh's command parser, cobra, finds a subcommand past any
  * flags and takes the word after a flag it doesn't know as that flag's value: `gh pr -t x merge 5` is `gh pr merge 5
- * --subject x`, and `gh -p pr -p pr api …` runs api. The fence knows the repo and host flags only, so any other flag in
- * front of the words it needs is refused: it can't tell whose word the next one is. `api` takes its own flags and words
- * after it, and the other commands without a subcommand to tell apart need only their first word.
+ * --subject x`, and `gh -p pr -p pr api …` runs api. It skips an empty word and a lone `-` as well (`gh pr - merge`
+ * merges). The fence knows the repo and host flags only, so any other flag, empty word or `-` in front of the words it
+ * needs is refused: it can't tell whose word the next one is. `api` takes its own flags and words after it, and the
+ * other commands without a subcommand to tell apart need only their first word.
  */
 function ghCommand(args: string[]): { group: string; sub: string; at: number } | string {
 	const words: string[] = [];
@@ -244,7 +245,7 @@ function ghCommand(args: string[]): { group: string; sub: string; at: number } |
 		const arg = args[at++] as string;
 		if (isIn(GH_WORD_FLAGS, arg)) at++;
 		else if (arg === "--help" || arg === "--version" || /^(?:-R.|--repo=|--hostname=)/.test(arg)) continue;
-		else if (arg.startsWith("-") && arg !== "-") return refused("a flag in front of gh's command words is refused: gh may take the word after it as its value, so the fence can't tell which command runs. Put the flags after the command (gh pr view 5 --json state)");
+		else if (arg === "" || arg.startsWith("-")) return refused("a flag, an empty word or a lone - in front of gh's command words is refused: cobra skips them, so gh may run another command than the fence reads, or take the next word as a value. Put the flags after the command (gh pr view 5 --json state)");
 		else words.push(arg);
 	}
 	const [group = "", sub = ""] = words;
@@ -308,7 +309,8 @@ export function checkGh(args: string[]): string | null {
 		if (f.unknown !== undefined) return refused(`gh pr create ${f.unknown} is not a flag the fence knows`);
 		if (!isOn(lastOf(f, "-d", "--draft"))) return refused("open the pull request as a draft: gh pr create --draft");
 	}
-	if (group === "pr" && sub === "edit" && has(parse(args, GH_WORD_FLAGS), "--base", "-B")) return refused("a pull request's base is the user's to change");
+	// Judged by the tokens alone: `-b -R -B=main` has a --base that a reading of which word is whose value would lose.
+	if (group === "pr" && sub === "edit" && args.some(arg => arg === "--base" || arg.startsWith("--base=") || (/^-[^-]/.test(arg) && (arg.split("=", 1)[0] as string).includes("B")))) return refused("a pull request's base is the user's to change");
 	if ((group === "pr" || group === "issue") && sub === "comment") {
 		const f = pflag(args, GH_COMMENT);
 		if (f.unknown !== undefined) return refused(`gh ${group} comment ${f.unknown} is not a flag the fence knows`);
