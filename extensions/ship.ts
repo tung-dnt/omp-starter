@@ -219,7 +219,7 @@ function foreignNews(from: Snapshot, now: Snapshot): boolean {
 /** AC9, the part code can check: why a `ready` from the model can't be believed yet, or null. Right after a push GitHub may list no checks, and that is not green. */
 function notReady(s: Snapshot, pushed: boolean): string | null {
 	if (s.mergeable === "CONFLICTING") return "the PR still has a conflict";
-	const open = s.checks.filter(c => c.bucket === "fail" || c.bucket === "pending").length;
+	const open = s.checks.filter(c => c.bucket === "fail" || c.bucket === "cancel" || c.bucket === "pending").length;
 	if (open > 0) return `${open} check${open === 1 ? " is" : "s are"} not green`;
 	return pushed && s.checks.length === 0 ? "no checks are listed yet after the push" : null;
 }
@@ -546,11 +546,16 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				noticed: "",
 			};
 			run = r;
-			r.timer = ctx.setInterval(() => tick(r), SHIP.tickMs);
-			say(ctx, `/ship: watching ${label(pr)} as ${me} on ${snapshot.headRef}, fence armed. The PR is read every ${SHIP.tickMs / 60_000} minutes; a model pass starts only when something changes.`);
-			// The review comes first, so the first pass has its findings to triage; the first tick follows on the timer.
-			if (putUp && !watch.told.includes(TOLD_REVIEWED)) sendReview(r);
-			else tick(r, snapshot);
+			try {
+				r.timer = ctx.setInterval(() => tick(r), SHIP.tickMs);
+				say(ctx, `/ship: watching ${label(pr)} as ${me} on ${snapshot.headRef}, fence armed. The PR is read every ${SHIP.tickMs / 60_000} minutes; a model pass starts only when something changes.`);
+				// The review comes first, so the first pass has its findings to triage; the first tick follows on the timer.
+				if (putUp && !watch.told.includes(TOLD_REVIEWED)) sendReview(r);
+				else tick(r, snapshot);
+			} catch (error) {
+				finish(r, "stopped", { quiet: true });
+				return refuse(ctx, `/ship: ${message(error)}`);
+			}
 			return { url: snapshot.url };
 		}
 
@@ -620,7 +625,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			const { now, pushed } = settle(r);
 			const reply = lastReply(event.messages);
 			const found = readVerdict(reply);
-			const doubt = found?.verdict === "ready" && now !== null ? notReady(now, pushed) : null;
+			const doubt = found?.verdict !== "ready" ? null : now === null ? "couldn't re-read the PR" : notReady(now, pushed);
 			r.lastLine = doubt === null ? found?.note || reply.trim().split("\n")[0]?.slice(0, 200) || `pass ${r.passes} ended` : `said ready, but ${doubt}`;
 			let key = "";
 			if (found?.verdict === "ready" && doubt === null) {

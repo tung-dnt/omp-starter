@@ -532,6 +532,24 @@ describe("putting the branch up", () => {
 	});
 });
 
+describe("a review that can't be sent", () => {
+	test("ends the watch, releases the claim, disarms the fence and says why", async () => {
+		const t = rig();
+		Object.assign(t.fake.pi, {
+			sendMessage: () => {
+				throw new Error("session is closing");
+			},
+		});
+		await t.cmd("");
+		expect(t.calls.released).toEqual([{ reason: "stopped" }]);
+		expect(t.calls.disarmed).toBe(1);
+		expect(lastMessage(t)).toBe("/ship: session is closing");
+		expect(t.statuses.at(-1)).toBeUndefined();
+		await t.cmd("status");
+		expect(lastMessage(t)).toBe("No /ship watch in this session.");
+	});
+});
+
 describe("an unattended session", () => {
 	test("never asks: put-up gets no confirm and nothing is prompted or notified", async () => {
 		process.env.OMP_STARTER_UNATTENDED = "1";
@@ -639,6 +657,7 @@ describe("a ready the PR doesn't bear out", () => {
 		["two failing checks", { checks: [...failing, ...failing] }, "2 checks are not green"],
 		["a conflict", { mergeable: "CONFLICTING" as const }, "the PR still has a conflict"],
 		["no checks listed right after a push", { headSha: "b".repeat(40) }, "no checks are listed yet after the push"],
+		["a cancelled check", { checks: [{ name: "test", bucket: "cancel" as const, link: null }] }, "1 check is not green"],
 	])("%s is not ready, so nobody is told it is", async (_name, fresh, why) => {
 		const t = rig();
 		t.answers.steps = [PASS];
@@ -646,6 +665,16 @@ describe("a ready the PR doesn't bear out", () => {
 		t.answers.snapshots = [snap(fresh)];
 		t.finishTurn("All done.\nSHIP-STATUS: ready: undraft it");
 		expect(t.report()).toMatchObject({ state: "watching", waitingFor: null, lastLine: `said ready, but ${why}` });
+		expect(t.fake.execCalls).toEqual([]);
+	});
+
+	test("a pass whose PR can't be read afterwards is not believed when it says ready", async () => {
+		const t = rig();
+		t.answers.steps = [PASS];
+		await t.cmd("12 --report report.json");
+		t.answers.snapshots = ["gh: HTTP 502"];
+		t.finishTurn("All done.\nSHIP-STATUS: ready: undraft it");
+		expect(t.report()).toMatchObject({ state: "watching", waitingFor: null, lastLine: "said ready, but couldn't re-read the PR" });
 		expect(t.fake.execCalls).toEqual([]);
 	});
 
