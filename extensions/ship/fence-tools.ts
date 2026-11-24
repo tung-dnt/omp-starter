@@ -5,24 +5,13 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { repoRoot } from "../lib/repo";
 import { resolveFrom, simpleCommands, targetPaths } from "../lib/tool-input";
-import { isProtectedPath, refused } from "./fence";
+import { canonical, isProtectedPath, refused } from "./fence";
 import { FENCE_SOURCE, type FenceState, type Git, realGit, SHIM_DIR, stateDir } from "./fence-state";
 
 /** omp URL schemes that never name a repo file. `conflict://` does (a conflicted file), so it is not here. */
 const URL_SCHEMES: Record<string, true> = Object.fromEntries(
 	["local", "skill", "agent", "history", "omp", "artifact", "mcp", "issue", "pr", "proc", "help", "attachment", "memory"].map(s => [s, true]),
 );
-
-/** `p` resolved through symlinks: its nearest existing ancestor's real path, plus the part that doesn't exist yet. */
-function canonical(p: string): string {
-	let dir = p;
-	const rest: string[] = [];
-	while (!fs.existsSync(dir) && path.dirname(dir) !== dir) {
-		rest.unshift(path.basename(dir));
-		dir = path.dirname(dir);
-	}
-	return path.join(fs.realpathSync(dir), ...rest);
-}
 
 const inside = (p: string, dir: string) => p === dir || p.startsWith(`${dir}${path.sep}`);
 

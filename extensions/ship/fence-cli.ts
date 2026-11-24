@@ -13,7 +13,7 @@ function why(): string | null {
 	if (!state.armed) return null;
 	if (program === "gh") return checkGh(args);
 	if (program !== "git") return refused(`no check for ${program}`);
-	const argvWhy = checkGit(args, state);
+	const argvWhy = checkGit(args, state, process.cwd());
 	if (argvWhy !== null) return argvWhy;
 	const sub = args.findIndex((a, i) => !a.startsWith("-") && !["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"].includes(args[i - 1] ?? ""));
 	if (args[sub] !== "push") return null;

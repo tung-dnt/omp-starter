@@ -639,7 +639,8 @@ describe("in a fenced /ship session", () => {
 		expect(gitCalls.some(args => args.includes("commit"))).toBe(true);
 		expect(gitCalls.some(args => args.includes("push"))).toBe(true);
 		expect(ghCalls.some(args => args[0] === "api")).toBe(true);
-		for (const args of gitCalls) expect(checkGit(args, { pushBranch: "feat/ship-s5" })).toBeNull();
+		const policy = { pushBranch: "feat/ship-s5", gitDirs: [path.join(privateHome(), "app", ".git")] };
+		for (const args of gitCalls) expect(checkGit(args, policy, process.cwd())).toBeNull();
 		for (const args of ghCalls) expect(checkGh(args)).toBeNull();
 	});
 });
