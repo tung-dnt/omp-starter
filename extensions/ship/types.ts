@@ -10,10 +10,10 @@ export interface PrRef {
 	number: number;
 }
 
-/** Runs `gh` (or `gh-blinx` for blinxsolutions repos, AC1) with these args. Injected, so tests replay recorded output. */
-export type Gh = (args: string[]) => { code: number; out: string; err: string };
-/** Runs `git -C <dir>` with these args. */
-export type Git = (dir: string, args: string[]) => { code: number; out: string; err: string };
+/** Runs `gh` (or `gh-blinx` for blinxsolutions repos, AC1) with these args, without blocking the session. Output is untrimmed. Injected, so tests replay recorded output. */
+export type Gh = (args: string[]) => Promise<{ code: number; out: string; err: string }>;
+/** Runs `git -C <dir>` with these args, without blocking the session. Output is untrimmed. */
+export type Git = (dir: string, args: string[]) => Promise<{ code: number; out: string; err: string }>;
 
 export type CheckBucket = "pass" | "fail" | "pending" | "skipping" | "cancel";
 
@@ -127,13 +127,15 @@ export const SHIP = {
 
 /** Story 2, `pr.ts` `parseTarget`: a `/ship` argument (`<n>`, `#<n>`, a PR URL) plus the checkout's origin URL, or why not. SSH aliases resolve through `sshHostname`. */
 export type ParseTarget = (arg: string | null, originUrl: string, sshHostname: (alias: string) => string | null) => PrRef | { owner: string; repo: string } | string;
-/** Story 2, `pr.ts` `readPr`: one read of the PR, or why it couldn't be read. */
-export type ReadPr = (pr: PrRef, gh: Gh, trust: Trust) => Snapshot | string;
+/** Story 2, `pr.ts` `readPr`: one read of the PR, or why it couldn't be read. Waits on `gh`, so the session keeps running meanwhile. */
+export type ReadPr = (pr: PrRef, gh: Gh, trust: Trust) => Promise<Snapshot | string>;
 
 /** Story 3, `watch.ts` `nextStep`: pure. */
 export type NextStep = (snapshot: Snapshot, watch: Watch, now: number) => Step;
 /** Story 3, `watch.ts` `claimWatch`: the watch this session may run, a stale one taken over, or why another live session holds it. */
 export type ClaimWatch = (pr: PrRef, start: { baseRef: string; headRef: string; session: string; pid: number; now: number }) => Watch | string;
+/** Story 3, `watch.ts` `heldElsewhere`: why another live session holds the watch of this PR, or null when `session` may claim it. Reads the watch file only; `claimWatch` is what takes the claim. */
+export type HeldElsewhere = (pr: PrRef, session: string, now: number) => string | null;
 /** Story 3, `watch.ts` `saveWatch`: written to a temp file and renamed into place. */
 export type SaveWatch = (watch: Watch) => void;
 

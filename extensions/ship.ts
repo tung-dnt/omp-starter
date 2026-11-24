@@ -1,21 +1,24 @@
 // /ship: puts a branch up as a draft pull request when it has none, then watches the PR until it merges or closes, fixing
 // what comes up and never merging (plans/001-ship.md, stories 4 and 5). The loop is code. Every SHIP.tickMs the session
-// reads the PR with gh, which costs no model call, and asks `nextStep` what to do. Only a due pass starts a model turn, with
+// reads the PR with gh, which costs no model call and never holds the session up: every gh and git call is awaited, and a
+// tick that finds the last read still out is skipped. It asks `nextStep` what to do. Only a due pass starts a model turn, with
 // `pi.sendMessage` in this same conversation, carrying skills/ship/SKILL.md and a snapshot of the PR. Code arms the fence,
 // counts passes and pushes, keeps the claim on the PR alive and tells the user; all the model decides is its pass, and it
 // ends each pass with one SHIP-STATUS line that code branches on.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { expandHome } from "./lib/state";
 import { desktopNotificationsOn, postNotification } from "./notify";
 import { armFence, disarmFence, SHIM_DIR } from "./ship/fence-state";
 import { parseTarget, readPr } from "./ship/pr";
-import { putUp } from "./ship/putup";
+import { putUp, type PutUpDeps } from "./ship/putup";
 import {
 	type ClaimWatch,
 	type EndReason,
 	type Gh,
 	type Git,
+	type HeldElsewhere,
 	type NextStep,
 	type ParseTarget,
 	type PrRef,
@@ -26,7 +29,7 @@ import {
 	type Trust,
 	type Watch,
 } from "./ship/types";
-import { claimWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch } from "./ship/watch";
+import { claimWatch, heldElsewhere, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch } from "./ship/watch";
 
 const USAGE = [
 	"/ship [<pr#>|<pr url>] [+bot ...] [--report <path>]  watch a pull request; with none named, put the branch up first",
@@ -57,10 +60,7 @@ export interface Report {
 	updatedAt: string;
 }
 
-export type PutUpFn = (
-	root: string,
-	deps: { git: Git; gh: Gh; confirm?: (files: string[]) => Promise<boolean>; sshHostname?: (alias: string) => string | null },
-) => Promise<PrRef | string>;
+export type PutUpFn = (root: string, deps: PutUpDeps) => Promise<PrRef | string>;
 
 /** Everything /ship does outside the session, injected: story 2 reads the PR, story 3 decides, story 5 puts up, the fence arms. */
 export interface ShipParts {
@@ -75,6 +75,8 @@ export interface ShipParts {
 	putUp: PutUpFn;
 	nextStep: NextStep;
 	claimWatch: ClaimWatch;
+	/** Why another live session holds the watch of a PR, or null. Asked before put-up pushes, so a refused /ship pushes nothing (AC11). */
+	heldElsewhere: HeldElsewhere;
 	/** The watch with a fresh heartbeat, or null when another session has taken the claim. */
 	renewClaim(watch: Watch, now: number): Watch | null;
 	releaseWatch(watch: Watch, reason: EndReason): void;
@@ -195,8 +197,8 @@ function lastReply(messages: AgentEndEvent["messages"]): string {
 }
 
 /** `git status --porcelain -z` as paths: what the user has changed in the checkout. */
-function changedFiles(git: Git, root: string): string[] {
-	const status = git(root, ["status", "--porcelain", "-z"]);
+async function changedFiles(git: Git, root: string): Promise<string[]> {
+	const status = await git(root, ["status", "--porcelain", "-z"]);
 	const records = status.code === 0 ? status.out.split("\0").filter(Boolean) : [];
 	const files: string[] = [];
 	for (let i = 0; i < records.length; i++) {
@@ -259,6 +261,10 @@ interface Run {
 	/** The review ran, and the next pass triages its findings. */
 	triage: boolean;
 	failedReads: number;
+	/** The look or pass re-read in flight, or null. Reads of the PR never overlap: a tick that finds one running is skipped, and a pass's re-read waits for it. */
+	reading: Promise<void> | null;
+	/** How many turns this watch started have ended. A read that began before one ended describes a PR that turn may have changed, so it is dropped. */
+	turnsEnded: number;
 	/** The last thing the user was notified of, so a repeat stays quiet. */
 	noticed: string;
 }
@@ -266,6 +272,8 @@ interface Run {
 export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 	return function ship(pi: ExtensionAPI): void {
 		let run: Run | null = null;
+		/** A /ship that is still waiting on git, gh or put-up. A second one is refused meanwhile: two starts at once could push twice or open two PRs. */
+		let starting = false;
 
 		const unattended = (): boolean => process.env.OMP_STARTER_UNATTENDED === "1";
 		const say = (ctx: ExtensionContext, text: string, level: "info" | "warning" | "error" = "info"): void => ctx.ui.notify(text, level);
@@ -356,7 +364,23 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			return false;
 		}
 
-		function startPass(r: Run, snapshot: Snapshot, why: string, now: number): void {
+		/** Runs `work` once the watch's earlier read is done, so two reads of the PR never overlap and the answers come in the order they were asked for. Never rejects. */
+		function queue(r: Run, work: () => Promise<void>): Promise<void> {
+			const reading: Promise<void> = (r.reading ?? Promise.resolve())
+				.then(work)
+				.catch(error => pi.logger.warn(`ship: ${message(error)}`))
+				.finally(() => {
+					if (r.reading === reading) r.reading = null;
+				});
+			r.reading = reading;
+			return reading;
+		}
+
+		async function startPass(r: Run, snapshot: Snapshot, why: string, turns: number): Promise<void> {
+			// Read before the busy check, so nothing separates that check from the send below.
+			const dirty = await changedFiles(parts.git, r.root);
+			if (run !== r || r.turnsEnded !== turns) return;
+			const now = parts.now();
 			if (busy(r, now)) {
 				r.lastLine = "a pass is due; waiting for the running turn to end";
 				return refresh(r);
@@ -371,7 +395,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				watch: r.watch,
 				me: r.trust.me,
 				root: r.root,
-				dirty: changedFiles(parts.git, r.root),
+				dirty,
 				unattended: unattended(),
 				triage: r.triage,
 			});
@@ -393,12 +417,18 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 		 * A pass ended. Its own reply and push must not start the next pass, so the PR as it stands becomes the baseline,
 		 * unless someone else added to it meanwhile. Returns that read, and whether the pass pushed.
 		 */
-		function settle(r: Run): { now: Snapshot | null; pushed: boolean } {
+		async function settle(r: Run): Promise<{ now: Snapshot | null; pushed: boolean }> {
 			const from = r.passFrom;
 			r.passFrom = null;
 			if (from === null) return { now: null, pushed: false };
-			const now = parts.readPr(r.pr, r.gh, r.trust);
-			if (typeof now === "string") return { now: null, pushed: false };
+			let now: Snapshot | string;
+			try {
+				now = await parts.readPr(r.pr, r.gh, r.trust);
+			} catch (error) {
+				now = message(error);
+			}
+			// A watch that ended while GitHub answered has no baseline left to keep, and its file is not to be written again.
+			if (run !== r || typeof now === "string") return { now: null, pushed: false };
 			r.snapshot = now;
 			if (!foreignNews(from, now)) {
 				r.watch = { ...r.watch, lastHash: now.hash };
@@ -407,24 +437,58 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			return { now, pushed: now.headSha !== from.headSha };
 		}
 
-		/** One look at the PR. A failure in it shows on the status line and the next tick tries again; it never ends the timer. */
-		function tick(r: Run, first?: Snapshot): void {
-			try {
-				look(r, first);
-			} catch (error) {
-				r.lastLine = `tick failed: ${message(error)}`;
-				pi.logger.warn(`ship: ${r.lastLine}`);
-				refresh(r);
+		/** What a pass's last line says, told once the PR has been re-read. */
+		async function passEnded(r: Run, event: AgentEndEvent): Promise<void> {
+			const { now, pushed } = await settle(r);
+			if (run !== r) return;
+			r.state = "watching";
+			const reply = lastReply(event.messages);
+			const found = readVerdict(reply);
+			const doubt = found?.verdict !== "ready" ? null : now === null ? "couldn't re-read the PR" : notReady(now, pushed);
+			r.lastLine = doubt === null ? found?.note || reply.trim().split("\n")[0]?.slice(0, 200) || `pass ${r.passes} ended` : `said ready, but ${doubt}`;
+			let key = "";
+			if (found?.verdict === "ready" && doubt === null) {
+				Object.assign(r, { state: "ready", waitingFor: found.note || "what is still yours" });
+				key = `ready:${r.snapshot.headSha}`;
+			} else if (found?.verdict === "needs-you") {
+				Object.assign(r, { state: "needs-you", waitingFor: found.note || "see the session" });
+				key = `needs-you:${r.waitingFor}`;
 			}
+			// A repeat of the verdict the user was just told stays quiet; any other verdict makes the next one news again.
+			if (key !== "" && key !== r.noticed) notice(r, `PR #${r.pr.number} ${found?.verdict === "ready" ? "is ready" : "needs you"}: ${r.waitingFor}`);
+			r.noticed = key;
+			refresh(r);
 		}
 
-		function look(r: Run, first?: Snapshot): void {
+		/**
+		 * One look at the PR. A failure in it shows on the status line and the next tick tries again; it never ends the timer.
+		 * A tick that finds the last read still waiting on GitHub does nothing, so a slow link can't pile reads up.
+		 */
+		function tick(r: Run, first?: Snapshot): Promise<void> {
+			if (r.reading !== null) return r.reading;
+			return queue(r, async () => {
+				try {
+					await look(r, first);
+				} catch (error) {
+					const failure = `tick failed: ${message(error)}`;
+					pi.logger.warn(`ship: ${failure}`);
+					if (run !== r) return;
+					r.lastLine = failure;
+					refresh(r);
+				}
+			});
+		}
+
+		async function look(r: Run, first?: Snapshot): Promise<void> {
 			if (run !== r) return;
-			const now = parts.now();
-			const held = parts.renewClaim(r.watch, now);
+			const held = parts.renewClaim(r.watch, parts.now());
 			if (held === null) return finish(r, "taken_over");
 			r.watch = held;
-			const snapshot = first ?? parts.readPr(r.pr, r.gh, r.trust);
+			const turns = r.turnsEnded;
+			const snapshot = first ?? (await parts.readPr(r.pr, r.gh, r.trust));
+			// While GitHub answered, the watch may have ended, or a pass may have ended and set its own baseline: this read is stale.
+			if (run !== r || r.turnsEnded !== turns) return;
+			const now = parts.now();
 			if (typeof snapshot === "string") {
 				r.lastLine = `can't read the PR (${++r.failedReads} in a row): ${snapshot}`;
 				if (r.failedReads === FAILED_READS_BEFORE_NOTICE) notice(r, `ship #${r.pr.number}: can't read the PR: ${snapshot}`);
@@ -442,7 +506,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			const capped = step.kind === "end" && step.reason === "spend_cap";
 			if (step.kind === "end" && !capped) return finish(r, step.reason);
 			capReached(r, capped);
-			if (step.kind === "pass") return startPass(r, snapshot, step.why, now);
+			if (step.kind === "pass") return startPass(r, snapshot, step.why, turns);
 			refresh(r);
 		}
 
@@ -457,7 +521,8 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 		}
 
 		function sendReview(r: Run): void {
-			pi.sendMessage({ customType: MESSAGE_TYPE, content: reviewPrompt(r.snapshot, r.root), display: false, details: { pr: r.snapshot.url, review: true } }, { triggerTurn: true });
+			// A follow-up, not a steer: sent from inside the ship_start tool, a steer would background that tool call, and the PR URL would reach the model as a later job notice instead of as the call's own result.
+			pi.sendMessage({ customType: MESSAGE_TYPE, content: reviewPrompt(r.snapshot, r.root), display: false, details: { pr: r.snapshot.url, review: true } }, { triggerTurn: true, deliverAs: "followUp" });
 			r.watch = { ...r.watch, told: [...r.watch.told, TOLD_REVIEWED] };
 			parts.saveWatch(r.watch);
 			Object.assign(r, { awaiting: "review", sentAt: parts.now(), triage: true, state: "working", lastLine: "review started: interrogate, report only" });
@@ -470,19 +535,21 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			return { refusal: text };
 		}
 
-		async function start(args: Extract<Args, { kind: "start" }> & { cwd?: string }, ctx: ExtensionContext): Promise<{ url: string } | { refusal: string }> {
+		async function begin(args: Extract<Args, { kind: "start" }> & { cwd?: string }, ctx: ExtensionContext): Promise<{ url: string } | { refusal: string }> {
 			if (ctx.mode === "print" || ctx.mode === "json") return refuse(ctx, "/ship needs a session that stays open (the TUI or rpc mode); this one ends after its prompt.");
 			// A bare /ship means this checkout's branch, and put-up could push or open a PR for it while another is watched.
 			if (run !== null && args.target === null) return refuse(ctx, `/ship: already watching ${label(run.pr)}; run /ship stop first, or name a pull request: /ship <number>`);
 			const out = (r: { code: number; out: string }): string | null => (r.code === 0 ? r.out.trim() : null);
-			const dir = args.cwd ?? ctx.cwd;
-			const root = out(parts.git(dir, ["rev-parse", "--show-toplevel"]));
+			// A model or a command line passes these paths as text, and no shell expands a leading ~ in them.
+			const dir = expandHome(args.cwd ?? ctx.cwd);
+			const root = out(await parts.git(dir, ["rev-parse", "--show-toplevel"]));
 			if (root === null) return refuse(ctx, "/ship: this folder is not in a git checkout");
-			const target = parts.parseTarget(args.target, out(parts.git(root, ["remote", "get-url", "origin"])) ?? "", parts.sshHostname);
+			const target = parts.parseTarget(args.target, out(await parts.git(root, ["remote", "get-url", "origin"])) ?? "", parts.sshHostname);
 			if (typeof target === "string") return refuse(ctx, `/ship: ${target}`);
 			const gh = parts.ghFor(target.owner);
-			const me = out(gh(["api", "user", "--jq", ".login"]));
+			const me = out(await gh(["api", "user", "--jq", ".login"]));
 			if (!me) return refuse(ctx, `/ship: can't tell which GitHub account to use for ${target.owner} (gh api user failed)`);
+			const session = ctx.sessionManager.getSessionId();
 
 			let pr: PrRef;
 			let putUp = false;
@@ -494,7 +561,14 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 					!unattended() && ctx.hasUI
 						? (files: string[]) => ctx.ui.confirm("Commit these files and open a draft PR?", `${files.slice(0, 15).join("\n")}${files.length > 15 ? `\nand ${files.length - 15} more` : ""}`)
 						: undefined;
-				const put = await parts.putUp(root, { git: parts.git, gh, confirm, sshHostname: parts.sshHostname });
+				const put = await parts.putUp(root, {
+					git: parts.git,
+					gh,
+					confirm,
+					sshHostname: parts.sshHostname,
+					// Asked once put-up knows the branch's PR, before it pushes: a second /ship that is refused pushes nothing (AC11).
+					heldElsewhere: found => parts.heldElsewhere(found, session, parts.now()),
+				});
 				if (typeof put === "string") return refuse(ctx, `/ship: ${put}`);
 				pr = put;
 				putUp = true;
@@ -502,18 +576,18 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			if (run !== null && !samePr(run.pr, pr)) return refuse(ctx, `/ship: already watching ${label(run.pr)}; run /ship stop first`);
 
 			const trust = { me, bots: args.bots };
-			const snapshot = parts.readPr(pr, gh, trust);
+			const snapshot = await parts.readPr(pr, gh, trust);
 			if (typeof snapshot === "string") return refuse(ctx, `/ship: ${snapshot}`);
 			if (snapshot.state !== "OPEN") return refuse(ctx, `/ship: ${label(pr)} is ${snapshot.state.toLowerCase()}; nothing to watch`, "warning");
 			if (snapshot.author.toLowerCase() !== me.toLowerCase()) {
 				return refuse(ctx, `/ship: ${label(pr)} was opened by ${snapshot.author}, and gh acts as ${me} for ${pr.owner}; /ship only watches pull requests of that account`);
 			}
-			const branch = out(parts.git(root, ["symbolic-ref", "--short", "-q", "HEAD"]));
+			const branch = out(await parts.git(root, ["symbolic-ref", "--short", "-q", "HEAD"]));
 			if (branch !== snapshot.headRef) return refuse(ctx, `/ship: this checkout is on ${branch ?? "no branch"}, but ${label(pr)} is ${snapshot.headRef}; check that branch out first`);
 
 			// A rerun on the same PR starts the watch over from GitHub and the state file (AC10), with the pass count reset (AC14).
 			if (run !== null) finish(run, "stopped", { quiet: true });
-			const watch = parts.claimWatch(pr, { baseRef: snapshot.baseRef, headRef: snapshot.headRef, session: ctx.sessionManager.getSessionId(), pid: process.pid, now: parts.now() });
+			const watch = parts.claimWatch(pr, { baseRef: snapshot.baseRef, headRef: snapshot.headRef, session, pid: process.pid, now: parts.now() });
 			if (typeof watch === "string") return refuse(ctx, `/ship: ${watch}`);
 			try {
 				parts.armFence({ pushBranch: snapshot.headRef, root });
@@ -530,7 +604,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				root,
 				watch,
 				timer: null,
-				report: args.report === null ? null : path.resolve(dir, args.report),
+				report: args.report === null ? null : path.resolve(dir, expandHome(args.report)),
 				state: "watching",
 				reason: null,
 				lastLine: "started",
@@ -543,6 +617,8 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				passFrom: null,
 				triage: false,
 				failedReads: 0,
+				reading: null,
+				turnsEnded: 0,
 				noticed: "",
 			};
 			run = r;
@@ -551,12 +627,22 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				say(ctx, `/ship: watching ${label(pr)} as ${me} on ${snapshot.headRef}, fence armed. The PR is read every ${SHIP.tickMs / 60_000} minutes; a model pass starts only when something changes.`);
 				// The review comes first, so the first pass has its findings to triage; the first tick follows on the timer.
 				if (putUp && !watch.told.includes(TOLD_REVIEWED)) sendReview(r);
-				else tick(r, snapshot);
+				else await tick(r, snapshot);
 			} catch (error) {
 				finish(r, "stopped", { quiet: true });
 				return refuse(ctx, `/ship: ${message(error)}`);
 			}
 			return { url: snapshot.url };
+		}
+
+		async function start(args: Extract<Args, { kind: "start" }> & { cwd?: string }, ctx: ExtensionContext): Promise<{ url: string } | { refusal: string }> {
+			if (starting) return refuse(ctx, "/ship: another /ship is still starting; run it again in a moment", "warning");
+			starting = true;
+			try {
+				return await begin(args, ctx);
+			} finally {
+				starting = false;
+			}
 		}
 
 		function describe(r: Run): string {
@@ -599,8 +685,8 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 					"Put the checkout's branch up as a draft pull request when it has none, have it reviewed, and watch it until it merges or closes: fix CI, merge the base, answer comments, never merge. " +
 					"Returns the pull request URL, or fails with the reason it refused (a dirty tree, the default branch, a secret-looking file, another watch).",
 				parameters: Type.Object({
-					cwd: Type.Optional(Type.String({ description: "Absolute path of the checkout to put up and watch; defaults to this session's folder." })),
-					report: Type.Optional(Type.String({ description: "Path of a JSON status file rewritten after each pass." })),
+					cwd: Type.Optional(Type.String({ description: "Absolute path of the checkout to put up and watch (a leading ~ is your home folder); defaults to this session's folder." })),
+					report: Type.Optional(Type.String({ description: "Path of a JSON status file rewritten after each pass (a leading ~ is your home folder)." })),
 				}),
 				approval: "write",
 				async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -617,28 +703,14 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			if (r === null || r.awaiting === null || event.willContinue === true) return;
 			const kind = r.awaiting;
 			r.awaiting = null;
-			r.state = "watching";
+			r.turnsEnded++;
 			if (kind === "review") {
+				r.state = "watching";
 				r.lastLine = "review done; the first pass triages it";
 				return refresh(r);
 			}
-			const { now, pushed } = settle(r);
-			const reply = lastReply(event.messages);
-			const found = readVerdict(reply);
-			const doubt = found?.verdict !== "ready" ? null : now === null ? "couldn't re-read the PR" : notReady(now, pushed);
-			r.lastLine = doubt === null ? found?.note || reply.trim().split("\n")[0]?.slice(0, 200) || `pass ${r.passes} ended` : `said ready, but ${doubt}`;
-			let key = "";
-			if (found?.verdict === "ready" && doubt === null) {
-				Object.assign(r, { state: "ready", waitingFor: found.note || "what is still yours" });
-				key = `ready:${r.snapshot.headSha}`;
-			} else if (found?.verdict === "needs-you") {
-				Object.assign(r, { state: "needs-you", waitingFor: found.note || "see the session" });
-				key = `needs-you:${r.waitingFor}`;
-			}
-			// A repeat of the verdict the user was just told stays quiet; any other verdict makes the next one news again.
-			if (key !== "" && key !== r.noticed) notice(r, `PR #${r.pr.number} ${found?.verdict === "ready" ? "is ready" : "needs you"}: ${r.waitingFor}`);
-			r.noticed = key;
-			refresh(r);
+			// Not awaited: the re-read waits on GitHub, and this handler may not hold the session's other events up for that.
+			void queue(r, () => passEnded(r, event));
 		});
 
 		// The conversation the passes belong to is going away, so the watch goes with it.
@@ -659,21 +731,38 @@ const SKILL = path.join(import.meta.dir, "..", "skills", "ship", "SKILL.md");
 
 /**
  * gh and git run for the watch's own reads and for put-up, not for the model, so they skip the fence's shims: the fence
- * judges what the model runs, and a refusal of the watch's own GraphQL read would end the watch. Nothing prompts.
+ * judges what the model runs, and a refusal of the watch's own GraphQL read would end the watch. Nothing prompts. Never
+ * synchronous: a read takes seconds on a slow link, and the session must keep running while it waits (#7). Output is untrimmed.
  */
-function exec(command: string, args: string[]): { code: number; out: string; err: string } {
+export async function exec(command: string, args: string[], timeoutMs = RUN_TIMEOUT_MS): Promise<{ code: number; out: string; err: string }> {
 	const entries = (process.env.PATH ?? "").split(path.delimiter).filter(entry => entry !== SHIM_DIR);
 	try {
-		const done = Bun.spawnSync([command, ...args], {
+		const child = Bun.spawn([command, ...args], {
 			env: { ...process.env, PATH: entries.join(path.delimiter), GH_PROMPT_DISABLED: "1", GIT_TERMINAL_PROMPT: "0" },
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",
-			timeout: RUN_TIMEOUT_MS,
+			timeout: timeoutMs,
 		});
-		return { code: done.exitCode ?? 1, out: done.stdout.toString(), err: done.stderr.toString() };
+		// Both pipes are read while it runs, so a chatty child never fills one and stalls. A child killed at the timeout has no exit code: that is a failure.
+		const [out, err] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+		return { code: child.exitCode ?? 1, out, err };
 	} catch (error) {
 		return { code: 127, out: "", err: message(error) };
+	}
+}
+
+/**
+ * The host an alias in ~/.ssh/config connects to. `ssh -G` only reads local config, so unlike gh and git it stays
+ * synchronous. `--` ends ssh's options, so a host can never be read as one; the name check is a second guard.
+ */
+function sshHostname(alias: string): string | null {
+	if (!/^[A-Za-z0-9][\w.-]*$/.test(alias)) return null;
+	try {
+		const done = Bun.spawnSync(["ssh", "-G", "--", alias], { stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 5_000 });
+		return /^hostname (\S+)$/im.exec(done.stdout.toString())?.[1]?.toLowerCase() ?? null;
+	} catch {
+		return null;
 	}
 }
 
@@ -682,13 +771,13 @@ const realParts: ShipParts = {
 	platform: process.platform,
 	git: (dir, args) => exec("git", ["-C", dir, ...args]),
 	ghFor: owner => args => exec(owner.toLowerCase() === "blinxsolutions" ? "gh-blinx" : "gh", args),
-	// `--` ends ssh's options, so a host can never be read as one; the name check is a second guard.
-	sshHostname: alias => (/^[A-Za-z0-9][\w.-]*$/.test(alias) ? (/^hostname (\S+)$/im.exec(exec("ssh", ["-G", "--", alias]).out)?.[1]?.toLowerCase() ?? null) : null),
+	sshHostname,
 	parseTarget,
 	readPr,
 	putUp,
 	nextStep,
 	claimWatch,
+	heldElsewhere,
 	renewClaim,
 	releaseWatch,
 	saveWatch,

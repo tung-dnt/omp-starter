@@ -75,6 +75,16 @@ const text = (v: unknown): string => (typeof v === "string" ? v : "");
 /** The items of a GraphQL connection (`{ nodes: [...] }`), minus the nulls it holds for things the viewer can't see. */
 const nodes = (v: unknown): Obj[] => list(obj(v).nodes).filter(n => n !== null).map(obj);
 
+/** What `make` returns for each item, the nulls left out. One item at a time: each new commenter costs a permission lookup, and a PR with a hundred strangers must not start a hundred `gh` processes at once. */
+async function keep<T, R>(items: T[], make: (item: T) => Promise<R | null>): Promise<R[]> {
+	const kept: R[] = [];
+	for (const item of items) {
+		const made = await make(item);
+		if (made !== null) kept.push(made);
+	}
+	return kept;
+}
+
 function pick<T extends string>(v: unknown, allowed: readonly T[], what: string): T {
 	const found = allowed.find(a => a === v);
 	if (found !== undefined) return found;
@@ -87,8 +97,8 @@ function need(v: unknown, what: string): string {
 }
 
 /** gh's answer to `args`, parsed. A failure whose message holds `emptyWhen` is gh's way of saying "nothing there": null. */
-function run(gh: Gh, args: string[], emptyWhen?: string): unknown {
-	const r = gh(args);
+async function run(gh: Gh, args: string[], emptyWhen?: string): Promise<unknown> {
+	const r = await gh(args);
 	const what = `gh ${args.slice(0, 2).join(" ")}`;
 	if (r.code !== 0) {
 		if (emptyWhen !== undefined && r.err.includes(emptyWhen)) return null;
@@ -144,14 +154,14 @@ function trustFilter(gh: Gh, repo: string, trust: Trust) {
 	const writers = new Map<string, boolean>();
 	let untrusted = 0;
 
-	const canWrite = (login: string): boolean => {
+	const canWrite = async (login: string): Promise<boolean> => {
 		if (!/^[\w-]+$/.test(login)) return false;
-		const r = gh(["api", `repos/${repo}/collaborators/${login}/permission`, "--jq", ".permission"]);
+		const r = await gh(["api", `repos/${repo}/collaborators/${login}/permission`, "--jq", ".permission"]);
 		// A lookup that fails (no push access to the repo, a network error) leaves the person untrusted: fail closed.
 		return r.code === 0 && WRITE_ROLES.includes(r.out.trim());
 	};
 	/** The author when trusted. A Bot is trusted by name alone, never by permission, and a User never by a bot's name. */
-	const allowed = (author: unknown): { login: string; type: "User" | "Bot" } | null => {
+	const allowed = async (author: unknown): Promise<{ login: string; type: "User" | "Bot" } | null> => {
 		const { login, __typename: type } = obj(author);
 		if (typeof login !== "string" || (type !== "User" && type !== "Bot")) return null;
 		const who = bare(login);
@@ -160,7 +170,7 @@ function trustFilter(gh: Gh, repo: string, trust: Trust) {
 		if (who === me) return { login, type };
 		let can = writers.get(who);
 		if (can === undefined) {
-			can = canWrite(login);
+			can = await canWrite(login);
 			writers.set(who, can);
 		}
 		return can ? { login, type } : null;
@@ -170,9 +180,9 @@ function trustFilter(gh: Gh, repo: string, trust: Trust) {
 		get untrusted() {
 			return untrusted;
 		},
-		note(c: Obj): Note | null {
+		async note(c: Obj): Promise<Note | null> {
 			if (c.isMinimized === true) return null;
-			const who = allowed(c.author);
+			const who = await allowed(c.author);
 			if (!who) {
 				untrusted++;
 				return null;
@@ -182,8 +192,8 @@ function trustFilter(gh: Gh, repo: string, trust: Trust) {
 			if (shown.body === "") return null;
 			return { id: text(c.id), author: who.login, bot: who.type === "Bot", yours, at: text(c.createdAt), url: text(c.url), ...shown };
 		},
-		review(r: Obj): Review | null {
-			const who = allowed(r.author);
+		async review(r: Obj): Promise<Review | null> {
+			const who = await allowed(r.author);
 			if (!who) {
 				if (text(r.body).trim() !== "") untrusted++;
 				return null;
@@ -214,27 +224,28 @@ function digest(s: Omit<Snapshot, "hash">): string {
 	return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 }
 
-function read(pr: PrRef, gh: Gh, trust: Trust): Snapshot {
+async function read(pr: PrRef, gh: Gh, trust: Trust): Promise<Snapshot> {
 	const repo = `${pr.owner}/${pr.repo}`;
-	const view = obj(run(gh, ["pr", "view", String(pr.number), "-R", repo, "--json", VIEW_FIELDS]));
+	const view = obj(await run(gh, ["pr", "view", String(pr.number), "-R", repo, "--json", VIEW_FIELDS]));
 	// gh has no empty answer for checks: a PR nothing reports on exits 1 with "no checks reported" instead of printing [].
-	const checks = list(run(gh, ["pr", "checks", String(pr.number), "-R", repo, "--json", "name,bucket,link"], "no checks reported")).map(c => ({
+	const checks = list(await run(gh, ["pr", "checks", String(pr.number), "-R", repo, "--json", "name,bucket,link"], "no checks reported")).map(c => ({
 		name: text(obj(c).name),
 		bucket: pick(obj(c).bucket, BUCKETS, "a check's bucket"),
 		link: text(obj(c).link) || null,
 	}));
-	const discussion = run(gh, ["api", "graphql", "-f", `query=${DISCUSSION}`, "-f", `owner=${pr.owner}`, "-f", `repo=${pr.repo}`, "-F", `number=${pr.number}`]);
+	const discussion = await run(gh, ["api", "graphql", "-f", `query=${DISCUSSION}`, "-f", `owner=${pr.owner}`, "-f", `repo=${pr.repo}`, "-F", `number=${pr.number}`]);
 	const pull = obj(obj(obj(discussion).data).repository).pullRequest;
 	if (pull === null || pull === undefined) throw new Unreadable(`${repo}#${pr.number} is not readable with this account`);
 
 	const filter = trustFilter(gh, repo, trust);
-	const threads: Thread[] = nodes(obj(pull).reviewThreads).flatMap(t => {
-		const notes = nodes(t.comments).map(c => filter.note(c)).filter(n => n !== null);
+	const threads: Thread[] = [];
+	for (const t of nodes(obj(pull).reviewThreads)) {
+		const notes = await keep(nodes(t.comments), c => filter.note(c));
 		const line = typeof t.line === "number" ? t.line : null;
-		return notes.length === 0 ? [] : [{ id: text(t.id), isResolved: t.isResolved === true, path: text(t.path) || null, line, notes }];
-	});
-	const comments = nodes(obj(pull).comments).map(c => filter.note(c)).filter(n => n !== null);
-	const reviews = nodes(obj(pull).reviews).map(r => filter.review(r)).filter(r => r !== null);
+		if (notes.length > 0) threads.push({ id: text(t.id), isResolved: t.isResolved === true, path: text(t.path) || null, line, notes });
+	}
+	const comments = await keep(nodes(obj(pull).comments), c => filter.note(c));
+	const reviews = await keep(nodes(obj(pull).reviews), r => filter.review(r));
 
 	const snapshot: Omit<Snapshot, "hash"> = {
 		pr,
@@ -258,9 +269,9 @@ function read(pr: PrRef, gh: Gh, trust: Trust): Snapshot {
 }
 
 /** One read of the PR, or why it couldn't be read: `gh pr view`, `gh pr checks` and one GraphQL query, plus a permission lookup per commenter. */
-export const readPr: ReadPr = (pr, gh, trust) => {
+export const readPr: ReadPr = async (pr, gh, trust) => {
 	try {
-		return read(pr, gh, trust);
+		return await read(pr, gh, trust);
 	} catch (error) {
 		if (error instanceof Unreadable) return error.message;
 		throw error;

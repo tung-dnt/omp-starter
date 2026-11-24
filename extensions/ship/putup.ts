@@ -8,12 +8,14 @@ import { spawnSync } from "node:child_process";
 import { isProtectedPath } from "./fence";
 import type { Gh, Git, PrRef, PutUp } from "./types";
 
-/** The contract's deps, plus how an SSH alias in origin resolves; tests replace it so they need no ssh config. */
+/** The contract's deps, plus how an SSH alias in origin resolves (tests replace it so they need no ssh config) and who else watches a PR. */
 export interface PutUpDeps {
 	git: Git;
 	gh: Gh;
 	confirm?: (files: string[]) => Promise<boolean>;
 	sshHostname?: (alias: string) => string | null;
+	/** Why another live session already watches this PR, or null. Asked once the branch's open PR is known, before anything is pushed. */
+	heldElsewhere?: (pr: PrRef) => string | null;
 }
 
 /** What one gh or git call returned. */
@@ -22,7 +24,7 @@ interface Outcome {
 	out: string;
 	err: string;
 }
-type RunGit = (...args: string[]) => Outcome;
+type RunGit = (...args: string[]) => Promise<Outcome>;
 
 interface Repo {
 	owner: string;
@@ -60,8 +62,8 @@ function sshConfigHostname(alias: string): string | null {
 	return /^hostname (\S+)$/im.exec(out)?.[1]?.toLowerCase() ?? null;
 }
 
-function originRepo(run: RunGit, sshHostname: (alias: string) => string | null): Repo {
-	const got = run("remote", "get-url", "origin");
+async function originRepo(run: RunGit, sshHostname: (alias: string) => string | null): Promise<Repo> {
+	const got = await run("remote", "get-url", "origin");
 	const url = got.out.trim();
 	if (got.code !== 0 || url === "") no(`this checkout has no origin remote: ${brief(got)}`);
 	// A URL may carry user:token@; a refusal must not repeat the token.
@@ -86,15 +88,15 @@ function originRepo(run: RunGit, sshHostname: (alias: string) => string | null):
 
 // ---- the branch -----------------------------------------------------------------------------------------------------
 
-function currentBranch(run: RunGit): string {
-	const head = run("symbolic-ref", "--short", "-q", "HEAD");
+async function currentBranch(run: RunGit): Promise<string> {
+	const head = await run("symbolic-ref", "--short", "-q", "HEAD");
 	if (head.code === 1 && head.out.trim() === "") no("HEAD is detached; check out a branch first");
 	if (head.code !== 0 || head.out.trim() === "") no(`can't read the current branch: ${brief(head)}`);
 	return head.out.trim();
 }
 
-function defaultBranch(run: RunGit): string {
-	const head = run("symbolic-ref", "-q", "refs/remotes/origin/HEAD");
+async function defaultBranch(run: RunGit): Promise<string> {
+	const head = await run("symbolic-ref", "-q", "refs/remotes/origin/HEAD");
 	const name = head.code === 0 ? head.out.trim().replace(/^refs\/remotes\/origin\//, "") : "";
 	return name || no("the default branch is unknown because origin/HEAD is not set here; run `git remote set-head origin --auto` and try again");
 }
@@ -126,15 +128,15 @@ function rejectSecrets(paths: string[], where: string): void {
 }
 
 /** Files the branch's own commits add or change, deletions aside: a secret removed again still sits in the pushed history. */
-function committedFiles(run: RunGit, branch: string, base: string): string[] {
-	const log = run("log", "-z", "--name-only", "--format=", "--diff-filter=d", `refs/remotes/origin/${base}..HEAD`);
+async function committedFiles(run: RunGit, branch: string, base: string): Promise<string[]> {
+	const log = await run("log", "-z", "--name-only", "--format=", "--diff-filter=d", `refs/remotes/origin/${base}..HEAD`);
 	if (log.code !== 0) no(`can't compare ${branch} with origin/${base} (git fetch origin may help): ${brief(log)}`);
 	return log.out.split("\0").filter(Boolean);
 }
 
 /** `<short sha> <subject>` of each commit on the branch beyond the base, oldest first. */
-function commitsAhead(run: RunGit, base: string): string[] {
-	const log = run("log", "--reverse", "--format=%h %s", `refs/remotes/origin/${base}..HEAD`);
+async function commitsAhead(run: RunGit, base: string): Promise<string[]> {
+	const log = await run("log", "--reverse", "--format=%h %s", `refs/remotes/origin/${base}..HEAD`);
 	if (log.code !== 0) no(`can't list the commits beyond origin/${base}: ${brief(log)}`);
 	return log.out.split("\n").filter(Boolean);
 }
@@ -149,8 +151,8 @@ interface Tree {
 	conflicts: string[];
 }
 
-function readTree(run: RunGit): Tree {
-	const status = run("status", "--porcelain", "-z", "--untracked-files=all");
+async function readTree(run: RunGit): Promise<Tree> {
+	const status = await run("status", "--porcelain", "-z", "--untracked-files=all");
 	if (status.code !== 0) no(`can't read the working tree: ${brief(status)}`);
 	const tree: Tree = { files: [], present: [], conflicts: [] };
 	const records = status.out.split("\0");
@@ -176,18 +178,18 @@ function rejectUnsafe(tree: Tree): void {
 
 /** Commits all uncommitted work once the user has seen the files; true when it did. */
 async function commitWork(run: RunGit, message: string, confirm: PutUpDeps["confirm"]): Promise<boolean> {
-	const tree = readTree(run);
+	const tree = await readTree(run);
 	if (tree.files.length === 0) return false;
 	rejectUnsafe(tree);
 	if (!confirm) no(`uncommitted work in ${tree.files.length} ${tree.files.length === 1 ? "file" : "files"} and nobody to confirm committing it; an unattended session never commits for you. Commit it yourself, then run /ship again`);
 	if (!(await confirm([...tree.files]))) no("the uncommitted files were not confirmed");
 	// What was confirmed is what gets committed.
-	const now = readTree(run);
+	const now = await readTree(run);
 	if (now.files.join("\0") !== tree.files.join("\0")) no("the working tree changed while waiting for the confirm; run /ship again");
 	rejectUnsafe(now);
-	const add = run("add", "-A");
+	const add = await run("add", "-A");
 	if (add.code !== 0) no(`git add failed: ${brief(add)}`);
-	const commit = run("commit", "-m", message);
+	const commit = await run("commit", "-m", message);
 	if (commit.code !== 0) no(`git commit failed (hooks stay on, and the files stay staged): ${brief(commit)}`);
 	return true;
 }
@@ -215,8 +217,8 @@ interface Listed {
 }
 
 /** The branch's open PR in this repo, or null. A PR from a fork that reuses the branch name is not it. */
-function openPr(gh: Gh, repo: Repo, branch: string): Open | null {
-	const got = gh(["pr", "list", "--repo", `${repo.owner}/${repo.repo}`, "--head", branch, "--state", "open", "--json", "number,url,author,isCrossRepository"]);
+async function openPr(gh: Gh, repo: Repo, branch: string): Promise<Open | null> {
+	const got = await gh(["pr", "list", "--repo", `${repo.owner}/${repo.repo}`, "--head", branch, "--state", "open", "--json", "number,url,author,isCrossRepository"]);
 	if (got.code !== 0) no(`can't list the open pull requests for ${branch}: ${brief(got)}`);
 	let rows: unknown;
 	try {
@@ -238,8 +240,8 @@ function openPr(gh: Gh, repo: Repo, branch: string): Open | null {
 }
 
 /** The login gh acts as. */
-function account(gh: Gh): string {
-	const got = gh(["api", "user", "--jq", ".login"]);
+async function account(gh: Gh): Promise<string> {
+	const got = await gh(["api", "user", "--jq", ".login"]);
 	if (got.code !== 0 || got.out.trim() === "") no(`can't tell which GitHub account gh acts as: ${brief(got)}`);
 	return got.out.trim();
 }
@@ -262,29 +264,32 @@ async function put(root: string, deps: PutUpDeps): Promise<PrRef> {
 	const { gh, confirm } = deps;
 	const run: RunGit = (...args) => deps.git(root, args);
 
-	const repo = originRepo(run, deps.sshHostname ?? sshConfigHostname);
-	const branch = currentBranch(run);
-	const base = defaultBranch(run);
+	const repo = await originRepo(run, deps.sshHostname ?? sshConfigHostname);
+	const branch = await currentBranch(run);
+	const base = await defaultBranch(run);
 	if (branch === base) no(`${branch} is the default branch; put the work on its own branch first`);
 
-	const existing = openPr(gh, repo, branch);
+	const existing = await openPr(gh, repo, branch);
 	if (existing) {
-		const me = account(gh);
+		const me = await account(gh);
 		if (existing.author.toLowerCase() !== me.toLowerCase()) no(`${existing.url} is already open for ${branch}, but ${existing.author} opened it and gh acts as ${me}`);
+		// A PR another live session watches is refused here, before the push below: a refused /ship changes nothing (AC11).
+		const held = deps.heldElsewhere?.(existing.ref);
+		if (held) no(held);
 	}
 
-	rejectSecrets(committedFiles(run, branch, base), `are already committed on ${branch}`);
+	rejectSecrets(await committedFiles(run, branch, base), `are already committed on ${branch}`);
 	const { commit, title } = wording(branch);
 	// With a PR already open the tree is not put-up's to commit: /ship commits only the files it changed itself (AC8).
 	const committed = existing ? false : await commitWork(run, commit, confirm);
-	const commits = existing ? [] : commitsAhead(run, base);
+	const commits = existing ? [] : await commitsAhead(run, base);
 	if (!existing && commits.length === 0) no(`${branch} has no commits beyond ${base}, so there is nothing to put up`);
 
-	const push = run("push", "origin", branch);
+	const push = await run("push", "origin", branch);
 	if (push.code !== 0) no(`git push origin ${branch} failed${committed ? " (the work is committed locally)" : ""}: ${brief(push)}`);
 	if (existing) return existing.ref;
 
-	const created = gh(["pr", "create", "--repo", `${repo.owner}/${repo.repo}`, "--draft", "--head", branch, "--title", title, "--body", prBody(branch, commits)]);
+	const created = await gh(["pr", "create", "--repo", `${repo.owner}/${repo.repo}`, "--draft", "--head", branch, "--title", title, "--body", prBody(branch, commits)]);
 	if (created.code !== 0) no(`gh pr create failed (${branch} is pushed): ${brief(created)}`);
 	return prRef(created.out) ?? prRef(created.err) ?? no(`gh pr create printed no pull request URL: ${brief(created)}`);
 }
