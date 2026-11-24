@@ -1,7 +1,7 @@
 import { semver } from "bun";
 import type { Exec, WizardUi } from "../setup";
 
-export type PluginKey = "agent-skills" | "pstack" | "mattpocock-skills" | "starter";
+export type PluginKey = "agent-skills" | "pstack" | "mattpocock-skills" | "ponytail" | "starter";
 type Scope = "user" | "project";
 export interface PluginTarget {
 	/** The plugin's name in its marketplace catalog. */
@@ -24,12 +24,15 @@ export const PSTACK_PLUGIN: PluginTarget = {
 export const MATT_PLUGIN: PluginTarget = {
 	key: "mattpocock-skills", id: "mattpocock-skills@mattpocock", marketplace: "mattpocock", repo: "mattpocock/skills", packageNames: ["mattpocock-skills"],
 };
+export const PONYTAIL_PLUGIN: PluginTarget = {
+	key: "ponytail", id: "ponytail@ponytail", marketplace: "ponytail", repo: "DietrichGebert/ponytail", packageNames: ["@dietrichgebert/ponytail"],
+};
 const STARTER_PLUGIN: PluginTarget = {
 	key: "starter", id: "starter@omp-starter", marketplace: "omp-starter",
 	repo: "tung-dnt/omp-starter", catalog: ".omp-plugin/marketplace.json", packageNames: ["omp-starter", "starter"],
 };
 // Update the updater last; all targets and code are loaded before installation changes.
-const TARGETS = [ADDY_PLUGIN, PSTACK_PLUGIN, MATT_PLUGIN, STARTER_PLUGIN];
+const TARGETS = [ADDY_PLUGIN, PSTACK_PLUGIN, MATT_PLUGIN, PONYTAIL_PLUGIN, STARTER_PLUGIN];
 
 export type PluginInstallation =
 	{ readonly key: PluginKey; readonly kind: "marketplace"; readonly scope: Scope; readonly version: string; readonly installPath?: string }

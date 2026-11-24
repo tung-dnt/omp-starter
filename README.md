@@ -4,7 +4,7 @@ A first-run setup plugin for [omp (Oh My Pi)](https://omp.sh) on macOS. The firs
 
 | Step | What it does |
 |---|---|
-| **Skill kits** *(optional)* | A checkbox picker for any combination of [pstack](https://github.com/cursor/plugins/tree/main/pstack), [Matt Pocock's skills](https://github.com/mattpocock/skills), [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) and [spec-kit](https://github.com/github/spec-kit), with a warning when the chosen kits cover the same job. See [Skill kits](#skill-kits-starter-skills). |
+| **Skill kits** *(optional)* | A checkbox picker for any combination of [pstack](https://github.com/cursor/plugins/tree/main/pstack), [Matt Pocock's skills](https://github.com/mattpocock/skills), [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills), [ponytail](https://github.com/DietrichGebert/ponytail) and [spec-kit](https://github.com/github/spec-kit), with a warning when the chosen kits cover the same job. See [Skill kits](#skill-kits-starter-skills). |
 | **Model routing** *(Claude-first)* | Saves `claude` and `codex` subscription presets without requiring a login. When the required Claude models are available, also routes work to Opus, Sonnet, Haiku and Fable by job, with matching effort levels; otherwise keeps the current routing. Using a preset requires its provider login. |
 | **TypeSafe Jev judge** *(optional)* | Routes omp's `judge` role to TypeSafe Jev after checking your API key, and stores the key in `~/.omp/agent/.env` (mode 600). Jev then answers `question` rules and picks the thinking level per prompt. Offered on a brand-new install; existing installs run `/starter jev`. See [TypeSafe Jev judge](#typesafe-jev-judge-starter-jev). |
 | **Memory** | Picks omp's memory backend (`off`, `local`, `hindsight`, `mnemopi`, `sharpshooter`), writes the matching memory rules into `~/.omp/agent/AGENTS.md`, and optionally adds a commit gate. omp itself owns the backend settings (`/settings` → Memory). Offered on a brand-new install; existing installs run `/starter memory`. See [Memory](#memory-starter-memory). |
@@ -202,6 +202,7 @@ One form with a checkbox per kit. Checked kits get installed; an installed kit y
 | pstack | `pstack@cursor-plugins` (marketplace `cursor/plugins`) | omp's plugin loader skips 57 of pstack's 58 skills (their `disable-model-invocation` field), so the step adds `<plugins>/node_modules/pstack/skills` to `skills.customDirectories`. That link follows pstack upgrades. Uninstalling removes the entry. |
 | Matt Pocock | `mattpocock-skills@mattpocock` (marketplace `mattpocock/skills`) | All 27 promoted skills load. |
 | addy | `agent-skills@addy-agent-skills` (marketplace `addyosmani/agent-skills`) | All 26 skills load. |
+| ponytail | `ponytail@ponytail` (marketplace `DietrichGebert/ponytail`) | Loads through its pi extension, so the least-code ladder is injected every session (no need for the model to pick the skill). Adds `/ponytail [lite\|full\|ultra\|off]`, `/ponytail-review`, `/ponytail-audit`, `/ponytail-debt`, `/ponytail-gain` and `/ponytail-help`. `ponytail-review` overlaps the other kits' code review skills. Validation, error handling and security stay untouched; in repos with a design system its "native platform feature" rung can conflict with reuse, so its "already in this codebase" rung should win. |
 | spec-kit | `uv tool install specify-cli` | A CLI, no skills: run `specify init --here --integration omp` in a repo to add `/speckit.*` commands, `.specify/` and `specs/`. Needs [uv](https://docs.astral.sh/uv/); without it the step says so and installs nothing. |
 
 **Overlap warning.** Before anything changes, kits that cover the same job are listed with their skills, and you choose **Install anyway** or **Change selection** (the picker reopens with your choice). Jobs checked: spec/requirements, plan/tasks, implementation, TDD, code review, debugging, stress-testing a plan, skill router, architecture and prototyping. Two names also clash: `tdd` and `teach` exist in pstack and Matt Pocock's kit; omp keeps pstack's as `/skill:tdd` and `/skill:teach` and namespaces Matt's as `mattpocock-skills/tdd` and `mattpocock-skills/teach`.
@@ -331,6 +332,11 @@ The numbering starts at M5: M1 to M4 measured memory notes that omp's memory bac
 Limits: a session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names and tool names; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder; its only write is the `--json` file.
 
 ## Release notes
+
+### 0.43.0 — 2026-11-24
+
+- **Added:** ponytail as a skill kit in `/starter skills` (`ponytail@ponytail`, marketplace `DietrichGebert/ponytail`), with `ponytail-review` in the code review overlap check; `/starter` plugin updates also cover it.
+- Existing installs: nothing to do. Run `/starter skills` to add or remove ponytail; an existing marketplace install of `ponytail@ponytail` is picked up as installed.
 
 ### 0.42.0 — 2026-11-24
 

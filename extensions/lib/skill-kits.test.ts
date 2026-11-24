@@ -6,7 +6,7 @@ import type { Exec } from "../setup";
 import { scriptedUi, type UiScript } from "../test-harness";
 import { overlapWarning, setupSkillKits } from "./skill-kits";
 
-const IDS = { pstack: "pstack@cursor-plugins", mattpocock: "mattpocock-skills@mattpocock", addy: "agent-skills@addy-agent-skills" } as const;
+const IDS = { pstack: "pstack@cursor-plugins", mattpocock: "mattpocock-skills@mattpocock", addy: "agent-skills@addy-agent-skills", ponytail: "ponytail@ponytail" } as const;
 type PluginKit = keyof typeof IDS;
 
 let root: string;
@@ -156,10 +156,10 @@ test("cancelling the picker changes nothing", async () => {
 
 test("a host without forms asks one confirm per kit", async () => {
 	const w = world();
-	const u = ui({ confirm: [false, false, true, false] });
+	const u = ui({ confirm: [false, false, false, true, false] });
 	expect(await setupSkillKits(u, w.exec, true)).toBe("done");
-	expect(u.prompts.map(p => p.title)).toEqual(["Skill kit: pstack", "Skill kit: Matt Pocock", "Skill kit: addy (addyosmani/agent-skills)", "Skill kit: spec-kit (GitHub)"]);
-	expect([...w.plugins]).toEqual(["addy"]);
+	expect(u.prompts.map(p => p.title)).toEqual(["Skill kit: pstack", "Skill kit: Matt Pocock", "Skill kit: addy (addyosmani/agent-skills)", "Skill kit: ponytail", "Skill kit: spec-kit (GitHub)"]);
+	expect([...w.plugins]).toEqual(["ponytail"]);
 });
 
 test("overlapWarning: one kit never overlaps; the same job in two kits does", () => {
@@ -167,4 +167,5 @@ test("overlapWarning: one kit never overlaps; the same job in two kits does", ()
 	expect(overlapWarning([])).toBeUndefined();
 	expect(overlapWarning(["addy", "spec-kit"])).toContain("spec / requirements");
 	expect(overlapWarning(["pstack", "addy"])).not.toContain("name clash");
+	expect(overlapWarning(["addy", "ponytail"])).toContain("ponytail-review");
 });

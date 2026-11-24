@@ -1,13 +1,13 @@
-// `/starter skills`: pick any combination of skill kits (pstack, Matt Pocock, addy, spec-kit) and warn when the
+// `/starter skills`: pick any combination of skill kits (pstack, Matt Pocock, addy, ponytail, spec-kit) and warn when the
 // chosen kits cover the same job. The picker sets the exact combination: unchecking an installed kit uninstalls it
 // after a confirm that names it. Unmanaged (npm/link/Git) and project-scope installs are reported, never touched.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Exec, WizardUi } from "../setup";
 import { expandHome } from "./state";
-import { ADDY_PLUGIN, MATT_PLUGIN, PSTACK_PLUGIN, checkPluginUpdates, readPluginInstallations, type PluginInstallation, type PluginTarget } from "./plugin-updates";
+import { ADDY_PLUGIN, MATT_PLUGIN, PONYTAIL_PLUGIN, PSTACK_PLUGIN, checkPluginUpdates, readPluginInstallations, type PluginInstallation, type PluginTarget } from "./plugin-updates";
 
-export type KitKey = "pstack" | "mattpocock" | "addy" | "spec-kit";
+export type KitKey = "pstack" | "mattpocock" | "addy" | "ponytail" | "spec-kit";
 
 interface Kit {
 	readonly key: KitKey;
@@ -21,6 +21,7 @@ export const KITS: readonly Kit[] = [
 	{ key: "pstack", label: "pstack", summary: "rigorous execution: /poteto-mode playbooks, tdd, interrogate, verification", plugin: PSTACK_PLUGIN },
 	{ key: "mattpocock", label: "Matt Pocock", summary: "grilling, to-spec / to-tickets, tdd, code review, domain modelling", plugin: MATT_PLUGIN },
 	{ key: "addy", label: "addy (addyosmani/agent-skills)", summary: "spec → plan → build → review → ship lifecycle skills", plugin: ADDY_PLUGIN },
+	{ key: "ponytail", label: "ponytail", summary: "always-on least-code ladder (reuse → stdlib → native → minimum); /ponytail-review delete-list", plugin: PONYTAIL_PLUGIN },
 	{ key: "spec-kit", label: "spec-kit (GitHub)", summary: "specify CLI; per repo `specify init --integration omp` adds /speckit.* commands and specs/" },
 ];
 
@@ -30,7 +31,7 @@ export const OVERLAPS: readonly { job: string; skills: Partial<Record<KitKey, st
 	{ job: "plan / tasks", skills: { pstack: "poteto-mode multi-phase-plan", mattpocock: "to-tickets", addy: "planning-and-task-breakdown", "spec-kit": "speckit.plan, speckit.tasks" } },
 	{ job: "implementation", skills: { pstack: "poteto-mode feature", mattpocock: "implement, implement-spec", addy: "incremental-implementation", "spec-kit": "speckit.implement" } },
 	{ job: "TDD", skills: { pstack: "tdd", mattpocock: "tdd", addy: "test-driven-development" } },
-	{ job: "code review", skills: { pstack: "interrogate", mattpocock: "code-review", addy: "code-review-and-quality" } },
+	{ job: "code review", skills: { pstack: "interrogate", mattpocock: "code-review", addy: "code-review-and-quality", ponytail: "ponytail-review" } },
 	{ job: "debugging", skills: { pstack: "poteto-mode bug-fix", mattpocock: "diagnosing-bugs", addy: "debugging-and-error-recovery" } },
 	{ job: "stress-test a plan", skills: { mattpocock: "grill-me, grilling", addy: "doubt-driven-development" } },
 	{ job: "skill router", skills: { pstack: "poteto-mode", mattpocock: "ask-matt, wizard", addy: "using-agent-skills" } },
