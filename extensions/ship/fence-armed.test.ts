@@ -127,6 +127,7 @@ describe("tool calls while armed", () => {
 			"OMP_SHIP_FENCE= git push origin main",
 			"command -p git push origin main",
 			"/opt/homebrew/bin/gh pr merge 5",
+			"/opt/homebrew/bin/git-lfs install --force",
 			"./git push origin main",
 			"~/.local/bin/gh pr merge 5",
 			"/usr/bin/g?t push origin main",
@@ -142,6 +143,7 @@ describe("tool calls while armed", () => {
 		}
 		expect(call("eval", { code: "import os\nos.environ['PATH'] = '/usr/bin'" })).toContain("ship fence");
 		expect(call("eval", { code: 'subprocess.run(["/opt/homebrew/bin/gh", "pr", "merge"])' })).toContain("by name");
+		expect(call("eval", { code: 'subprocess.run(["/opt/homebrew/bin/git-lfs", "install", "--force"])' })).toContain("by name");
 	});
 
 	test("the github tool opens drafts and pushes only the watched branch", () => {
@@ -521,5 +523,264 @@ describe("the shims, with real git", () => {
 		const r = git(env, "status");
 		expect(r.status).toBe(1);
 		expect(r.stderr).toContain(`${FENCE_ENV} was removed`);
+	});
+
+	describe("config, helper programs, patches and hooks that would step around the fence", () => {
+		/** A stand-in program: appends its name and argv to ran.log, then runs `after`. A line in the log is proof that git ran it. */
+		const RAN_LOG = path.join(privateHome(), "ran.log");
+		const stand = (file: string, after = ""): string => {
+			write(file, `#!/bin/sh\necho "${path.basename(file)} $*" >> ${RAN_LOG}\n${after}\nexit 0\n`);
+			fs.chmodSync(file, 0o755);
+			return file;
+		};
+		const ran = (): string[] => (fs.existsSync(RAN_LOG) ? fs.readFileSync(RAN_LOG, "utf8").trim().split("\n") : []);
+		/** Runs git and collects what the fence let through, so a failing run lists every hole at once. */
+		const holes: string[] = [];
+		const refuse = (env: NodeJS.ProcessEnv, cwd: string, ...args: string[]): void => {
+			const r = gitAt(cwd, env, ...args);
+			if (r.status !== 1 || !r.stderr.includes("ship fence")) holes.push(`git ${args.join(" ")} => ${r.status}: ${r.stderr.trim().split("\n")[0]}`);
+		};
+		beforeEach(() => {
+			holes.length = 0;
+		});
+
+		test("config that runs a program or reads more config is refused however it is set, and nothing runs", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			const home = privateHome();
+			const prog = stand(path.join(home, "bin", "prog"));
+			const include = path.join(home, "inc.cfg");
+			write(include, `[core]\n\tfsmonitor = ${prog}\n`);
+			const exec = path.join(home, "xp");
+			stand(path.join(exec, "git-upload-pack"));
+			const viaEnv = { ...process.env, PROG: prog };
+			refuse(process.env, repo, "-c", `core.fsmonitor=${prog}`, "status");
+			refuse(viaEnv, repo, "--config-env=core.fsmonitor=PROG", "status");
+			refuse(viaEnv, repo, "--config-env", "core.fsmonitor=PROG", "status");
+			refuse(process.env, repo, "-c", `core.editor=${prog}`, "commit", "--allow-empty");
+			refuse(process.env, repo, "-c", `gpg.program=${prog}`, "-c", "user.signingkey=k", "commit", "--allow-empty", "-S", "-m", "x");
+			refuse(process.env, repo, "-c", `include.path=${include}`, "config", "--get", "core.fsmonitor");
+			refuse(process.env, repo, "-c", "protocol.ext.allow=always", "clone", `ext::sh -c touch% ${home}/ext-ran`, path.join(home, "cloned"));
+			refuse(process.env, repo, "-c", `credential.helper=${prog}`, "fetch", "origin");
+			refuse(process.env, repo, "config", "core.fsmonitor", prog);
+			refuse(process.env, repo, "config", "--typ", "path", "core.fsmonitor", prog);
+			refuse(process.env, repo, "config", "--add", "include.path", include);
+			refuse(process.env, repo, "config", "--global", "core.pager", prog);
+			refuse(process.env, repo, "config", "diff.x.textconv", prog);
+			refuse(process.env, repo, "config", "filter.x.clean", prog);
+			refuse(process.env, repo, "config", "gpg.program", prog);
+			refuse({ ...process.env, GIT_EDITOR: prog }, repo, "config", "--edit");
+			// A harmless key's section renamed over a risky one would carry its keys along.
+			expect(gitAt(repo, process.env, "config", "foo.fsmonitor", prog).status).toBe(0);
+			refuse(process.env, repo, "config", "--rename-section", "foo", "core");
+			refuse(process.env, repo, `--exec-path=${exec}`, "fetch", "origin");
+			refuse({ ...process.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.fsmonitor", GIT_CONFIG_VALUE_0: prog }, repo, "status");
+			refuse({ ...process.env, GIT_CONFIG_PARAMETERS: `'core.fsmonitor'='${prog}'` }, repo, "status");
+			expect(holes).toEqual([]);
+			expect(ran()).toEqual([]);
+			expect(fs.existsSync(path.join(home, "ext-ran"))).toBe(false);
+			const kept = spawnSync("git", ["config", "--get-regexp", "^(include|core\\.(fsmonitor|pager|editor)|diff|filter|gpg)\\."], { cwd: repo, env: { ...process.env, PATH: savedPath }, encoding: "utf8" });
+			expect(kept.stdout.trim()).toBe("");
+			expect(kept.status).toBe(1);
+		}, 30_000);
+
+		test("commands that only look like those still run: reads of the keys, harmless config, asking for the exec path", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			for (const args of [
+				["config", "--get", "core.fsmonitor"], ["config", "core.hooksPath"], ["config", "--get-regexp", "^remote\\."], ["config", "--list"], ["config", "user.name", "tester"], ["config", "pull.rebase", "false"],
+				["-c", "core.quotepath=false", "status", "--short"], ["-c", "user.name=x", "-c", "user.email=x@y", "commit", "--allow-empty", "-m", "x"], ["-c", "color.ui=never", "log", "-1", "--oneline"], ["--exec-path"],
+			]) {
+				const r = gitAt(repo, process.env, ...args);
+				expect(r.stderr, args.join(" ")).not.toContain("ship fence");
+				expect(r.status ?? 0, args.join(" ")).toBeLessThan(2);
+			}
+			expect(fs.readFileSync(path.join(repo, ".git", "config"), "utf8")).toContain("name = tester");
+		});
+
+		const hookPatch = (p: string) => [`diff --git a/${p} b/${p}`, "new file mode 100755", "index 0000000..e69de29", "--- /dev/null", `+++ b/${p}`, "@@ -0,0 +1,2 @@", "+#!/bin/sh", "+echo planted", ""].join("\n");
+
+		test("apply plants no hook: --unsafe-paths and a patch that names a path in a git folder are refused", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			const patch = path.join(privateHome(), "hook.patch");
+			write(patch, hookPatch(".git/hooks/pre-commit"));
+			for (const args of [["apply", "--unsafe-paths", patch], ["apply", "--uns", patch], ["apply", "-p0", "--unsafe-paths", patch], ["apply", patch], ["apply", "--check", patch]]) refuse(process.env, repo, ...args);
+			// A git folder that isn't named .git is not caught by git's own check.
+			const proj = path.join(privateHome(), "projects", "sep");
+			fs.mkdirSync(proj, { recursive: true });
+			sh(proj, "init", "--quiet", "-b", "main", "--separate-git-dir", path.join(proj, "gd"), ".");
+			write(path.join(proj, "src/a.ts"), "export const a = 1;\n");
+			sh(proj, "add", "src");
+			sh(proj, "commit", "--quiet", "-m", "init");
+			armFence({ pushBranch: BRANCH, root: proj });
+			write(patch, hookPatch("gd/hooks/pre-commit"));
+			refuse(process.env, proj, "apply", patch);
+			expect(holes).toEqual([]);
+			expect(fs.readdirSync(path.join(repo, ".git", "hooks")).filter(name => !name.endsWith(".sample"))).toEqual([]);
+			expect(fs.readdirSync(path.join(proj, "gd", "hooks")).filter(name => !name.endsWith(".sample"))).toEqual([]);
+			// An ordinary patch applies, however it was made.
+			write(path.join(proj, "src/a.ts"), "export const a = 2;\n");
+			const diff = sh(proj, "diff");
+			sh(proj, "checkout", "--quiet", "--", "src/a.ts");
+			write(patch, diff);
+			expect(gitAt(proj, process.env, "apply", patch).status).toBe(0);
+			expect(fs.readFileSync(path.join(proj, "src/a.ts"), "utf8")).toBe("export const a = 2;\n");
+		});
+
+		test("lfs commands that write the hooks never reach git-lfs, as `git lfs` or as `git-lfs`; the others do", () => {
+			armFence({ pushBranch: BRANCH, root: repo });
+			const stubs = path.join(privateHome(), "stubs");
+			stand(path.join(stubs, "git-lfs"));
+			process.env.PATH = [SHIM_DIR, stubs, ...(process.env.PATH ?? "").split(path.delimiter).filter(entry => entry !== SHIM_DIR)].join(path.delimiter);
+			const lfs = (...args: string[]) => spawnSync("git-lfs", args, { cwd: repo, env: process.env, encoding: "utf8" });
+			for (const args of [["lfs", "install", "--force"], ["lfs", "install"], ["lfs", "update", "--force"], ["lfs", "uninstall"]]) refuse(process.env, repo, ...args);
+			for (const args of [["install", "--force"], ["install", "--local"], ["update", "--force"], ["uninstall"]]) {
+				const r = lfs(...args);
+				if (r.status !== 1 || !r.stderr.includes("ship fence")) holes.push(`git-lfs ${args.join(" ")} => ${r.status}: ${r.stderr.trim()}`);
+			}
+			expect(holes).toEqual([]);
+			expect(ran()).toEqual([]);
+			expect(git(process.env, "lfs", "ls-files").status).toBe(0);
+			expect(lfs("env").status).toBe(0);
+			expect(ran()).toEqual(["git-lfs ls-files", "git-lfs env"]);
+		});
+
+		test("a push that only changes the mode of a protected file is refused; a mode the base brought, or the branch held, is not", () => {
+			const script = path.join(repo, ".githooks", "pre-commit");
+			write(script, "#!/bin/sh\nexit 0\n");
+			write(path.join(repo, ".husky", "pre-push"), "#!/bin/sh\nexit 0\n");
+			sh(repo, "add", "-A");
+			sh(repo, "commit", "--quiet", "-m", "tracked hook scripts, not executable");
+			armFence({ pushBranch: BRANCH, root: repo });
+			expect(Object.keys(currentState().snapshot).sort()).toEqual([".githooks/pre-commit", ".github/workflows/ci.yml", ".husky/pre-push"]);
+			fs.chmodSync(script, 0o755);
+			sh(repo, "commit", "--quiet", "-am", "make the hook executable");
+			expect(sh(repo, "diff", "--summary", "HEAD~1", "HEAD")).toContain("mode change 100644 => 100755 .githooks/pre-commit");
+			const push = git(process.env, "push", "origin", BRANCH);
+			expect(push.status).toBe(1);
+			expect(push.stderr).toContain("would change .githooks/pre-commit");
+			expect(originHas(BRANCH)).toBe("");
+			// Changing it back leaves nothing to push.
+			sh(repo, "reset", "--quiet", "--hard", "HEAD~1");
+			expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+
+			// What the base brings is fine: origin's default branch holds the hook executable.
+			sh(repo, "switch", "--quiet", "main");
+			sh(repo, "merge", "--quiet", "--ff-only", BRANCH);
+			fs.chmodSync(path.join(repo, ".husky", "pre-push"), 0o755);
+			sh(repo, "commit", "--quiet", "-am", "base makes pre-push executable");
+			sh(repo, "push", "--quiet", "origin", "main");
+			sh(repo, "switch", "--quiet", BRANCH);
+			expect(git(process.env, "merge", "--quiet", "--no-edit", "origin/main").status).toBe(0);
+			expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+		});
+
+		test("a mode the branch held when /ship armed is not the push's change", () => {
+			const script = path.join(repo, ".githooks", "pre-commit");
+			write(script, "#!/bin/sh\nexit 0\n");
+			sh(repo, "add", "-A");
+			sh(repo, "commit", "--quiet", "-m", "hook");
+			fs.chmodSync(script, 0o755);
+			sh(repo, "commit", "--quiet", "-am", "the user's own chmod");
+			armFence({ pushBranch: BRANCH, root: repo });
+			write(path.join(repo, "src/a.ts"), "export const a = 2;\n");
+			sh(repo, "commit", "--quiet", "-am", "session fix");
+			expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+		});
+
+		/** The git commands the skill's Conflicts section names, `<base>` filled in. */
+		const conflictSteps = (base: string): string[][] => {
+			const skill = fs.readFileSync(path.join(import.meta.dir, "..", "..", "skills", "ship", "SKILL.md"), "utf8");
+			const section = /^## Conflicts\n([\s\S]*?)(?=^## )/m.exec(skill)?.[1] ?? "";
+			return [...section.matchAll(/`git ([^`]+)`/g)].map(m => (m[1] as string).replace(/<base>/g, base).split(" "));
+		};
+
+		test("the skill's conflict steps bring and merge the base in a clone that holds only the watched branch", () => {
+			// The branch is pushed, origin's main moves on, and the clone takes the branch alone: no origin/main there.
+			write(path.join(repo, "src/b.ts"), "export const b = 1;\n");
+			sh(repo, "add", "-A");
+			sh(repo, "commit", "--quiet", "-m", "branch work");
+			sh(repo, "push", "--quiet", "origin", BRANCH);
+			const other = teammate();
+			write(path.join(other, "README.md"), "base moved\n");
+			sh(other, "add", "-A");
+			sh(other, "commit", "--quiet", "-m", "base moves");
+			sh(other, "push", "--quiet", "origin", "HEAD:refs/heads/main");
+			const dir = path.join(privateHome(), "projects", "single");
+			sh(privateHome(), "clone", "--quiet", "--no-local", "--single-branch", "--branch", BRANCH, bare(), dir);
+			armFence({ pushBranch: BRANCH, root: dir });
+			write(path.join(dir, "src/a.ts"), "export const a = 2;\n");
+			sh(dir, "commit", "--quiet", "-am", "mine");
+			// A plain fetch leaves the base out, so there is nothing named origin/main to merge.
+			expect(gitAt(dir, process.env, "fetch", "--quiet", "origin").status).toBe(0);
+			expect(gitAt(dir, process.env, "merge", "--no-edit", "origin/main").status).not.toBe(0);
+
+			expect(conflictSteps("main")).toEqual([["fetch", "origin", "main"], ["merge", "FETCH_HEAD"]]);
+			for (const step of conflictSteps("main")) {
+				const r = gitAt(dir, process.env, ...step);
+				expect(r.stderr, step.join(" ")).not.toContain("ship fence");
+				expect(r.status, `${step.join(" ")}: ${r.stderr}`).toBe(0);
+			}
+			expect(sh(dir, "log", "--format=%s", "-1", "HEAD^2").trim()).toBe("base moves");
+			expect(gitAt(dir, process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
+			expect(originHas(BRANCH)).toBe(sh(dir, "rev-parse", "HEAD").trim());
+		});
+
+		test("stock review and pass commands run while armed: log, show, diff, grep, blame, status, refs, local changes, gh reads", () => {
+			const home = privateHome();
+			write(path.join(repo, "src/b.ts"), "export const b = 1;\nexport const c = 2;\n");
+			write(path.join(repo, "docs/notes.md"), "hooks live in .git/hooks\n");
+			sh(repo, "add", "-A");
+			sh(repo, "commit", "--quiet", "-m", "feat: b");
+			sh(repo, "tag", "v1");
+			write(path.join(repo, "src/a.ts"), "export const a = 2;\n");
+			sh(repo, "commit", "--quiet", "-am", "fix: a");
+			sh(repo, "branch", "side", "HEAD~1");
+			write(path.join(repo, "src/c.ts"), "export const z = 1;\n");
+			write(path.join(repo, "src/a.ts"), "export const a = 3;\n");
+			armFence({ pushBranch: BRANCH, root: repo });
+			const reads = [
+				"log", "log --oneline", "log --oneline -n 3", "log --graph --oneline --all", "log -p -1", "log --stat", "log --name-only --format=", "log --name-status", "log -S export --oneline", "log -G const --oneline",
+				"log --author=t --oneline", "log --since=2000-01-01 --oneline", "log --follow -- src/a.ts", "log main..HEAD --oneline", "log origin/main..HEAD --oneline", "log --merges --oneline", "log --all --decorate --oneline",
+				"log --pretty=fuller -1", "log -1 --format=%B", "log --grep=fix --oneline", "log --first-parent --oneline", "log HEAD~1..HEAD", "log --diff-filter=A --name-only --format=", "log --oneline -- src",
+				"show", "show HEAD", "show --stat HEAD", "show HEAD:src/a.ts", "show --name-status HEAD", "show HEAD~1:src/b.ts", "show v1", "show --format=%H -s HEAD",
+				"diff", "diff --stat", "diff --name-only", "diff --cached", "diff main...HEAD", "diff main..HEAD --stat", "diff HEAD~1", "diff -w", "diff --shortstat", "diff -U0", "diff --color-words", "diff --numstat HEAD~1 HEAD",
+				"diff --name-status main HEAD", "diff HEAD -- src/a.ts", "diff --staged", "diff --no-index src/a.ts src/a.ts",
+				"grep -n export", "grep -i EXPORT", "grep -e export -e const", "grep --count export", "grep -l export", "grep -n export HEAD~1", "grep -E export.(const|let)", "grep -n .git/hooks docs/notes.md", "grep -w a -- src", "grep --heading -n export",
+				"blame src/a.ts", "blame -L1,2 src/b.ts", "blame --porcelain src/a.ts", "blame -w src/a.ts", "blame HEAD~1 -- src/a.ts",
+				"status", "status -s", "status --porcelain", "status -b", "status --short --branch", "status --ignored", "status -uall", "status --porcelain=v2 --branch",
+				"rev-parse HEAD", "rev-parse --abbrev-ref HEAD", "rev-parse --show-toplevel", "rev-parse --git-dir", "rev-parse --verify HEAD~1", "ls-files", "ls-files --others --exclude-standard", "ls-tree -r HEAD", "ls-tree --name-only HEAD",
+				"cat-file -p HEAD", "cat-file -t HEAD", "cat-file -s HEAD:src/a.ts", "for-each-ref", "for-each-ref --format=%(refname) refs/heads", "branch -a", "branch -vv", "branch --show-current", "branch --contains HEAD", "branch --list",
+				"tag -l", "tag --points-at HEAD", "describe --always --tags", "shortlog -sn HEAD", "rev-list --count HEAD", "rev-list HEAD~1..HEAD", "merge-base main HEAD", "name-rev HEAD", "show-ref", "show-ref --heads",
+				"config --get remote.origin.url", "config --list", "config -l --show-origin", "config user.name", "remote -v", "remote show origin", "remote get-url origin", "stash list", "reflog -5", "worktree list", "count-objects -v",
+				"fsck --no-dangling", "ls-remote origin", "ls-remote --heads origin", "fetch origin", "fetch --prune origin", "fetch origin main", "diff-tree --no-commit-id --name-only -r HEAD", "diff-index HEAD", "cherry -v main",
+				"format-patch -1 --stdout", "show-branch", "var GIT_AUTHOR_IDENT", "--version", "-C src status -s", "--no-pager log -1", "-c core.quotepath=false log -1 --name-only", "-c color.ui=never diff --stat", "-c user.name=x -c user.email=x@y log -1",
+			].map(line => line.split(" "));
+			const local = [
+				["archive", "--format=tar", "HEAD", "-o", path.join(home, "a.tar")], ["archive", "HEAD", "--prefix=x/", "-o", path.join(home, "b.zip")],
+				["add", "src/c.ts"], ["commit", "-m", "chore: add c"], ["commit", "--allow-empty", "-m", "chore: empty"], ["stash", "push", "-m", "wip"], ["stash", "list"], ["stash", "pop"], ["switch", "-c", "tmp"], ["switch", BRANCH], ["branch", "-d", "tmp"],
+				["merge", "--no-edit", "side"], ["tag", "v2"], ["push", "--dry-run", "origin", BRANCH], ["push", "origin", BRANCH], ["pull", "--ff-only", "origin", BRANCH],
+			];
+			const gh = path.join(home, "stubs", "gh");
+			write(gh, "#!/bin/sh\necho stub gh $*\n");
+			fs.chmodSync(gh, 0o755);
+			process.env.PATH = [SHIM_DIR, path.dirname(gh), ...(process.env.PATH ?? "").split(path.delimiter).filter(entry => entry !== SHIM_DIR)].join(path.delimiter);
+			const marked = "<!-- omp-ship -->\nFixed the failing test.";
+			const ghReads = [
+				["pr", "view", "7"], ["pr", "view", "7", "--json", "state,statusCheckRollup"], ["pr", "checks", "7"], ["pr", "diff", "7"], ["pr", "list", "--state", "open"], ["pr", "status"], ["pr", "comment", "7", "--body", marked], ["pr", "edit", "7", "--body", "x"],
+				["run", "view", "123", "--log-failed"], ["run", "list", "--limit", "5"], ["run", "rerun", "123", "--failed"], ["api", "repos/o/r/pulls/7/comments"], ["api", "repos/o/r/issues/7/comments", "-f", `body=${marked}`],
+				["api", "graphql", "-f", "query=query{viewer{login}}"], ["issue", "view", "3"], ["issue", "list"], ["repo", "view"], ["auth", "status"], ["-R", "o/r", "pr", "view", "7"],
+			];
+			expect(reads.length + local.length + ghReads.length).toBeGreaterThanOrEqual(85);
+			const failed: string[] = [];
+			for (const args of [...reads, ...local]) {
+				const r = git(process.env, ...args);
+				if (r.status !== 0 || r.stderr.includes("ship fence")) failed.push(`git ${args.join(" ")} => ${r.status}: ${r.stderr.trim().split("\n")[0]}`);
+			}
+			for (const args of ghReads) {
+				const r = spawnSync("gh", args, { cwd: repo, env: process.env, encoding: "utf8" });
+				if (r.status !== 0 || !r.stdout.startsWith("stub gh")) failed.push(`gh ${args.join(" ")} => ${r.status ?? r.signal ?? r.error?.message}: ${r.stderr.trim().split("\n")[0]}`);
+			}
+			expect(failed).toEqual([]);
+			expect(originHas(BRANCH)).toBe(sh(repo, "rev-parse", "HEAD").trim());
+		}, 30_000);
 	});
 });

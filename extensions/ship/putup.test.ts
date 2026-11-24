@@ -128,6 +128,22 @@ const flag = (args: string[] | undefined, name: string) => (args ?? [])[(args ??
 const deps = (gh: Gh, over: Partial<PutUpDeps> = {}): PutUpDeps => ({ git, gh, confirm: async () => true, sshHostname: alias => alias, ...over });
 const noAsking = () => Promise.reject(new Error("asked"));
 
+const ORIGIN_CALLS = ["ls-remote", "fetch"];
+/** git with origin out of reach: what asks origin fails, as it does offline. The test origin names github.com, which no test may reach. */
+const offline: Git = async (dir, args) => (ORIGIN_CALLS.includes(args[0] ?? "") ? bad("fatal: unable to access 'https://github.com/acme/app.git/'") : gitSync(dir, args));
+/** git with origin's fetch URL pointed at the scene's bare repo, which stands in for GitHub. */
+const viaBare =
+	(s: Scene): Git =>
+	async (dir, args) =>
+		gitSync(dir, ORIGIN_CALLS.includes(args[0] ?? "") ? args.map(arg => (arg === "origin" ? s.bare : arg)) : args);
+
+/** What `git clone --single-branch --branch <branch>` or `--depth 1` leaves of the remote: only the branch is tracked, and origin/HEAD is not set. */
+function singleBranch(s: Scene, branch: string): void {
+	sh(s.app, "remote", "set-head", "origin", "--delete");
+	sh(s.app, "update-ref", "-d", "refs/remotes/origin/main");
+	sh(s.app, "config", "--replace-all", "remote.origin.fetch", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
+}
+
 /** The password planted in the remote URLs below; no refusal may repeat it. */
 const NEEDLE = "hunter2";
 
@@ -355,7 +371,7 @@ describe("refuses", () => {
 	test("an unknown default branch, since the branch might be it", async () => {
 		const s = checkout("feat/x");
 		sh(s.app, "remote", "set-head", "origin", "--delete");
-		await refused(s, deps(fakeGh().gh), /default branch is unknown.*set-head origin --auto/);
+		await refused(s, deps(fakeGh().gh, { git: offline }), /default branch is unknown.*set-head origin --auto/);
 	});
 
 	test("a checkout with no origin", async () => {
@@ -475,10 +491,10 @@ describe("refuses", () => {
 		expect(creates(calls)).toHaveLength(0);
 	});
 
-	test("a checkout that can't be compared with origin's default branch", async () => {
+	test("a checkout that can't be compared with origin's default branch, which `git fetch origin main` could not bring", async () => {
 		const s = checkout("feat/x");
 		sh(s.app, "update-ref", "-d", "refs/remotes/origin/main");
-		await refused(s, deps(fakeGh().gh), /can't compare feat\/x with origin\/main/);
+		await refused(s, deps(fakeGh().gh, { git: offline }), /can't compare feat\/x with origin\/main: this checkout has no refs\/remotes\/origin\/main, and `git fetch origin main` did not bring it/);
 	});
 
 	describe("an origin that is not on github.com", () => {
@@ -625,22 +641,84 @@ describe("in a fenced /ship session", () => {
 	test("every git and gh call put-up makes is one the fence allows", async () => {
 		const gitCalls: string[][] = [];
 		const ghCalls: string[][] = [];
-		// Both paths: a dirty branch that gets a new PR, and a branch whose PR exists.
-		for (const [prs, files] of [[[], { "notes.md": "notes\n" }], [[row(ME)], {}]] as const) {
+		// Three paths: a dirty branch that gets a new PR, a branch whose PR exists, and a clone that holds only the branch.
+		for (const [prs, files, single] of [[[], { "notes.md": "notes\n" }, false], [[row(ME)], {}, false], [[], { "notes.md": "notes\n" }, true]] as const) {
 			const s = checkout("feat/ship-s5");
 			commit(s, "one");
 			writeFiles(s.app, files);
+			if (single) singleBranch(s, "feat/ship-s5");
 			const { gh, calls } = fakeGh({ prs: [...prs] });
-			const recording: Git = (dir, args) => (gitCalls.push(["-C", dir, ...args]), git(dir, args));
+			const recording: Git = (dir, args) => (gitCalls.push(["-C", dir, ...args]), viaBare(s)(dir, args));
 			expect(await putUp(s.app, deps(gh, { git: recording }))).toEqual(PR);
 			ghCalls.push(...calls);
 			resetHome();
 		}
 		expect(gitCalls.some(args => args.includes("commit"))).toBe(true);
 		expect(gitCalls.some(args => args.includes("push"))).toBe(true);
+		expect(gitCalls.some(args => args.includes("ls-remote"))).toBe(true);
+		expect(gitCalls.some(args => args.includes("fetch"))).toBe(true);
 		expect(ghCalls.some(args => args[0] === "api")).toBe(true);
 		const policy = { pushBranch: "feat/ship-s5", gitDirs: [path.join(privateHome(), "app", ".git")] };
-		for (const args of gitCalls) expect(checkGit(args, policy, process.cwd())).toBeNull();
+		for (const args of gitCalls) expect(checkGit(args, policy, process.cwd()), args.join(" ")).toBeNull();
 		for (const args of ghCalls) expect(checkGh(args)).toBeNull();
 	});
+});
+
+describe("a clone that holds only the branch, as `git clone --single-branch --branch` or `--depth 1` leaves it", () => {
+	test("origin names its default branch, and what `git fetch origin <base>` brings is what the branch is compared with", async () => {
+		const s = checkout("feat/x");
+		commit(s, "one");
+		singleBranch(s, "feat/x");
+		expect(await git(s.app, ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"])).toMatchObject({ code: 1 });
+		const { gh, calls } = fakeGh();
+
+		expect(await putUp(s.app, deps(gh, { git: viaBare(s) }))).toEqual(PR);
+
+		expect(sh(s.bare, "rev-parse", "refs/heads/feat/x")).toBe(sh(s.app, "rev-parse", "HEAD"));
+		// Only the branch's own commit is listed: the base was found, and it is what the range starts from.
+		expect(flag(creates(calls)[0], "--body")).toContain("Commits:\n- `one`");
+		expect(flag(creates(calls)[0], "--body")).not.toContain("init");
+	});
+
+	test("origin/HEAD is set but its branch is not tracked: that branch is fetched by name, and a tracked one is left alone", async () => {
+		const s = checkout("feat/x");
+		commit(s, "one");
+		sh(s.app, "update-ref", "-d", "refs/remotes/origin/main");
+		const asked: string[][] = [];
+		const watching: Git = async (dir, args) => (asked.push(args), viaBare(s)(dir, args));
+		expect(await putUp(s.app, deps(fakeGh().gh, { git: watching }))).toEqual(PR);
+		expect(asked.filter(args => args[0] === "fetch")).toEqual([["fetch", "origin", "refs/heads/main"]]);
+
+		// With the ref in place nothing is asked of origin but the push.
+		const t = checkout("feat/y");
+		commit(t, "two");
+		const quiet: string[][] = [];
+		expect(await putUp(t.app, deps(fakeGh().gh, { git: async (dir, args) => (quiet.push(args), git(dir, args)) }))).toEqual(PR);
+		expect(quiet.filter(args => ORIGIN_CALLS.includes(args[0] ?? ""))).toEqual([]);
+	});
+
+	test("a secret in a commit beyond the fetched base is refused, as against a tracked one", async () => {
+		const s = checkout("feat/x");
+		commit(s, "keys", { ".env.production": "TOKEN=x\n" });
+		singleBranch(s, "feat/x");
+		await refused(s, deps(fakeGh().gh, { git: viaBare(s) }), /secret-looking files are already committed on feat\/x: \.env\.production/);
+	});
+
+	// Origin's answer is the one input put-up takes from outside the checkout: a name that git would read as an option or a refspec goes nowhere.
+	for (const [name, taken] of [["--upload-pack=sh", false], ["-x", false], ["a:b", false], ["a~1", false], ["a^", false], ["a?b", false], ["a*", false], ["a[b", false], ["a\\b", false], ["release/1.2", true], ["trunk", true], ["v2-rc.1", true]] as const) {
+		test(`origin names its default branch ${JSON.stringify(name)}: ${taken ? "fetched by name" : "never passed to git"}`, async () => {
+			const s = checkout("feat/x");
+			commit(s, "one");
+			sh(s.app, "remote", "set-head", "origin", "--delete");
+			const asked: string[][] = [];
+			const lying: Git = async (dir, args) => {
+				asked.push(args);
+				if (args[0] === "ls-remote") return good(`ref: refs/heads/${name}\tHEAD\n${"1".repeat(40)}\tHEAD\n`);
+				return args[0] === "fetch" ? bad("no such ref") : gitSync(dir, args);
+			};
+			const why = await putUp(s.app, deps(fakeGh().gh, { git: lying }));
+			expect(asked.filter(args => args[0] === "fetch")).toEqual(taken ? [["fetch", "origin", `refs/heads/${name}`]] : []);
+			expect(why).toMatch(taken ? /can't compare feat\/x with origin\// : /default branch is unknown/);
+		});
+	}
 });
