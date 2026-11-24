@@ -481,14 +481,15 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 
 		async function look(r: Run, first?: Snapshot): Promise<void> {
 			if (run !== r) return;
-			const held = parts.renewClaim(r.watch, parts.now());
+			// The tick's own time, taken before the read: a check due at a push + 2 minutes must not slide a tick because GitHub took seconds to answer.
+			const now = parts.now();
+			const held = parts.renewClaim(r.watch, now);
 			if (held === null) return finish(r, "taken_over");
 			r.watch = held;
 			const turns = r.turnsEnded;
 			const snapshot = first ?? (await parts.readPr(r.pr, r.gh, r.trust));
 			// While GitHub answered, the watch may have ended, or a pass may have ended and set its own baseline: this read is stale.
 			if (run !== r || r.turnsEnded !== turns) return;
-			const now = parts.now();
 			if (typeof snapshot === "string") {
 				r.lastLine = `can't read the PR (${++r.failedReads} in a row): ${snapshot}`;
 				if (r.failedReads === FAILED_READS_BEFORE_NOTICE) notice(r, `ship #${r.pr.number}: can't read the PR: ${snapshot}`);

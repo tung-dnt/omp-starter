@@ -78,7 +78,7 @@ interface Rig {
 		mostOpen: number;
 	};
 	/** What the parts answer; the last snapshot repeats, and an Error is thrown by the read. `listed` is what `gh pr list` finds for the branch. */
-	answers: { snapshots: (Snapshot | string | Error)[]; steps: Step[]; claim: string | Watch | null; put: unknown; putFiles: string[]; confirmed: boolean | null; renew: "held" | "taken"; branch: string; dirty: string; armError: string | null; listed: unknown[] };
+	answers: { snapshots: (Snapshot | string | Error)[]; steps: Step[]; claim: string | Watch | null; put: unknown; putFiles: string[]; confirmed: boolean | null; renew: "held" | "taken"; branch: string; dirty: string; armError: string | null; listed: unknown[]; readMs: number };
 	clock: { now: number };
 	/** Makes the next read of the PR, or the next `git status`, wait until the returned function is called, as a slow GitHub or a slow disk would. */
 	hold(what?: "read" | "git"): () => void;
@@ -112,7 +112,7 @@ function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform
 	ctx.setInterval = (callback, ms) => (ctx.intervals.push(ms), setInterval(callback, ms));
 
 	const calls: Rig["calls"] = { claims: [], armed: [], disarmed: 0, released: [], saved: [], reads: [], pushes: [], puts: [], dirs: [], gitPushes: [], open: 0, mostOpen: 0 };
-	const answers: Rig["answers"] = { snapshots: [snap()], steps: [], claim: null, put: PR, putFiles: [], confirmed: null, renew: "held", branch: "feat/x", dirty: "", armError: null, listed: [] };
+	const answers: Rig["answers"] = { snapshots: [snap()], steps: [], claim: null, put: PR, putFiles: [], confirmed: null, renew: "held", branch: "feat/x", dirty: "", armError: null, listed: [], readMs: 0 };
 	const holds = { read: [] as Promise<void>[], git: [] as Promise<void>[] };
 
 	const parts: ShipParts = {
@@ -146,6 +146,7 @@ function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform
 			calls.mostOpen = Math.max(calls.mostOpen, ++calls.open);
 			try {
 				await hold;
+				clock.now += answers.readMs;
 				if (answer instanceof Error) throw answer;
 				return answer;
 			} finally {
@@ -947,6 +948,26 @@ describe("with the real watch engine", () => {
 		await t.tick();
 		expect(t.sent.map(s => s.at)).toEqual([minutes(0), minutes(4), minutes(34)]);
 		expect(t.sent[2]?.message.content).toContain("check:test 1");
+	});
+
+	test("the check due two minutes after a push runs on that tick even when GitHub takes seconds to answer", async () => {
+		const t = rig({ real: true });
+		t.answers.snapshots = [snap({ checks: failing, hash: "red" })];
+		await t.cmd("12");
+		await t.finishTurn("Fixed it and pushed.\nSHIP-STATUS: working: pushed");
+		t.answers.readMs = 3_000;
+		const at = async (when: number) => {
+			t.clock.now = when;
+			t.ctx.tick();
+			await settled();
+		};
+		t.answers.snapshots = [snap({ headSha: "b".repeat(40), checks: [{ name: "test", bucket: "pending", link: null }], hash: "running" })];
+		await at(minutes(2));
+		expect(t.sent).toHaveLength(1);
+		expect(loadWatch(PR)?.lastPushAt).toBe(minutes(2));
+		t.answers.readMs = 1_000;
+		await at(minutes(4));
+		expect(t.sent).toHaveLength(2);
 	});
 
 	test("the watch file is kept while it runs, released by a stop and gone after a merge", async () => {
