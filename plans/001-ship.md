@@ -39,11 +39,11 @@ Approved by Tony with the plan. Chosen option first, then the rejected one.
 - **D6. Pass instructions.** Written in our own words in `skills/ship/SKILL.md`, following the behavior in the reverse-engineering notes. Rejected: pasting Claude Code's prompt text, which its license doesn't allow.
 - **D7. Forges.** GitHub only. Rejected: GitLab, Bitbucket and Azure adapters now; none of your repos use them.
 
-## Stories
+## Story order
 
-Build order. Each is one PR under about 400 changed lines.
+Build order. Each story is one PR under about 400 changed lines.
 
-### Story 1: Fence for omp-starter
+## Story 1: Fence for omp-starter
 
 Covers AC 6, 13.
 
@@ -54,7 +54,7 @@ Covers AC 6, 13.
 - [ ] Verify (unit): `bun test extensions/ship/fence.test.ts`.
 - [ ] Verify (live): an `omp -p` session in a throwaway repo with the fence armed through a test entry; the four refusals and two successes above, read from the real tool output.
 
-### Story 2: PR reader
+## Story 2: PR reader
 
 Covers AC 1, 4 (the reading half), 7.
 
@@ -65,7 +65,7 @@ Covers AC 1, 4 (the reading half), 7.
 - [ ] Verify (unit): recorded fixtures for green, red, conflicting, untrusted-comment and own-marker cases.
 - [ ] Verify (live): against a real PR on the throwaway repo, print the snapshot and hash before and after posting a comment.
 
-### Story 3: Watch engine (code only, no model)
+## Story 3: Watch engine (code only, no model)
 
 Covers AC 4, 10, 11, 14.
 
@@ -75,7 +75,7 @@ Covers AC 4, 10, 11, 14.
 - [ ] Result: replaying a recorded PR history through `nextStep` gives the expected passes and waits.
 - [ ] Verify (unit): table tests (changed, unchanged, within 10 minutes, after a push, checks pending, quiet for hours, merged, retargeted, 7 days, cap reached, second watch refused, stale owner taken over, crash mid-write leaves the old file).
 
-### Story 4: `/ship <pr>` watches an existing PR
+## Story 4: `/ship <pr>` watches an existing PR
 
 Covers AC 5, 7, 8, 9, 12, 13, 16.
 
@@ -85,7 +85,7 @@ Covers AC 5, 7, 8, 9, 12, 13, 16.
 - [ ] Result: started on a PR with a red check, one pass fixes and pushes, then the session sits without model turns until the checks report.
 - [ ] Verify (live, review-gated): on the throwaway repo, with the red check, conflict and comment set up by `scripts/ship-fixture.ts`: the check fixed, the conflict merged, the comment answered, a merge attempt refused by the fence, and an hour with no model turns, counted from the session log.
 
-### Story 5: Put-up and review
+## Story 5: Put-up and review
 
 Covers AC 1 (author check), 2, 3, 13.
 
@@ -96,7 +96,7 @@ Covers AC 1 (author check), 2, 3, 13.
 - [ ] Verify (unit): refusal table (default branch, detached HEAD, `.env` in the tree, foreign author, unattended dirty tree).
 - [ ] Verify (live, review-gated): on the throwaway repo, a dirty branch to a draft PR; title, body and draft state checked on GitHub.
 
-### Story 6: /build hands off to /ship
+## Story 6: /build hands off to /ship
 
 Covers AC 15.
 
