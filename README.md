@@ -325,6 +325,21 @@ A file with the same name in `~/.omp/agent/commands/` or `~/.omp/agent/skills/` 
 
 **Verify:** `bun test extensions/epic-guard.test.ts` (it also checks that every plan path the `epic` and `build` skills name is one the guard allows).
 
+### Ship fence (`ship-fence`)
+
+The guard `/ship` runs behind while it watches a pull request (see `plans/001-ship.md`). When the extension loads it names a state file for the omp process in `OMP_SHIP_FENCE` (under `~/.omp/agent/ship/fence/`) and puts `bin/ship-fence` first on `PATH`, before omp captures the environment its shells start from. `/ship` then arms and disarms the fence by rewriting that file, so the change reaches every shell at once. Unarmed, a `gh` or `git` call costs one `grep` of the file. A session started with `OMP_SHIP_FENCE` naming an armed state (an unattended trigger, or a test) is fenced from its first call.
+
+| Layer | Checks while armed |
+|---|---|
+| `bin/ship-fence/{gh,git}` | Every `gh` and `git` process by its real argv, so scripts, eval cells and wrappers (`gh-blinx`, `rtk`) are covered. Refuses merge, approve, undraft, close and base changes; settings, secrets, aliases and extensions (gh and git); force pushes, deletes, tags and pushes to any branch but the watched one on `origin`; commits and merges that skip hooks; remote and hook config changes. `gh api` writes only comments, review replies, reviewer re-requests and resolving one review thread. A push is also refused when it carries a change to a protected file that differs both from how the branch held it at arming and from the base, however the file was edited. A call whose environment lost `OMP_SHIP_FENCE` is refused. The check runs with the `bun` found at load, or omp's own binary with `BUN_BE_BUN=1`. |
+| `ship-fence` extension (`tool_call`) | `write`/`edit`/`ast_edit` on `.github/`, CODEOWNERS, `.env*` (not examples), `.npmrc`, AGENTS.md, CLAUDE.md, `.claude/`, `.mcp.json`, git hooks and the repo's git folders (a linked worktree's too), matched case-blind through symlinks; `conflict://` writes; `ast_edit` patterns or folders that hold such files; the fence's own files. Shell lines that reset `PATH`, `OMP_SHIP_FENCE` or git's config variables (`env -i`/`-u`, `command -p`, assignments, `export`/`unset`), or run `gh`/`git` by a path or a computed name; `api.github.com`; `gh auth token`. The github tool's non-draft PRs, force pushes and pushes to other branches. |
+
+Every comment `/ship` posts must start with the line `<!-- omp-ship -->` and hold no @-mention, link, other HTML comment or closing keyword (`fixes #12`).
+
+Limits: the fence is a guardrail against mistakes and simple injected instructions, not a sandbox. A script file that resets `PATH` itself, or a program that talks to GitHub without `gh` or `git`, is not seen. When omp's shell is bash, the rc snapshot it re-sources can put an rc file's `PATH` ahead of the shims (zsh, the macOS default, is not affected). GitHub branch protection and path rulesets are the backstop.
+
+**Verify:** `bun test extensions/ship/`.
+
 ## Usage report
 
 A read-only report on how agents actually use the native todo, mined from omp's session transcripts. It calls no model and no network.
@@ -354,6 +369,10 @@ The numbering starts at M5: M1 to M4 measured memory notes that omp's memory bac
 Limits: a session's repo comes from the origin URL of its working folder, so a folder deleted since is counted as "repo unresolved". The output holds counts, session file names, repo names and tool names; it never prints message text, tool arguments, command lines or file contents. Lines that are not needed for a metric are checked only for being a brace-delimited JSON object, not fully parsed. The report never writes to the sessions folder; its only write is the `--json` file.
 
 ## Release notes
+
+### Unreleased (`feat/ship`)
+
+- **Added:** `ship-fence`, the guard `/ship` will run behind: `gh`/`git` shims plus a tool-call check, armed and disarmed by rewriting a per-process state file, and a push check on protected files. Every session now puts `bin/ship-fence` first on `PATH`; unarmed, it passes calls straight through. See [Ship fence](#ship-fence-ship-fence). Story 1 of `plans/001-ship.md`.
 
 ### 0.46.0 — 2026-11-24
 

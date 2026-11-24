@@ -1,0 +1,24 @@
+#!/bin/sh
+# gh and git (symlinks to this file) in every omp session with omp-starter: extensions/ship/fence-state.ts puts this
+# folder first on PATH and names the session's fence state in OMP_SHIP_FENCE. While the state is not armed, the real
+# program runs at once. While armed, extensions/ship/fence-cli.ts checks the call first, run by the bun the state names
+# (or omp's own binary with BUN_BE_BUN=1). The real program is the next one on PATH.
+name=$(basename "$0")
+self=$(dirname "$0")
+dir=$(cd "$self" && pwd -P)
+state=$OMP_SHIP_FENCE
+if [ -z "$state" ] || [ -f "$state" ] && ! grep -q '"armed":false' "$state"; then
+  checker=$(sed -n 's/.*"bun":"\([^"]*\)".*/\1/p' "$state" 2>/dev/null)
+  if grep -q '"beBun":true' "$state" 2>/dev/null; then
+    BUN_BE_BUN=1 "${checker:-bun}" "$dir/../../extensions/ship/fence-cli.ts" "$name" "$@" || exit 1
+  else
+    "${checker:-bun}" "$dir/../../extensions/ship/fence-cli.ts" "$name" "$@" || exit 1
+  fi
+fi
+IFS=:
+for d in $PATH; do
+  [ "$d" = "$self" ] || [ "$d" = "$dir" ] && continue
+  [ -x "$d/$name" ] && [ ! "$d/$name" -ef "$0" ] && exec "$d/$name" "$@"
+done
+echo "ship fence: no real $name on PATH" >&2
+exit 127

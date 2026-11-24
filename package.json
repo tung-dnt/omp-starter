@@ -23,7 +23,8 @@
       "./extensions/notify.ts",
       "./extensions/every.ts",
       "./extensions/epic-guard.ts",
-      "./extensions/plan-mode.ts"
+      "./extensions/plan-mode.ts",
+      "./extensions/ship-fence.ts"
     ]
   },
   "devDependencies": {
