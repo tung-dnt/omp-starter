@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { shutdownAll } from "@oh-my-pi/pi-coding-agent/lsp/client";
+import { getOrCreateClient, reconcileFileFromDisk, shutdownAll, waitForProjectLoaded } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import { getConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
 import { getLspServerForFile } from "@oh-my-pi/pi-coding-agent/lsp/servers";
 import blastRadius from "./blast-radius";
@@ -47,7 +47,16 @@ async function edit(next: string): Promise<string | undefined> {
 	return result?.content.slice(1).map(c => c.text).join("\n");
 }
 
-beforeAll(() => fs.writeFileSync(fileA, A));
+// A cold server on a CI runner can take longer than the hook's 6 s budget to start, which made the first test flaky.
+// Start it and let the project load here, so the tests measure the hook against a running server, not the start-up.
+beforeAll(async () => {
+	fs.writeFileSync(fileA, A);
+	if (!server) return;
+	const signal = AbortSignal.timeout(60_000);
+	const client = await getOrCreateClient(server[1], dir, undefined, signal);
+	await reconcileFileFromDisk(client, fileA, signal);
+	await waitForProjectLoaded(client, signal);
+}, 60_000);
 afterAll(async () => {
 	await shutdownAll();
 	fs.rmSync(dir, { recursive: true, force: true });
