@@ -1,0 +1,7 @@
+{
+	"recorded": "2026-11-24T10:58:40.107Z from tung-dnt/omp-ship-sandbox#2 with gh version 2.103.3 (2026-10-26)",
+	"permissions": {},
+	"pr view": {"code":0,"err":"","out":{"author":{"id":"MDQ6VXNlcjcxNTE0MDUz","is_bot":false,"login":"tung-dnt","name":"tung_dnt"},"baseRefName":"s2-base","headRefName":"s2-conflict","headRefOid":"918fa9e7251bff226ad5bb611f204b70250a4445","isDraft":false,"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING","reviewDecision":"","state":"OPEN","url":"https://github.com/tung-dnt/omp-ship-sandbox/pull/2"}},
+	"pr checks": {"code":0,"err":"","out":[{"bucket":"pass","link":"https://dashboard.gitguardian.com","name":"GitGuardian Security Checks"},{"bucket":"pass","link":"https://github.com/tung-dnt/omp-ship-sandbox/actions/runs/45379777521/job/138395475923","name":"test"}]},
+	"graphql": {"code":0,"err":"","out":{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]},"reviews":{"nodes":[]},"comments":{"nodes":[]}}}}}}
+}

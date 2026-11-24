@@ -1,0 +1,7 @@
+{
+	"recorded": "2026-11-24T10:56:29.079Z from tung-dnt/omp-ship-sandbox#1 with gh version 2.103.3 (2026-10-26)",
+	"permissions": {"tung-dnt":"admin"},
+	"pr view": {"code":0,"err":"","out":{"author":{"id":"MDQ6VXNlcjcxNTE0MDUz","is_bot":false,"login":"tung-dnt","name":"tung_dnt"},"baseRefName":"main","headRefName":"s2-read","headRefOid":"88a331f0abefc4ff292065b068a925c07cf5fb97","isDraft":false,"mergeStateStatus":"CLEAN","mergeable":"MERGEABLE","reviewDecision":"","state":"OPEN","url":"https://github.com/tung-dnt/omp-ship-sandbox/pull/1"}},
+	"pr checks": {"code":0,"err":"","out":[{"bucket":"pass","link":"https://github.com/tung-dnt/omp-ship-sandbox/actions/runs/45378633327/job/138391491738","name":"test"},{"bucket":"pass","link":"https://dashboard.gitguardian.com","name":"GitGuardian Security Checks"},{"bucket":"pass","link":"https://github.com/tung-dnt/omp-ship-sandbox/actions/runs/45378624843/job/138391462609","name":"test"}]},
+	"graphql": {"code":0,"err":"","out":{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]},"reviews":{"nodes":[]},"comments":{"nodes":[{"id":"IC_kwDOV56nes8AAAABqPKqfQ","body":"Looks good. Could you also add a test for the empty case?","createdAt":"2026-11-24T10:56:23Z","url":"https://github.com/tung-dnt/omp-ship-sandbox/pull/1#issuecomment-7129442941","isMinimized":false,"author":{"login":"tung-dnt","__typename":"User"}}]}}}}}}
+}

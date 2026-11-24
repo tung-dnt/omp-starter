@@ -1,0 +1,7 @@
+{
+	"recorded": "2026-11-24T11:00:36.470Z from tung-dnt/omp-ship-sandbox#3 with gh version 2.103.3 (2026-10-26)",
+	"permissions": {},
+	"pr view": {"code":0,"err":"","out":{"author":{"id":"MDQ6VXNlcjcxNTE0MDUz","is_bot":false,"login":"tung-dnt","name":"tung_dnt"},"baseRefName":"main","headRefName":"s2-bot","headRefOid":"54cf4122af6a75ddf623fe1c4e153b21899b7788","isDraft":false,"mergeStateStatus":"CLEAN","mergeable":"MERGEABLE","reviewDecision":"","state":"OPEN","url":"https://github.com/tung-dnt/omp-ship-sandbox/pull/3"}},
+	"pr checks": {"code":0,"err":"","out":[{"bucket":"pass","link":"https://github.com/tung-dnt/omp-ship-sandbox/actions/runs/45380051626/job/138396426837","name":"comment"},{"bucket":"pass","link":"https://github.com/tung-dnt/omp-ship-sandbox/actions/runs/45380051401/job/138396425153","name":"test"},{"bucket":"pass","link":"https://dashboard.gitguardian.com","name":"GitGuardian Security Checks"},{"bucket":"pass","link":"https://github.com/tung-dnt/omp-ship-sandbox/actions/runs/45380031199/job/138396364002","name":"test"}]},
+	"graphql": {"code":0,"err":"","out":{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]},"reviews":{"nodes":[]},"comments":{"nodes":[{"id":"IC_kwDOV56nes8AAAABqPPrQA","body":"Build report: 1 job finished. Details are on the checks tab.","createdAt":"2026-11-24T11:00:10Z","url":"https://github.com/tung-dnt/omp-ship-sandbox/pull/3#issuecomment-7129525056","isMinimized":false,"author":{"login":"github-actions","__typename":"Bot"}}]}}}}}}
+}
