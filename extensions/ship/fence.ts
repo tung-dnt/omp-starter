@@ -115,22 +115,6 @@ export function checkCommentBody(body: string): string | null {
 
 const FIELD_FLAGS = names("-f", "-F", "--field", "--raw-field");
 
-/** `body` fields of a `gh api` call; a body read from a file (`-F body=@x`) is `null`, since it can't be checked. */
-function bodyFields(args: string[]): (string | null)[] {
-	const out: (string | null)[] = [];
-	for (let i = 0; i < args.length; i++) {
-		const arg = args[i] as string;
-		let field: string | undefined;
-		if (isIn(FIELD_FLAGS, arg)) field = args[++i];
-		else if (/^--(?:raw-)?field=/.test(arg)) field = arg.slice(arg.indexOf("=") + 1);
-		else if (/^-[fF]./.test(arg)) field = arg.slice(2);
-		if (field === undefined || !field.startsWith("body=")) continue;
-		const raw = field.slice("body=".length);
-		out.push(arg.startsWith("-F") || arg.startsWith("--field") ? (raw.startsWith("@") ? null : raw) : raw);
-	}
-	return out;
-}
-
 // ---- gh -------------------------------------------------------------------------------------------------------------
 
 /** gh's own commands. Anything else is an alias or an extension, which the fence can't read. */
@@ -145,7 +129,7 @@ const GH_REFUSED: Record<string, Names | "all"> = {
 	pr: names("merge", "review", "ready", "close", "reopen", "lock", "unlock"),
 	repo: names("delete", "archive", "unarchive", "edit", "rename", "sync", "fork"),
 	issue: names("delete", "transfer"),
-	release: names("create", "delete", "edit", "upload", "delete-asset"),
+	release: names("create", "new", "delete", "edit", "upload", "delete-asset"),
 	workflow: names("enable", "disable", "run"),
 	run: names("cancel", "delete"),
 	cache: names("delete"),
@@ -161,13 +145,111 @@ const GH_REFUSED: Record<string, Names | "all"> = {
 };
 const READ_ONLY = names("list", "view", "check", "get");
 
-const GH_API_VALUE_FLAGS = names(
-	"-X", "--method", "-H", "--header", "-f", "--raw-field", "-F", "--field", "-q", "--jq", "-t", "--template",
-	"--input", "--hostname", "-p", "--preview", "--cache",
+/** One flag as it was given: `name` as typed (`--draft`, `-d`), and its value, which is null for a flag given bare. */
+interface GhFlag {
+	name: string;
+	value: string | null;
+}
+
+/** What a gh command's words come to: its flags in the order given, and the words that are neither flags nor their values. */
+interface GhArgs {
+	flags: GhFlag[];
+	words: string[];
+	/** The first flag the command doesn't have. gh refuses it, and nothing past it can be told apart as a value or a word. */
+	unknown?: string;
+}
+
+/** The flags of a gh command by every spelling: the ones that take a value, and the ones that don't. */
+interface GhSpec {
+	value: Names;
+	bool: Names;
+}
+
+const ghSpec = (value: string[], bool: string[]): GhSpec => ({ value: names(...value), bool: names("--help", ...bool) });
+
+/**
+ * `args` as pflag, the flag parser gh is built on, reads them for a command with the flags `spec` lists. A value flag
+ * takes the next word, a dash or not (`--title --draft` gives a title); a short flag with more after it takes that
+ * (`-tdraft`) or, for a bool flag, goes on to the next flag in the bundle (`-fd`); `-x=v` and `--name=v` give any flag a
+ * value, which gh reads for a bool flag with strconv.ParseBool; `--` ends the flags.
+ */
+function pflag(args: string[], spec: GhSpec): GhArgs {
+	const out: GhArgs = { flags: [], words: [] };
+	const kind = (name: string) => (isIn(spec.value, name) ? "value" : isIn(spec.bool, name) ? "bool" : undefined);
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i] as string;
+		if (arg === "--") {
+			out.words.push(...args.slice(i + 1));
+			break;
+		}
+		if (arg.startsWith("--")) {
+			const eq = arg.indexOf("=");
+			const name = eq < 0 ? arg : arg.slice(0, eq);
+			const given = eq < 0 ? null : arg.slice(eq + 1);
+			const k = kind(name);
+			if (k === undefined) return { ...out, unknown: name };
+			out.flags.push({ name, value: k === "value" ? (given ?? args[++i] ?? "") : given });
+		} else if (arg.startsWith("-") && arg.length > 1) {
+			for (let bundle = arg.slice(1); bundle !== ""; ) {
+				const name = `-${bundle[0]}`;
+				const k = kind(name);
+				if (k === undefined) return { ...out, unknown: name };
+				if (bundle.length > 2 && bundle[1] === "=") out.flags.push({ name, value: bundle.slice(2) });
+				else if (k === "bool") {
+					out.flags.push({ name, value: null });
+					bundle = bundle.slice(1);
+					continue;
+				} else out.flags.push({ name, value: bundle.length > 1 ? bundle.slice(1) : (args[++i] ?? "") });
+				bundle = "";
+			}
+		} else {
+			out.words.push(arg);
+		}
+	}
+	return out;
+}
+
+/** The last of the flags spelled `names`: gh keeps the last value a flag is given, whichever of its spellings gave it. */
+const lastOf = (f: GhArgs, ...spellings: string[]) => f.flags.findLast(flag => spellings.includes(flag.name));
+
+const TRUE_BOOLS = names("1", "t", "T", "true", "True", "TRUE");
+/** Whether a bool flag is on: given bare, or with a value strconv.ParseBool reads as true. Every other value is off, or an error gh stops at. */
+const isOn = (flag: GhFlag | undefined): boolean => flag !== undefined && (flag.value === null || isIn(TRUE_BOOLS, flag.value));
+
+const GH_API = ghSpec(
+	["--cache", "-F", "--field", "-H", "--header", "--hostname", "--input", "-q", "--jq", "-X", "--method", "-p", "--preview", "-f", "--raw-field", "-t", "--template"],
+	["--allow-escape-sequences", "-i", "--include", "--paginate", "--silent", "--slurp", "--verbose"],
 );
-/** Only these may come before gh's command words with a value; a subcommand's own flags differ (pr create -f is --fill). */
-const GH_VALUE_FLAGS = names("-R", "--repo", "--hostname");
-const PR_COMMENT_VALUE_FLAGS = names("-b", "--body", "-F", "--body-file", "-R", "--repo");
+const GH_PR_CREATE = ghSpec(
+	["-a", "--assignee", "--attach", "-B", "--base", "-b", "--body", "-F", "--body-file", "-H", "--head", "-l", "--label", "-m", "--milestone", "-p", "--project", "--recover", "-r", "--reviewer", "-T", "--template", "-t", "--title", "-R", "--repo"],
+	["-d", "--draft", "--dry-run", "-e", "--editor", "-f", "--fill", "--fill-first", "--fill-verbose", "--no-maintainer-edit", "-w", "--web"],
+);
+const GH_COMMENT = ghSpec(["--attach", "-b", "--body", "-F", "--body-file", "-R", "--repo"], ["--create-if-none", "--delete-last", "--edit-last", "-e", "--editor", "-w", "--web", "--yes"]);
+
+/** The repo flags and the host flag: the only flags the fence reads in front of gh's command words. */
+const GH_WORD_FLAGS = names("-R", "--repo", "--hostname");
+
+/**
+ * gh's command words, and where the rest of its words begin. gh's command parser, cobra, finds a subcommand past any
+ * flags and takes the word after a flag it doesn't know as that flag's value: `gh pr -t x merge 5` is `gh pr merge 5
+ * --subject x`, and `gh -p pr -p pr api …` runs api. The fence knows the repo and host flags only, so any other flag in
+ * front of the words it needs is refused: it can't tell whose word the next one is. `api` takes its own flags and words
+ * after it, and the other commands without a subcommand to tell apart need only their first word.
+ */
+function ghCommand(args: string[]): { group: string; sub: string; at: number } | string {
+	const words: string[] = [];
+	let at = 0;
+	while (at < args.length && words.length < 2) {
+		if (words.length === 1 && !Object.hasOwn(GH_REFUSED, words[0] as string)) break;
+		const arg = args[at++] as string;
+		if (isIn(GH_WORD_FLAGS, arg)) at++;
+		else if (arg === "--help" || arg === "--version" || /^(?:-R.|--repo=|--hostname=)/.test(arg)) continue;
+		else if (arg.startsWith("-") && arg !== "-") return refused("a flag in front of gh's command words is refused: gh may take the word after it as its value, so the fence can't tell which command runs. Put the flags after the command (gh pr view 5 --json state)");
+		else words.push(arg);
+	}
+	const [group = "", sub = ""] = words;
+	return { group, sub, at };
+}
 
 /** Writes a fenced session may make with `gh api`: comments, review replies, asking a reviewer again. */
 const API_COMMENTS = [
@@ -177,45 +259,61 @@ const API_COMMENTS = [
 ];
 const API_REREQUEST = /^repos\/[^/]+\/[^/]+\/pulls\/\d+\/requested_reviewers$/;
 
+/** `args` is what follows `api`. */
 function checkGhApi(args: string[]): string | null {
-	const f = parse(args, GH_API_VALUE_FLAGS);
-	const endpoint = (f.positionals[0] ?? "").replace(/^\//, "").split("?")[0] ?? "";
-	const sendsFields = has(f, "-f", "--raw-field", "-F", "--field", "--input");
-	const method = (value(f, "-X", "--method") ?? (sendsFields ? "POST" : "GET")).toUpperCase();
+	const f = pflag(args, GH_API);
+	if (f.unknown !== undefined) return refused(`gh api ${f.unknown} is not a flag the fence knows`);
+	const endpoint = (f.words[0] ?? "").replace(/^\//, "").split("?")[0] ?? "";
+	// -f and --raw-field send their text; -F and --field read a value that opens with `@` from a file or stdin.
+	const fields = f.flags.flatMap(flag => {
+		if (!isIn(FIELD_FLAGS, flag.name) || flag.value === null) return [];
+		const eq = flag.value.indexOf("=");
+		const value = eq < 0 ? "" : flag.value.slice(eq + 1);
+		return [{ key: eq < 0 ? flag.value : flag.value.slice(0, eq), value, reads: (flag.name === "-F" || flag.name === "--field") && value.startsWith("@") }];
+	});
+	const input = f.flags.some(flag => flag.name === "--input");
+	const method = (lastOf(f, "-X", "--method")?.value ?? (fields.length > 0 || input ? "POST" : "GET")).toUpperCase();
 	if (endpoint === "graphql") {
-		const mutations = args.filter(a => /\bmutation\b/i.test(a));
-		if (mutations.some(a => !RESOLVE_THREAD.test(a))) return refused("GraphQL mutations other than resolving one review thread are refused");
-		if (has(f, "--input") || args.some(a => /^query=@/.test(a))) return refused("a GraphQL query read from a file can't be checked");
+		const texts = [...f.flags.flatMap(flag => flag.value ?? []), ...f.words];
+		if (texts.some(text => /\bmutation\b/i.test(text) && !RESOLVE_THREAD.test(text))) return refused("GraphQL mutations other than resolving one review thread are refused");
+		if (input || fields.some(field => field.key === "query" && field.value.startsWith("@"))) return refused("a GraphQL query read from a file can't be checked");
 		return null;
 	}
 	if (method === "GET") return null;
 	if (method === "POST" && API_REREQUEST.test(endpoint)) return null;
 	if (method === "POST" && API_COMMENTS.some(p => p.test(endpoint))) {
-		if (has(f, "--input")) return refused("a comment body read from a file can't be checked; pass it with -f body=");
-		const bodies = bodyFields(args);
+		if (input) return refused("a comment body read from a file can't be checked; pass it with -f body=");
+		const bodies = fields.filter(field => field.key === "body");
 		if (bodies.length !== 1) return refused("a comment carries exactly one body field");
-		return bodies[0] === null ? refused("a comment body read from a file can't be checked; pass it with -f body=") : checkCommentBody(bodies[0] as string);
+		const [body] = bodies as [(typeof bodies)[number]];
+		return body.reads ? refused("a comment body read from a file can't be checked; pass it with -f body=") : checkCommentBody(body.value);
 	}
 	return refused(`gh api ${method} ${endpoint} is refused (only comments, review replies and re-requesting a reviewer write)`);
 }
 
 /** `args` is gh's argv without the program name. */
 export function checkGh(args: string[]): string | null {
-	const f = parse(args, GH_VALUE_FLAGS);
-	const [group = "", sub = ""] = f.positionals;
+	const command = ghCommand(args);
+	if (typeof command === "string") return command;
+	const { group, sub, at } = command;
 	if (group === "") return null;
 	if (!isIn(GH_COMMANDS, group)) return refused(`gh ${group} is not a gh command the fence knows (aliases and extensions are refused)`);
-	if (group === "api") return checkGhApi(args.slice(args.indexOf("api") + 1));
+	if (group === "api") return checkGhApi(args.slice(at));
 	const rule = GH_REFUSED[group];
 	if (rule === "all" ? !isIn(READ_ONLY, sub) : rule !== undefined && isIn(rule, sub)) {
 		return refused(`gh ${group} ${sub} is refused: merging, approving, undrafting, closing and settings are the user's`);
 	}
-	if (group === "pr" && sub === "create" && (!has(f, "--draft", "-d") || value(f, "--draft") === "false")) return refused("open the pull request as a draft: gh pr create --draft");
-	if (group === "pr" && sub === "edit" && has(f, "--base", "-B")) return refused("a pull request's base is the user's to change");
+	if (group === "pr" && sub === "create") {
+		const f = pflag(args, GH_PR_CREATE);
+		if (f.unknown !== undefined) return refused(`gh pr create ${f.unknown} is not a flag the fence knows`);
+		if (!isOn(lastOf(f, "-d", "--draft"))) return refused("open the pull request as a draft: gh pr create --draft");
+	}
+	if (group === "pr" && sub === "edit" && has(parse(args, GH_WORD_FLAGS), "--base", "-B")) return refused("a pull request's base is the user's to change");
 	if ((group === "pr" || group === "issue") && sub === "comment") {
-		const c = parse(args, PR_COMMENT_VALUE_FLAGS);
-		const body = value(c, "-b", "--body");
-		if (body === undefined) return refused("pass the comment with --body so the fence can check it");
+		const f = pflag(args, GH_COMMENT);
+		if (f.unknown !== undefined) return refused(`gh ${group} comment ${f.unknown} is not a flag the fence knows`);
+		const body = lastOf(f, "-b", "--body")?.value;
+		if (typeof body !== "string") return refused("pass the comment with --body so the fence can check it");
 		return checkCommentBody(body);
 	}
 	return null;
@@ -223,17 +321,83 @@ export function checkGh(args: string[]): string | null {
 
 // ---- git ------------------------------------------------------------------------------------------------------------
 
-const GIT_GLOBAL_VALUE = names("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env");
+/** git's global options that take a value: the next word, a dash or not (`git -C -c push` runs push in a folder named `-c`). */
+const GIT_GLOBAL_VALUE = names("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source", "--shallow-file");
+/** The long ones among them that also read `--name=value`, and `--exec-path` and `--list-cmds`, which read nothing else. */
+const GIT_GLOBAL_EQUALS = names("--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source", "--exec-path", "--list-cmds");
+/** The ones that take no value. git reads each global option exactly, never by a prefix, and stops at the first word that is not one. */
+const GIT_GLOBAL_BARE = names(
+	"-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "--no-advice", "--bare", "--literal-pathspecs", "--no-literal-pathspecs",
+	"--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--exec-path", "--html-path", "--man-path", "--info-path",
+);
+/** `--version` and `--help`, and their short forms, are the commands `version` and `help`. */
+const GIT_INFO_COMMANDS: Record<string, string> = { "--version": "version", "-v": "version", "--help": "help", "-h": "help" };
+
+/** A git argv as git reads it: the global options, then the subcommand and the words it takes. */
+interface GitCall {
+	/** What `-c` sets (`key=value`), what `--config-env` names (`key=VARIABLE`), and the paths --git-dir and --work-tree name. */
+	settings: string[];
+	configEnv: string[];
+	named: string[];
+	/** The `-C` folders, each taken from the one before it. */
+	dirs: string[];
+	/** --git-dir or --bare was given: git runs against a repo other than the one the folder it runs in holds. */
+	gitDir: boolean;
+	sub: string;
+	rest: string[];
+	/** Why the options in front of the subcommand can't be read, or null. */
+	problem: string | null;
+}
+
+/**
+ * `args` as git's own option loop reads them. It is the one place the fence tells the subcommand from an option's value:
+ * every check, and the push check that runs real git, goes by this reading. An option the fence doesn't know is refused,
+ * since it might take the next word, and then the word the fence took for the subcommand would be its value.
+ */
+function readGit(args: string[]): GitCall {
+	const call: GitCall = { settings: [], configEnv: [], named: [], dirs: [], gitDir: false, sub: "", rest: [], problem: null };
+	let i = 0;
+	for (; i < args.length; i++) {
+		const arg = args[i] as string;
+		if (!arg.startsWith("-")) break;
+		if (Object.hasOwn(GIT_INFO_COMMANDS, arg)) return { ...call, sub: GIT_INFO_COMMANDS[arg] as string, rest: args.slice(i + 1) };
+		const eq = arg.indexOf("=");
+		const name = eq < 0 ? arg : arg.slice(0, eq);
+		if (isIn(GIT_GLOBAL_VALUE, arg)) {
+			const word = args[++i] ?? "";
+			if (arg === "-C") call.dirs.push(word);
+			else if (arg === "-c") call.settings.push(word);
+			else if (arg === "--config-env") call.configEnv.push(word);
+			else if (arg === "--git-dir" || arg === "--work-tree") call.named.push(word);
+			call.gitDir ||= arg === "--git-dir";
+		} else if (eq > 0 && isIn(GIT_GLOBAL_EQUALS, name)) {
+			// Asking for the path (`--exec-path`) is harmless; setting it moves where git finds the programs it runs.
+			if (name === "--exec-path") return { ...call, problem: refused("git --exec-path=<dir> is refused: the programs git runs stay where they are") };
+			if (name === "--config-env") call.configEnv.push(arg.slice(eq + 1));
+			else if (name === "--git-dir" || name === "--work-tree") call.named.push(arg.slice(eq + 1));
+			call.gitDir ||= name === "--git-dir";
+		} else if (arg.startsWith("-c") && arg.length > 2) {
+			// git itself turns `-cname=value` away; read as -c here, so no spelling hides a key.
+			call.settings.push(arg.slice(2));
+		} else if (isIn(GIT_GLOBAL_BARE, arg)) {
+			call.gitDir ||= arg === "--bare";
+		} else {
+			return { ...call, problem: refused(`git ${arg} is not an option the fence knows: git reads its options in front of the command exactly, so a word taken for the command could be an option's value`) };
+		}
+	}
+	return { ...call, sub: args[i] ?? "", rest: args.slice(i + 1) };
+}
 
 /**
  * Config that bends where a commit or a push goes, makes git run a program or pulls in more config. A fenced session
  * neither writes such a key (`git config`) nor sets it for one command (`-c`, `--config-env`), whatever the subcommand:
- * hooks, remotes, URLs, aliases and credentials; editors, pagers, ssh and proxy commands, fsmonitor, signing programs,
- * diff, merge and filter drivers, help viewers; includes; transports (`ext::` runs a command). Names are case-blind.
+ * hooks, remotes, URLs, aliases and credentials; push settings (`push.followTags` sends tags along with the branch);
+ * editors, pagers, ssh and proxy commands, fsmonitor, signing programs, diff, merge and filter drivers, help viewers;
+ * includes; transports (`ext::` runs a command). Names are case-blind.
  */
 const RISKY_CONFIG = new RegExp(
 	[
-		"core\\.(?:hookspath|fsmonitor|editor|pager|askpass|sshcommand|gitproxy|alternaterefscommand)", "remote\\.", "url\\.", "alias\\.", "credential", "branch\\.[^.]+\\.(?:remote|pushremote)",
+		"core\\.(?:hookspath|fsmonitor|editor|pager|askpass|sshcommand|gitproxy|alternaterefscommand)", "remote\\.", "push\\.", "url\\.", "alias\\.", "credential", "branch\\.[^.]+\\.(?:remote|pushremote)",
 		"sequence\\.editor", "pager\\.", "gpg\\.", "filter\\.", "diff\\.external", "diff\\..+\\.(?:command|textconv)$", "merge\\..+\\.driver$", "submodule\\..+\\.update$",
 		"uploadpack\\.", "lfs\\.(?:extension|customtransfer)\\.", "man\\.", "browser\\.", "web\\.browser", "help\\.(?:browser|format)", "include\\.", "includeif\\.", "protocol\\.",
 	].map(key => `^${key}`).join("|"),
@@ -262,20 +426,27 @@ const PUSH_OK_SHORT = names("-u", "-q", "-v", "-n", "-4", "-6");
 /** `p` from `dir`, walked as the kernel does: a `..` after a symlink leaves the link's target, which `path.resolve` can't know. */
 const walk = (dir: string, p: string): string => canonical(path.isAbsolute(p) ? p : `${dir}${path.sep}${p}`);
 
-/** The folder a git argv runs in: its `-C` options applied to `cwd`. */
-export function gitWorkDir(args: string[], cwd: string): string {
-	let dir = cwd;
-	for (let i = 0; i < args.length && (args[i] as string).startsWith("-"); i++) {
-		if (args[i] === "-C") dir = walk(dir, args[++i] ?? "");
-		else if (isIn(GIT_GLOBAL_VALUE, args[i] as string)) i++;
-	}
-	return dir;
-}
+/** The folder a git call runs in: its `-C` folders, each taken from the one before it, from `cwd`. */
+const workDir = (dirs: string[], cwd: string): string => dirs.reduce(walk, cwd);
 
 /** The `src` of each refspec a `git push` argv names, after its flags: `HEAD:x` gives `HEAD`, `x` gives `x`. */
-export function pushSources(pushArgs: string[]): string[] {
+function pushSources(pushArgs: string[]): string[] {
 	const [, ...refspecs] = parse(pushArgs, PUSH_VALUE_FLAGS).positionals;
 	return refspecs.map(spec => (spec.includes(":") ? spec.slice(0, spec.indexOf(":")) : spec).replace(/^\+/, "") || "HEAD");
+}
+
+/**
+ * What a `git push` argv comes to, for the checks that ask real git: the folder it runs in, the `src` of each refspec,
+ * and the argv that lists the refs it would update (`git push --dry-run --porcelain`, hooks skipped, with the same
+ * `-c` settings and the flags that decide which refs go). Null when `args` is no push.
+ */
+export function readPush(args: string[], cwd: string): { dir: string; sources: string[]; listing: string[] } | null {
+	const call = readGit(args);
+	if (call.sub !== "push") return null;
+	const f = parse(call.rest, PUSH_VALUE_FLAGS);
+	const decide = ["--no-follow-tags", "-4", "-6", "--ipv4", "--ipv6"].filter(flag => has(f, flag));
+	const config = [...call.settings.flatMap(setting => ["-c", setting]), ...call.configEnv.flatMap(setting => ["--config-env", setting])];
+	return { dir: workDir(call.dirs, cwd), sources: pushSources(call.rest), listing: [...config, "push", "--dry-run", "--porcelain", "--no-verify", ...decide, ...f.positionals] };
 }
 
 function checkPush(args: string[], policy: GitPolicy): string | null {
@@ -356,7 +527,7 @@ function checkConfig(args: string[]): string | null {
 	if (verb === "rename-section") return CONFIG_RENAME;
 	const writing = ["set", "unset", "remove-section"].includes(verb) || writes || (rest.length >= 2 && !reads && verb !== "get" && verb !== "list");
 	const key = writing ? words.find(word => RISKY_CONFIG.test(word)) : undefined;
-	return key === undefined ? null : refused(`git config ${key} is refused: hooks and remotes stay as configured, and so does anything that runs a program or reads more config`);
+	return key === undefined ? null : refused(`git config ${key} is refused: hooks and remotes stay as configured, and so do push settings and anything that runs a program or reads more config`);
 }
 
 /** Whether `p`, absolute, is or lies inside a git folder: any `.git`, or one of `gitDirs`. Case-blind, as macOS is. */
@@ -538,46 +709,66 @@ function checkSubcommandWrites(sub: string, rest: string[], dir: string, policy:
 	return null;
 }
 
+/** Subcommands that run hooks, which `--no-verify` skips. (`push` takes only the flags it is allowed, and this is not one.) */
+const HOOKED = names("commit", "merge", "pull", "am", "rebase");
+/** git reads a long option by any prefix of its name that isn't ambiguous, so `--no-veri` is `--no-verify`. From `--no-v` a prefix is that option or an error to git, and refused alike. */
+const NO_VERIFY = "--no-verify";
+/** `commit`'s options that take a value, as the next word or the rest of a short bundle: `-mnew` is a message, not `-n`. */
+const COMMIT_VALUE_SHORT = "mFCct";
+const COMMIT_VALUE_LONG = names("--message", "--file", "--reuse-message", "--reedit-message", "--template", "--author", "--date", "--cleanup", "--fixup", "--squash", "--trailer", "--pathspec-from-file");
+
+/** Whether the words after `commit`, `merge`, `pull`, `am` or `rebase` ask git to skip its hooks: `--no-verify` by any prefix git reads for it, or `-n` on a commit or an am. */
+function skipsHooks(sub: string, rest: string[]): boolean {
+	for (let i = 0; i < rest.length; i++) {
+		const arg = rest[i] as string;
+		if (arg === "--") return false;
+		if (arg.startsWith("--")) {
+			const eq = arg.indexOf("=");
+			const name = eq < 0 ? arg : arg.slice(0, eq);
+			if (name.length >= "--no-v".length && NO_VERIFY.startsWith(name)) return true;
+			if (sub === "commit" && eq < 0 && isIn(COMMIT_VALUE_LONG, name)) i++;
+		} else if (arg.startsWith("-") && (sub === "commit" || sub === "am")) {
+			// git reads a short bundle option by option: the first that takes a value takes the rest of the bundle, or the next word.
+			for (let j = 1; j < arg.length; j++) {
+				const flag = arg[j] as string;
+				if (flag === "n") return true;
+				if (sub !== "commit") continue;
+				if (COMMIT_VALUE_SHORT.includes(flag)) {
+					if (j === arg.length - 1) i++;
+					break;
+				}
+				if (flag === "u" || flag === "S") break;
+			}
+		}
+	}
+	return false;
+}
+
+/** `git remote` subcommands that change where the remotes point. */
+const REMOTE_CHANGES = names("add", "set-url", "rename", "remove", "rm");
+
 /** `args` is git's argv without the program name; `env` is what the call runs with, which `--config-env` reads its values from. */
 export function checkGit(args: string[], policy: GitPolicy, cwd: string, env: Record<string, string | undefined> = {}): string | null {
-	let i = 0;
-	/** What `-c` and the environment set: `key=value`. */
-	const settings: string[] = [];
-	/** What `--config-env` names: `key=VARIABLE`. */
-	const configEnv: string[] = [];
-	/** What the global options name as a path: --git-dir and --work-tree. A `-C` is the folder git runs in, which `dir` judges. */
-	const named: string[] = [];
-	for (; i < args.length; i++) {
-		const arg = args[i] as string;
-		if (!arg.startsWith("-")) break;
-		if (isIn(GIT_GLOBAL_VALUE, arg)) {
-			const given = args[i + 1] ?? "";
-			if (arg === "-c") settings.push(given);
-			else if (arg === "--config-env") configEnv.push(given);
-			else if (arg === "--git-dir" || arg === "--work-tree") named.push(given);
-			i++;
-		} else if (arg.startsWith("-c") && arg.length > 2) settings.push(arg.slice(2));
-		else if (arg.startsWith("--config-env=")) configEnv.push(arg.slice("--config-env=".length));
-		else if (arg.startsWith("--git-dir=") || arg.startsWith("--work-tree=")) named.push(arg.slice(arg.indexOf("=") + 1));
-		// Asking for the path (`--exec-path`) is harmless; setting it moves where git finds the programs it runs.
-		else if (arg.startsWith("--exec-path=")) return refused("git --exec-path=<dir> is refused: the programs git runs stay where they are");
-	}
-	const sub = args[i] ?? "";
-	const rest = args.slice(i + 1);
+	const call = readGit(args);
+	if (call.problem !== null) return call.problem;
+	const { sub, rest } = call;
 	if (sub !== "" && !isIn(GIT_COMMANDS, sub)) return refused(`git ${sub} is not a git command the fence allows`);
-	const dir = gitWorkDir(args, cwd);
-	settings.push(...environmentSettings(env));
-	const risky = [...settings, ...configEnv].map(setting => setting.split("=", 1)[0] as string).find(key => RISKY_CONFIG.test(key));
-	if (risky !== undefined) return refused(`${risky} can't be set for one command (-c, --config-env, GIT_CONFIG_*): hooks and remotes stay as configured, and so does anything that runs a program or reads more config`);
+	const dir = workDir(call.dirs, cwd);
+	/** What `-c` and the environment set: `key=value`. */
+	const settings = [...call.settings, ...environmentSettings(env)];
+	const risky = [...settings, ...call.configEnv].map(setting => setting.split("=", 1)[0] as string).find(key => RISKY_CONFIG.test(key));
+	if (risky !== undefined) return refused(`${risky} can't be set for one command (-c, --config-env, GIT_CONFIG_*): hooks and remotes stay as configured, and so do push settings and anything that runs a program or reads more config`);
 	// Any config value may be a path (core.worktree, format.outputDirectory, trace2.eventTarget); a --config-env value is what its variable holds.
-	const configPaths = [...settings.map(s => s.slice(s.indexOf("=") + 1)), ...configEnv.map(s => env[s.slice(s.indexOf("=") + 1)] ?? "")];
-	const writes = checkGitFolder(sub, rest, [...named, ...configPaths], dir, policy) ?? checkSubcommandWrites(sub, rest, dir, policy);
+	const configPaths = [...settings.map(s => s.slice(s.indexOf("=") + 1)), ...call.configEnv.map(s => env[s.slice(s.indexOf("=") + 1)] ?? "")];
+	const writes = checkGitFolder(sub, rest, [...call.named, ...configPaths], dir, policy) ?? checkSubcommandWrites(sub, rest, dir, policy);
 	if (writes !== null) return writes;
 	// The push check reads the repo the shim runs in; --git-dir would point the push at another one.
-	if (sub === "push" && args.slice(0, i).some(a => a === "--git-dir" || a.startsWith("--git-dir="))) return refused("git push --git-dir is refused: push from the repo itself");
+	if (sub === "push" && call.gitDir) return refused("git push --git-dir (or --bare) is refused: push from the repo itself");
 	if (sub === "push") return checkPush(rest, policy);
-	if ((sub === "commit" || sub === "merge") && (rest.includes("--no-verify") || (sub === "commit" && rest.some(a => /^-[a-zA-Z]*n/.test(a) && !a.startsWith("--"))))) return refused(`${sub} keeps its hooks: drop --no-verify / -n`);
-	if (sub === "remote" && ["add", "set-url", "rename", "remove", "rm"].includes(rest[0] ?? "")) return refused(`git remote ${rest[0]} is refused`);
+	if (isIn(HOOKED, sub) && skipsHooks(sub, rest)) return refused(`${sub} keeps its hooks: drop --no-verify / -n`);
+	// `git remote -v set-url …`: the subcommand is the first word that is no option.
+	const verb = sub === "remote" ? (parse(rest, {}).positionals[0] ?? "") : "";
+	if (isIn(REMOTE_CHANGES, verb)) return refused(`git remote ${verb} is refused`);
 	if (sub === "config") return checkConfig(rest);
 	return null;
 }

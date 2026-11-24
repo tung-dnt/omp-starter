@@ -87,7 +87,7 @@ export function installFence(): void {
 	process.env.PATH = [SHIM_DIR, ...pathEntries()].join(path.delimiter);
 }
 
-export type Git = (dir: string, ...args: string[]) => { code: number; out: string };
+export type Git = (dir: string, ...args: string[]) => { code: number; out: string; err?: string };
 
 /**
  * git found on PATH past the shims, so the fence's own reads don't go through it. Replacement refs are off: the session
@@ -96,7 +96,7 @@ export type Git = (dir: string, ...args: string[]) => { code: number; out: strin
 export const realGit: Git = (dir, ...args) => {
 	const git = Bun.which("git", { PATH: pathEntries().join(path.delimiter) }) ?? "git";
 	const p = Bun.spawnSync([git, "--no-replace-objects", "-C", dir, ...args], { stdout: "pipe", stderr: "pipe" });
-	return { code: p.exitCode ?? 1, out: p.stdout.toString() };
+	return { code: p.exitCode ?? 1, out: p.stdout.toString(), err: p.stderr.toString() };
 };
 
 /** Protected files in `ref`'s tree: path to `<mode> <blob id>`, so that a change of mode or type alone is a change. Null when the tree can't be read. */
@@ -201,4 +201,26 @@ export function checkPushContent(dir: string, sources: string[], state: FenceSta
 		if (held.length > 0) return refused(`the push would change ${held.join(", ")}, which /ship never edits; leave that change to the user`);
 	}
 	return null;
+}
+
+/** A ref a push would update, as a line of `git push --porcelain` lists it: `<flag>\t<from>:<to>\t<summary>`. */
+const UPDATED_REF = /^[ +*=!-]\t[^\t]*:([^\t]+)\t/;
+
+/**
+ * Why a push the argv checks allowed would still send more than the watched branch. Git is asked what it would send,
+ * with a dry run that lists each ref it would update, since config the argv doesn't show adds refs: `push.followTags`
+ * sends annotated tags along. A tag or any other ref is refused, and `--no-follow-tags` turns the tags off. A listing
+ * that can't be read is refused too: the fence doesn't guess what a push sends. `listing` is `readPush`'s argv.
+ */
+export function checkPushRefs(dir: string, listing: string[], state: FenceState, git: Git = realGit): string | null {
+	if (state.pushBranch === null) return refused("this session pushes nothing");
+	const dry = git(dir, ...listing);
+	const sent = dry.out.split("\n").flatMap(line => UPDATED_REF.exec(line)?.[1] ?? []);
+	if (sent.length === 0) return retryable(`can't tell what the push would send: git push --dry-run listed no ref (${(dry.err ?? "").trim().split("\n")[0] || `exit ${dry.code}`})`);
+	const extra = sent.filter(ref => ref !== `refs/heads/${state.pushBranch}`);
+	if (extra.length === 0) return null;
+	if (extra.every(ref => ref.startsWith("refs/tags/")) && !listing.includes("--no-follow-tags")) {
+		return retryable(`this push would also send ${extra.join(", ")}, since git follows tags here (push.followTags); push with git push --no-follow-tags origin ${state.pushBranch}`);
+	}
+	return refused(`this push would also send ${extra.join(", ")}; /ship pushes only ${state.pushBranch}`);
 }
