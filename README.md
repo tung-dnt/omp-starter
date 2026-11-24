@@ -413,7 +413,7 @@ Limits: a session's repo comes from the origin URL of its working folder, so a f
 
 ## Release notes
 
-### Unreleased
+### 0.48.0 — 2026-11-25
 
 - **Added:** `extensions/repo-memory.ts`. When the main session starts working in a repo other than the one it was started in, it recalls that repo's Hindsight memories (`project:<repo>` tags) once and hands them to the agent. See [Memory](#memory-starter-memory).
 - **Fixed:** a `/ship` that is still starting can be stopped. `/ship stop` or the session ending cancels it before it claims, fences or watches anything, closes the confirm it waits on and gives back any claim it took; before, `stop` said there was no watch and the watch then started anyway. The first session to find a branch's open PR claims it before it pushes, so two sessions starting together can't both push. A `gh` or `git` call that outlives its timeout fails at the timeout, with the output so far and a note that it timed out, even when a grandchild still holds its pipes. Fixes #14.
