@@ -9,7 +9,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type ClaimWatch, type EndReason, type NextStep, type PrRef, type SaveWatch, SHIP, type Snapshot, type Watch } from "./types";
+import { type ClaimWatch, type EndReason, type HeldElsewhere, type NextStep, type PrRef, type SaveWatch, SHIP, type Snapshot, type Watch } from "./types";
 
 // ---- what to do next -----------------------------------------------------------------------------------------------
 
@@ -141,6 +141,15 @@ const isLive = (owner: Watch["owner"], now: number): boolean => now - owner.hear
 
 const isOwner = (held: Watch, watch: Watch): boolean => held.owner.session === watch.owner.session && held.owner.pid === watch.owner.pid;
 
+/** Why another live session holds `held`, the saved Watch of `pr`, or null when `session` may claim it: no watch, its own, or an owner gone stale. */
+function heldBy(pr: PrRef, held: Watch | null, session: string, now: number): string | null {
+	if (held === null || held.owner.session === session || !isLive(held.owner, now)) return null;
+	return `${pr.owner}/${pr.repo}#${pr.number} is already watched by session ${held.owner.session} (pid ${held.owner.pid}); run /ship stop there first`;
+}
+
+/** Why `session` may not claim the watch of `pr`, or null when it may. Reads the file and changes nothing, for a caller that must refuse before it does anything else. */
+export const heldElsewhere: HeldElsewhere = (pr, session, now) => heldBy(pr, loadWatch(pr), session, now);
+
 /**
  * The Watch this session may run, saved with it as owner; or why another live session holds it. The same session, or one
  * taking over a stale or dead owner, resumes the saved Watch: the start time, pushes per cause and what the user was told
@@ -149,9 +158,8 @@ const isOwner = (held: Watch, watch: Watch): boolean => held.owner.session === w
  */
 export const claimWatch: ClaimWatch = (pr, start) => {
 	const held = loadWatch(pr);
-	if (held !== null && held.owner.session !== start.session && isLive(held.owner, start.now)) {
-		return `${pr.owner}/${pr.repo}#${pr.number} is already watched by session ${held.owner.session} (pid ${held.owner.pid}); run /ship stop there first`;
-	}
+	const refusal = heldBy(pr, held, start.session, start.now);
+	if (refusal !== null) return refusal;
 	const owner = { session: start.session, pid: start.pid, heartbeat: start.now };
 	const watch: Watch =
 		held !== null && start.now - held.startedAt < SHIP.lifetimeMs

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { checkGh } from "./fence";
 import bot from "./fixtures/pr-bot.json";
 import commented from "./fixtures/pr-commented.json";
@@ -26,25 +26,33 @@ interface Recording {
 	permissions: Record<string, string>;
 }
 
-/** A gh that answers from a recording. A login without a permission answer gets the 404 gh prints for one GitHub doesn't know. */
+/** A gh that answers from a recording. A login without a permission answer gets the 404 gh prints for one GitHub doesn't know. `running` counts the calls under way, now and at most. */
 function replay(rec: Recording, permissions: Record<string, string> = rec.permissions) {
 	const calls: string[][] = [];
-	const gh: Gh = args => {
+	const running = { now: 0, most: 0 };
+	const gh: Gh = async args => {
 		calls.push(args);
-		const call = args[0] === "pr" ? rec[args[1] === "view" ? "pr view" : "pr checks"] : args[1] === "graphql" ? rec.graphql : undefined;
-		if (call) return { code: call.code, err: call.err, out: typeof call.out === "string" ? call.out : JSON.stringify(call.out) };
-		const role = permissions[/\/collaborators\/([^/]+)\/permission$/.exec(args[1] ?? "")?.[1] ?? ""];
-		return role === undefined ? { code: 1, out: "", err: "gh: Not Found (HTTP 404)" } : { code: 0, out: `${role}\n`, err: "" };
+		running.most = Math.max(running.most, ++running.now);
+		try {
+			// A real gh takes a while; yielding once lets calls that were started together overlap, if the reader starts them together.
+			await Promise.resolve();
+			const call = args[0] === "pr" ? rec[args[1] === "view" ? "pr view" : "pr checks"] : args[1] === "graphql" ? rec.graphql : undefined;
+			if (call) return { code: call.code, err: call.err, out: typeof call.out === "string" ? call.out : JSON.stringify(call.out) };
+			const role = permissions[/\/collaborators\/([^/]+)\/permission$/.exec(args[1] ?? "")?.[1] ?? ""];
+			return role === undefined ? { code: 1, out: "", err: "gh: Not Found (HTTP 404)" } : { code: 0, out: `${role}\n`, err: "" };
+		} finally {
+			running.now--;
+		}
 	};
-	return { gh, calls };
+	return { gh, calls, running };
 }
 
 const PR: PrRef = { host: "github.com", owner: "tung-dnt", repo: "omp-ship-sandbox", number: 1 };
 const ME: Trust = { me: "tung-dnt", bots: [] };
 const OTHER: Trust = { me: "someone-else", bots: [] };
 
-function read(rec: Recording, trust: Trust = ME, permissions?: Record<string, string>): Snapshot {
-	const snapshot = readPr(PR, replay(rec, permissions).gh, trust);
+async function read(rec: Recording, trust: Trust = ME, permissions?: Record<string, string>): Promise<Snapshot> {
+	const snapshot = await readPr(PR, replay(rec, permissions).gh, trust);
 	if (typeof snapshot === "string") throw new Error(`unreadable: ${snapshot}`);
 	return snapshot;
 }
@@ -59,8 +67,8 @@ function edited(rec: Recording, from: string, to: string): Recording {
 }
 
 describe("readPr", () => {
-	test("a green PR reads as open, mergeable, every check passing and nothing said", () => {
-		const s = read(green);
+	test("a green PR reads as open, mergeable, every check passing and nothing said", async () => {
+		const s = await read(green);
 		expect(s).toMatchObject({ pr: PR, state: "OPEN", isDraft: false, author: "tung-dnt", headRef: "s2-read", baseRef: "main", mergeable: "MERGEABLE", mergeState: "CLEAN", reviewDecision: null, untrusted: 0, threads: [], comments: [], reviews: [] });
 		expect(s.url).toBe("https://github.com/tung-dnt/omp-ship-sandbox/pull/1");
 		expect(s.headSha).toBe("88a331f0abefc4ff292065b068a925c07cf5fb97");
@@ -69,135 +77,153 @@ describe("readPr", () => {
 		expect(s.hash).toMatch(/^[0-9a-f]{64}$/);
 	});
 
-	test("a red PR reports its failing checks", () => {
-		const s = read(red);
+	test("a red PR reports its failing checks", async () => {
+		const s = await read(red);
 		expect(s.checks.filter(c => c.bucket === "fail").map(c => c.name)).toEqual(["test", "test"]);
 		expect(s).toMatchObject({ mergeable: "MERGEABLE", mergeState: "UNSTABLE", headSha: "4355ed29141d49429f86b11125536a16f579ac31" });
 	});
 
-	test("a PR that can't merge reads as conflicting, against its own base", () => {
-		expect(read(conflicting)).toMatchObject({ mergeable: "CONFLICTING", mergeState: "DIRTY", baseRef: "s2-base", headRef: "s2-conflict", state: "OPEN" });
+	test("a PR that can't merge reads as conflicting, against its own base", async () => {
+		expect(await read(conflicting)).toMatchObject({ mergeable: "CONFLICTING", mergeState: "DIRTY", baseRef: "s2-base", headRef: "s2-conflict", state: "OPEN" });
 	});
 
-	test("a PR nothing reports on has no checks: gh says so with a failure, not an empty list", () => {
+	test("a PR nothing reports on has no checks: gh says so with a failure, not an empty list", async () => {
 		// gh's own message (cli/cli, populateStatusChecks). Not recorded: the sandbox can't make it, GitGuardian reports on every PR there.
 		const none = { ...green, "pr checks": { code: 1, out: "", err: "no checks reported on the 's2-read' branch\n" } };
-		expect(read(none).checks).toEqual([]);
+		expect((await read(none)).checks).toEqual([]);
 	});
 
-	test("a merged or closed PR is still read in full, so the watch can see it end", () => {
+	test("a merged or closed PR is still read in full, so the watch can see it end", async () => {
 		for (const state of ["MERGED", "CLOSED"] as const) {
-			const s = read(withView(green, { state }));
+			const s = await read(withView(green, { state }));
 			expect([s.state, s.checks.length]).toEqual([state, 3]);
 		}
 	});
 
-	test("says why when gh can't answer", () => {
+	test("says why when gh can't answer", async () => {
 		const why = (rec: unknown) => readPr(PR, replay(rec as Recording).gh, ME);
 		const notFound = { code: 1, out: "", err: "GraphQL: Could not resolve to a PullRequest with the number of 999. (repository.pullRequest)\n" };
-		expect(why({ ...green, "pr view": notFound })).toBe("gh pr view failed: GraphQL: Could not resolve to a PullRequest with the number of 999. (repository.pullRequest)");
-		expect(why({ ...green, "pr checks": { code: 1, out: "", err: "HTTP 502: Bad Gateway\n" } })).toBe("gh pr checks failed: HTTP 502: Bad Gateway");
+		expect(await why({ ...green, "pr view": notFound })).toBe("gh pr view failed: GraphQL: Could not resolve to a PullRequest with the number of 999. (repository.pullRequest)");
+		expect(await why({ ...green, "pr checks": { code: 1, out: "", err: "HTTP 502: Bad Gateway\n" } })).toBe("gh pr checks failed: HTTP 502: Bad Gateway");
 		const noRepo = { code: 1, out: '{"data":{"repository":null},"errors":[{"type":"NOT_FOUND"}]}', err: "gh: Could not resolve to a Repository with the name 'tung-dnt/gone'.\n" };
-		expect(why({ ...green, graphql: noRepo })).toBe("gh api graphql failed: gh: Could not resolve to a Repository with the name 'tung-dnt/gone'.");
-		expect(why({ ...green, graphql: { code: 0, err: "", out: { data: { repository: { pullRequest: null } } } } })).toContain("is not readable");
-		expect(why({ ...green, "pr view": { code: 0, err: "", out: "<html>" } })).toBe("gh pr view did not return JSON");
-		expect(why({ ...green, "pr view": { code: 1, out: "", err: "" } })).toBe("gh pr view failed: exit 1");
-		expect(why(withView(green, { mergeable: "MAYBE" }))).toContain('the PR\'s mergeable state was "MAYBE"');
-		expect(why(withView(green, { headRefOid: "" }))).toBe("gh pr view returned no head commit");
-		expect(why({ ...green, "pr checks": { code: 0, err: "", out: [{ name: "t", bucket: "weird", link: "" }] } })).toContain("a check's bucket");
+		expect(await why({ ...green, graphql: noRepo })).toBe("gh api graphql failed: gh: Could not resolve to a Repository with the name 'tung-dnt/gone'.");
+		expect(await why({ ...green, graphql: { code: 0, err: "", out: { data: { repository: { pullRequest: null } } } } })).toContain("is not readable");
+		expect(await why({ ...green, "pr view": { code: 0, err: "", out: "<html>" } })).toBe("gh pr view did not return JSON");
+		expect(await why({ ...green, "pr view": { code: 1, out: "", err: "" } })).toBe("gh pr view failed: exit 1");
+		expect(await why(withView(green, { mergeable: "MAYBE" }))).toContain('the PR\'s mergeable state was "MAYBE"');
+		expect(await why(withView(green, { headRefOid: "" }))).toBe("gh pr view returned no head commit");
+		expect(await why({ ...green, "pr checks": { code: 0, err: "", out: [{ name: "t", bucket: "weird", link: "" }] } })).toContain("a check's bucket");
 	});
 
-	test("every gh call it makes is one the fence lets through", () => {
+	test("every gh call it makes is one the fence lets through", async () => {
 		const { gh, calls } = replay(red);
-		readPr(PR, gh, OTHER);
+		await readPr(PR, gh, OTHER);
 		expect(calls.length).toBeGreaterThanOrEqual(4);
 		for (const args of calls) expect(checkGh(args)).toBeNull();
 	});
 });
 
 describe("the hash", () => {
-	const quiet = read(green).hash;
-
-	test("is the same for the same PR", () => {
-		expect(read(green).hash).toBe(quiet);
-		expect(read(red).hash).toBe(read(red).hash);
+	let quiet = "";
+	beforeAll(async () => {
+		quiet = (await read(green)).hash;
 	});
 
-	test("moves when the head, the mergeable state or a check's bucket does", () => {
-		expect(read(withView(green, { headRefOid: "f".repeat(40) })).hash).not.toBe(quiet);
-		expect(read(withView(green, { mergeable: "CONFLICTING" })).hash).not.toBe(quiet);
-		expect(read({ ...green, "pr checks": red["pr checks"] }).hash).not.toBe(quiet);
+	test("is the same for the same PR", async () => {
+		expect((await read(green)).hash).toBe(quiet);
+		expect((await read(red)).hash).toBe((await read(red)).hash);
 	});
 
-	test("holds when a check is re-run to the same result, whatever its order or link", () => {
+	test("moves when the head, the mergeable state or a check's bucket does", async () => {
+		expect((await read(withView(green, { headRefOid: "f".repeat(40) }))).hash).not.toBe(quiet);
+		expect((await read(withView(green, { mergeable: "CONFLICTING" }))).hash).not.toBe(quiet);
+		expect((await read({ ...green, "pr checks": red["pr checks"] })).hash).not.toBe(quiet);
+	});
+
+	test("holds when a check is re-run to the same result, whatever its order or link", async () => {
 		const rerun = [...green["pr checks"].out].reverse().map(c => ({ ...c, link: "https://example.test/rerun" }));
-		expect(read({ ...green, "pr checks": { ...green["pr checks"], out: rerun } }).hash).toBe(quiet);
+		expect((await read({ ...green, "pr checks": { ...green["pr checks"], out: rerun } })).hash).toBe(quiet);
 	});
 
-	test("moves when a trusted comment lands, and not when an untrusted one does", () => {
-		const landed = read(commented);
+	test("moves when a trusted comment lands, and not when an untrusted one does", async () => {
+		const landed = await read(commented);
 		expect(landed.comments.map(c => c.body)).toEqual(["Looks good. Could you also add a test for the empty case?"]);
 		expect(landed.hash).not.toBe(quiet);
 
 		// Same recording, but the author now has only read access to a repo that isn't theirs.
-		const stranger = read(commented, OTHER, { "tung-dnt": "read" });
+		const stranger = await read(commented, OTHER, { "tung-dnt": "read" });
 		expect(stranger).toMatchObject({ comments: [], untrusted: 1 });
-		expect(stranger.hash).toBe(read(green, OTHER).hash);
+		expect(stranger.hash).toBe((await read(green, OTHER)).hash);
 	});
 
-	test("ignores resolved threads, and follows unresolved ones and a thread's resolution", () => {
-		const base = read(red).hash;
-		expect(read(edited(red, "Nit: use single quotes here.", "Nit: use double quotes here.")).hash).toBe(base);
-		expect(read(edited(red, "Should this echo go through", "Should this call go through")).hash).not.toBe(base);
-		expect(read(edited(red, '"isResolved":true', '"isResolved":false')).hash).not.toBe(base);
+	test("ignores resolved threads, and follows unresolved ones and a thread's resolution", async () => {
+		const base = (await read(red)).hash;
+		expect((await read(edited(red, "Nit: use single quotes here.", "Nit: use double quotes here."))).hash).toBe(base);
+		expect((await read(edited(red, "Should this echo go through", "Should this call go through"))).hash).not.toBe(base);
+		expect((await read(edited(red, '"isResolved":true', '"isResolved":false'))).hash).not.toBe(base);
 	});
 });
 
 describe("the trust filter", () => {
-	test("people with admin, maintain or write access are trusted; read, triage, none and unknown logins are not", () => {
-		for (const role of ["admin", "maintain", "write"]) expect(read(commented, OTHER, { "tung-dnt": role })).toMatchObject({ untrusted: 0, comments: [{ author: "tung-dnt", bot: false, yours: false }] });
-		for (const role of ["read", "triage", "none", ""]) expect(read(commented, OTHER, { "tung-dnt": role })).toMatchObject({ untrusted: 1, comments: [] });
-		expect(read(commented, OTHER, {})).toMatchObject({ untrusted: 1, comments: [] });
+	test("people with admin, maintain or write access are trusted; read, triage, none and unknown logins are not", async () => {
+		for (const role of ["admin", "maintain", "write"]) expect(await read(commented, OTHER, { "tung-dnt": role })).toMatchObject({ untrusted: 0, comments: [{ author: "tung-dnt", bot: false, yours: false }] });
+		for (const role of ["read", "triage", "none", ""]) expect(await read(commented, OTHER, { "tung-dnt": role })).toMatchObject({ untrusted: 1, comments: [] });
+		expect(await read(commented, OTHER, {})).toMatchObject({ untrusted: 1, comments: [] });
 	});
 
-	test("the user needs no lookup, and everyone else is looked up once per read however much they wrote", () => {
-		const lookups = (rec: Recording, trust: Trust) => {
+	test("the user needs no lookup, and everyone else is looked up once per read however much they wrote", async () => {
+		const lookups = async (rec: Recording, trust: Trust) => {
 			const { gh, calls } = replay(rec);
-			readPr(PR, gh, trust);
+			await readPr(PR, gh, trust);
 			return calls.filter(args => args[0] === "api" && args[1] !== "graphql").map(args => args[1]);
 		};
-		expect(lookups(red, ME)).toEqual([]);
-		expect(lookups(red, OTHER)).toEqual(["repos/tung-dnt/omp-ship-sandbox/collaborators/tung-dnt/permission"]);
+		expect(await lookups(red, ME)).toEqual([]);
+		expect(await lookups(red, OTHER)).toEqual(["repos/tung-dnt/omp-ship-sandbox/collaborators/tung-dnt/permission"]);
 	});
 
-	test("a login that isn't one is never put in a URL", () => {
+	test("each gh call finishes before the next starts, so a PR with a crowd of commenters never starts a crowd of gh processes", async () => {
+		const strangers = ["alice", "bob", "carol", "dave"];
+		const note = (login: string) => ({ id: login, body: `from ${login}`, createdAt: "2026-11-24T09:00:00Z", url: "https://example.test", isMinimized: false, author: { login, __typename: "User" } });
+		const pull = { reviewThreads: { nodes: [] }, reviews: { nodes: [] }, comments: { nodes: strangers.map(note) } };
+		const crowd = { ...green, graphql: { ...green.graphql, out: { data: { repository: { pullRequest: pull } } } } };
+		const { gh, calls, running } = replay(crowd, Object.fromEntries(strangers.map(login => [login, "write"])));
+		const snapshot = (await readPr(PR, gh, OTHER)) as Snapshot;
+		expect(snapshot.comments.map(c => c.author)).toEqual(strangers);
+		expect(calls.filter(args => args[1]?.includes("/collaborators/"))).toHaveLength(strangers.length);
+		expect(running.most).toBe(1);
+	});
+
+	test("a login that isn't one is never put in a URL", async () => {
 		const odd = edited(commented, '"login":"tung-dnt"', '"login":"x/../../admin"');
 		const { gh, calls } = replay(odd, { "x/../../admin": "admin" });
-		expect(readPr(PR, gh, OTHER)).toMatchObject({ comments: [], untrusted: 1 });
+		expect(await readPr(PR, gh, OTHER)).toMatchObject({ comments: [], untrusted: 1 });
 		expect(calls.some(args => args[1]?.includes("/collaborators/"))).toBe(false);
 	});
 
-	test("bots are trusted by name, with or without [bot] and whatever the case, and never looked up", () => {
+	test("bots are trusted by name, with or without [bot] and whatever the case, and never looked up", async () => {
 		const text = "Build report: 1 job finished. Details are on the checks tab.";
-		const unnamed = read(bot, ME);
+		const unnamed = await read(bot, ME);
 		expect(unnamed).toMatchObject({ comments: [], untrusted: 1 });
 		for (const name of ["github-actions", "github-actions[bot]", "GitHub-Actions"]) {
 			const { gh, calls } = replay(bot);
-			const named = readPr(PR, gh, { me: "tung-dnt", bots: [name] }) as Snapshot;
+			const named = (await readPr(PR, gh, { me: "tung-dnt", bots: [name] })) as Snapshot;
 			expect(named).toMatchObject({ untrusted: 0, comments: [{ author: "github-actions", bot: true, yours: false, body: text }] });
 			expect(named.hash).not.toBe(unnamed.hash);
 			expect(calls.some(args => args[1]?.includes("/collaborators/"))).toBe(false);
 		}
 	});
 
-	test("a person who shares a named bot's login is not that bot", () => {
+	test("a person who shares a named bot's login is not that bot", async () => {
 		const person = edited(bot, '"__typename":"Bot"', '"__typename":"User"');
-		expect(read(person, { me: "tung-dnt", bots: ["github-actions"] })).toMatchObject({ comments: [], untrusted: 1 });
+		expect(await read(person, { me: "tung-dnt", bots: ["github-actions"] })).toMatchObject({ comments: [], untrusted: 1 });
 	});
 });
 
 describe("what the model sees of a comment", () => {
-	const s = read(red);
+	let s: Snapshot;
+	beforeAll(async () => {
+		s = await read(red);
+	});
 
 	test("quoted lines and hidden HTML comments are dropped, and a note left empty is dropped with them", () => {
 		expect(s.comments).toHaveLength(4);
@@ -226,8 +252,8 @@ describe("what the model sees of a comment", () => {
 		expect(s.comments[1]?.body).toBe("<!-- omp-ship -->\nAdded the empty-case test in 88a331f.");
 	});
 
-	test("the same comment from someone else is not /ship's, and shows no marker", () => {
-		const theirs = read(red, OTHER, { "tung-dnt": "write" });
+	test("the same comment from someone else is not /ship's, and shows no marker", async () => {
+		const theirs = await read(red, OTHER, { "tung-dnt": "write" });
 		expect(theirs.comments.map(c => c.yours)).toEqual([false, false, false, false]);
 		expect(theirs.comments[1]?.body).toBe("Added the empty-case test in 88a331f.");
 	});
@@ -240,8 +266,8 @@ describe("what the model sees of a comment", () => {
 		expect(s.reviews).toEqual([{ author: "tung-dnt", state: "COMMENTED", at: "2026-11-24T10:57:05Z", body: "Overall fine, one nit inline.", commit: "88a331f0abefc4ff292065b068a925c07cf5fb97" }]);
 	});
 
-	test("a thread whose notes are all untrusted is left out, and its notes counted", () => {
-		const theirs = read(red, OTHER, { "tung-dnt": "read" });
+	test("a thread whose notes are all untrusted is left out, and its notes counted", async () => {
+		const theirs = await read(red, OTHER, { "tung-dnt": "read" });
 		expect(theirs).toMatchObject({ threads: [], comments: [], reviews: [], untrusted: 9 });
 	});
 });

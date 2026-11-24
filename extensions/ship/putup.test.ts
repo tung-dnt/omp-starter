@@ -16,14 +16,18 @@ type Answer = { code: number; out: string; err: string };
 const good = (out: string): Answer => ({ code: 0, out, err: "" });
 const bad = (err: string): Answer => ({ code: 1, out: "", err });
 
-const git: Git = (dir, args) => {
+/** git as the tests set a checkout up and inspect it: synchronous, with the exit code and output as they came. */
+function gitSync(dir: string, args: string[]): Answer {
 	const ran = spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
 	return { code: ran.status ?? 1, out: ran.stdout, err: ran.stderr };
-};
+}
+
+/** The runner put-up gets: the same git, awaited like the real one. */
+const git: Git = async (dir, args) => gitSync(dir, args);
 
 /** Runs git and returns its trimmed output; a nonzero exit fails the test. */
 function sh(dir: string, ...args: string[]): string {
-	const ran = git(dir, args);
+	const ran = gitSync(dir, args);
 	if (ran.code !== 0) throw new Error(`git ${args.join(" ")} in ${dir}: ${ran.err}`);
 	return ran.out.trim();
 }
@@ -90,7 +94,7 @@ const snapshot = (s: Scene) => ({
 	remote: sh(s.bare, "for-each-ref", "--format=%(refname) %(objectname)"),
 });
 
-const onRemote = (s: Scene, branch: string) => git(s.bare, ["rev-parse", "--verify", "-q", `refs/heads/${branch}`]).code === 0;
+const onRemote = (s: Scene, branch: string) => gitSync(s.bare, ["rev-parse", "--verify", "-q", `refs/heads/${branch}`]).code === 0;
 
 /** The rows `gh pr list --json number,url,author,isCrossRepository` returns. */
 const row = (login: string, over: Record<string, unknown> = {}) => ({ number: 7, url: PR_URL, author: { login, is_bot: false }, isCrossRepository: false, ...over });
@@ -106,7 +110,7 @@ interface FakeGh {
 /** A gh that answers the calls put-up makes, as the account `ME`, and records them; any other call fails the test. */
 function fakeGh(answers: FakeGh = {}): { gh: Gh; calls: string[][] } {
 	const calls: string[][] = [];
-	const gh: Gh = args => {
+	const gh: Gh = async args => {
 		calls.push(args);
 		const [group, sub] = args;
 		if (group === "api" && sub === "user") return answers.user ?? good(`${ME}\n`);
@@ -292,6 +296,36 @@ describe("a branch that already has the user's open PR", () => {
 		commit(s, "one");
 		expect(await putUp(s.app, deps(fakeGh({ prs: [row("Tung-DNT")] }).gh))).toEqual(PR);
 	});
+
+	test("is asked about with the PR it found, before anything is pushed, and a clear answer lets the push through", async () => {
+		const s = checkout("feat/x");
+		commit(s, "one");
+		const order: string[] = [];
+		const heldElsewhere = (pr: PrRef) => (order.push(`asked ${pr.owner}/${pr.repo}#${pr.number}; pushed: ${onRemote(s, "feat/x")}`), null);
+		expect(await putUp(s.app, deps(fakeGh({ prs: [row(ME)] }).gh, { heldElsewhere }))).toEqual(PR);
+		expect(order).toEqual(["asked acme/app#7; pushed: false"]);
+		expect(onRemote(s, "feat/x")).toBe(true);
+	});
+
+	test("is refused, with nothing committed or pushed, when another live session already watches it", async () => {
+		const s = checkout("feat/x");
+		commit(s, "one");
+		writeFiles(s.app, { "notes.md": "notes\n" });
+		const held = "acme/app#7 is already watched by session sess-B (pid 4242); run /ship stop there first";
+		const { gh, calls } = fakeGh({ prs: [row(ME)] });
+		await refused(s, deps(gh, { confirm: noAsking, heldElsewhere: () => held }), /put-up refused: acme\/app#7 is already watched by session sess-B \(pid 4242\)/);
+		expect(onRemote(s, "feat/x")).toBe(false);
+		expect(creates(calls)).toHaveLength(0);
+	});
+
+	test("is not asked about when there is no PR yet, since nobody can watch one that doesn't exist", async () => {
+		const s = checkout("feat/x");
+		commit(s, "one");
+		const heldElsewhere = () => {
+			throw new Error("asked");
+		};
+		expect(await putUp(s.app, deps(fakeGh().gh, { heldElsewhere }))).toEqual(PR);
+	});
 });
 
 describe("refuses", () => {
@@ -430,7 +464,7 @@ describe("refuses", () => {
 		sh(s.app, "switch", "--quiet", "-c", "other", "main");
 		commit(s, "theirs", { "README.md": "theirs\n" });
 		sh(s.app, "switch", "--quiet", "feat/x");
-		expect(git(s.app, ["merge", "other"]).code).toBe(1);
+		expect(gitSync(s.app, ["merge", "other"]).code).toBe(1);
 		await refused(s, deps(fakeGh().gh), /unresolved merge conflicts in README\.md/);
 	});
 

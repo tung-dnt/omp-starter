@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { pr, replay, snapshot, START } from "../../scripts/ship-watch-replay";
 import { resetHome } from "../test-harness";
 import { SHIP, type Step, type Watch } from "./types";
-import { claimWatch, loadWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch } from "./watch";
+import { claimWatch, heldElsewhere, loadWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch } from "./watch";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -168,6 +168,24 @@ describe("claiming a watch", () => {
 		expect(typeof refusal).toBe("string");
 		expect(refusal).toContain("omp-7f3a");
 		expect(loadWatch(pr)?.owner.session).toBe("omp-7f3a");
+	});
+
+	test("heldElsewhere answers what a claim would, in the same words, and writes nothing", () => {
+		expect(heldElsewhere(pr, "s2", NOW)).toBeNull();
+		const held = claimed({ session: "omp-7f3a" });
+		const later = NOW + 5 * MIN;
+		const claim = claimWatch(pr, start({ session: "omp-91bc", now: later }));
+		expect(heldElsewhere(pr, "omp-91bc", later)).toBe(typeof claim === "string" ? claim : null);
+		expect(heldElsewhere(pr, "omp-91bc", later)).toContain("omp-7f3a");
+		expect(loadWatch(pr)).toEqual(held);
+	});
+
+	test("heldElsewhere has nothing to say to the holder, or about an owner that is stale or gone", () => {
+		claimed({ session: "omp-7f3a" });
+		expect(heldElsewhere(pr, "omp-7f3a", NOW + MIN)).toBeNull();
+		expect(heldElsewhere(pr, "omp-91bc", NOW + SHIP.staleOwnerMs + 1)).toBeNull();
+		claimed({ session: "omp-7f3a", pid: deadPid, now: NOW + MIN });
+		expect(heldElsewhere(pr, "omp-91bc", NOW + 2 * MIN)).toBeNull();
 	});
 
 	test("one PR has one file, named in lower case however the PR was spelled", () => {
