@@ -340,6 +340,18 @@ Limits: the fence is a guardrail against mistakes and simple injected instructio
 
 **Verify:** `bun test extensions/ship/`.
 
+### Ship watch (`extensions/ship/watch.ts`)
+
+The code that decides when `/ship` runs a model pass and which session may run it (`plans/001-ship.md`, story 3). It calls no model and no network; the `/ship` command will drive it from a 2-minute timer.
+
+- **Ends** when the PR is merged or closed, its base branch changes, or the watch is 7 days old. At 24 passes in 24 hours it also answers "end" (`spend_cap`), but reading goes on, and the cap lifts as passes age out or when `/ship` is run again.
+- **A pass starts** when the PR changed, at least 10 minutes after the last pass; or when the check the last pass set comes due: 2 minutes after a push, 30 minutes while checks run, otherwise an hour, each pushed back (doubling, up to a day) while nothing changes. Nothing starts a pass in the 2 minutes after a push.
+- **One watch per PR**, in `~/.omp/agent/ship/watches/<owner>-<repo>-<n>.json`, written to a temp file and renamed into place, so a crash leaves the old one. A second live session on the same PR is refused and told which session holds it; an owner whose heartbeat is over 10 minutes old, or whose process is gone, is taken over. Running `/ship` again resumes the file and starts the pass count over.
+
+`bun scripts/ship-watch-replay.ts` replays a recorded day of one PR through the engine and prints every pass, push and wait.
+
+**Verify:** `bun test extensions/ship/watch.test.ts`.
+
 ## Usage report
 
 A read-only report on how agents actually use the native todo, mined from omp's session transcripts. It calls no model and no network.
@@ -373,6 +385,7 @@ Limits: a session's repo comes from the origin URL of its working folder, so a f
 ### Unreleased (`feat/ship`)
 
 - **Added:** `ship-fence`, the guard `/ship` will run behind: `gh`/`git` shims plus a tool-call check, armed and disarmed by rewriting a per-process state file, and a push check on protected files. Every session now puts `bin/ship-fence` first on `PATH`; unarmed, it passes calls straight through. See [Ship fence](#ship-fence-ship-fence). Story 1 of `plans/001-ship.md`.
+- **Added:** the `/ship` watch engine, code only: from one read of the PR it decides to run a pass, wait, or end the watch (a 10-minute floor between passes the PR's changes start, checks 2 minutes after a push, 30 minutes while checks run and an hour when nothing runs, backing off while nothing changes, at most 24 passes a day, 7 days), and keeps one file per PR under `~/.omp/agent/ship/watches/` that refuses a second live session and takes over a stale one. Nothing calls it yet. See [Ship watch](#ship-watch-extensionsshipwatchts). Story 3 of `plans/001-ship.md`.
 
 ### 0.46.0 — 2026-11-24
 
