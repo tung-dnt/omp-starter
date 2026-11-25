@@ -56,7 +56,7 @@ test("an unauthenticated client saves presets and shared settings without changi
 
 	expect(await setupModels(ui, exec)).toBe("done");
 	const presets = await config("get", "modelPresets") as Record<string, { modelRoles: Record<string, string> }>;
-	expect(presets.codex.modelRoles.default).toBe("openai-codex/gpt-6.1-sol");
+	expect(presets.codex.modelRoles.default).toBe("openai-codex/gpt-6.2-sol");
 	expect(presets.claude.modelRoles.default).toBe("anthropic/claude-opus-5-5:auto");
 	// Only exploration/mechanical work moves to Gemini; coding, review and judgments stay on Claude.
 	expect(presets["claude-gemini"].modelRoles).toEqual({ ...presets.claude.modelRoles, tiny: GEMINI_MODELS.flash });
@@ -82,11 +82,11 @@ test("a Codex-only client gets Codex routing, never Claude models", async () => 
 	expect(await setupModels(ui, exec)).toBe("done");
 	const roles = await config("get", "modelRoles") as Record<string, string>;
 	expect(roles).toMatchObject({
-		default: "openai-codex/gpt-6.1-sol", tiny: "openai-codex/gpt-6-luna:low",
-		deep: "openai-codex/gpt-6-astra:high", custom: "@default",
+		default: "openai-codex/gpt-6.2-sol", tiny: "openai-codex/gpt-6-luna:low",
+		deep: "openai-codex/gpt-6.2-astra:high", custom: "@default",
 	});
 	expect(await config("get", "retry.fallbackChains")).toMatchObject({
-		"openai-codex/gpt-6-astra": ["openai-codex/gpt-6.1-sol"],
+		"openai-codex/gpt-6.2-astra": ["openai-codex/gpt-6.2-sol"],
 	});
 	expect(Object.values(roles).some(model => model.startsWith("anthropic/"))).toBe(false);
 }, 60_000);

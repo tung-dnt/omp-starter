@@ -47,7 +47,7 @@ The model step saves four complete role setups, even when no provider is logged 
 | `claude` | Opus 5.5 (`auto`) | Opus 5.5 / Fable 5.2 (`high`) | Sonnet 5.5; Haiku 5.5 for exploration, tiny work and judgments |
 | `claude-gemini` | Opus 5.5 (`auto`) | Opus 5.5 / Fable 5.2 (`high`) | Sonnet 5.5; Gemini 3.8 Flash (Antigravity) for exploration and tiny work; Haiku 5.5 judges |
 | `claude-fable-lead` | Fable 5.2 (`high`) | Fable 5.2 (`high`) | Same as `claude` |
-| `codex` | GPT-6.1 Sol (`auto`) | GPT-6.1 Sol / GPT-6 Astra (`high`) | GPT-6 Luna; `high` for tasks, `low` for tiny work and judgments |
+| `codex` | GPT-6.2 Sol (`auto`) | GPT-6.2 Sol / GPT-6.2 Astra (`high`) | GPT-6 Luna; `high` for tasks, `low` for tiny work and judgments |
 
 Existing installs: update the plugin and run `/starter models` to save the presets. Restart open sessions to load the routing changes, then switch inside omp:
 
@@ -88,7 +88,7 @@ Every routed escalation spawn counts toward its subscription's daily cap. Claude
 
 **Don't:** make Astra/Fable the default, repeatedly escalate expected red tests, or treat the local daily counter as the provider's subscription quota.
 
-**Verify:** run `bun test extensions/fable-router.test.ts extensions/lib/routing.test.ts`. After `/starter models`, the Claude `deep` role is `anthropic/claude-fable-5-2:high`, `cycleOrder` has no `deep`, and the Codex preset's `deep` role is `openai-codex/gpt-6-astra:high`. Restart open sessions after updating the plugin.
+**Verify:** run `bun test extensions/fable-router.test.ts extensions/lib/routing.test.ts`. After `/starter models`, the Claude `deep` role is `anthropic/claude-fable-5-2:high`, `cycleOrder` has no `deep`, and the Codex preset's `deep` role is `openai-codex/gpt-6.2-astra:high`. Restart open sessions after updating the plugin.
 
 ### TypeSafe Jev judge (`/starter jev`)
 
@@ -420,6 +420,7 @@ Limits: a session's repo comes from the origin URL of its working folder, so a f
 
 ### Unreleased
 
+- **Changed:** the Codex preset and escalation router use GPT-6.2 Sol and GPT-6.2 Astra. GPT-6 Luna and effort levels are unchanged. Run `/starter models` to refresh saved presets, then restart open sessions.
 - **Added:** `/ship <PR link>` works from any folder. It finds the checkout of the PR's branch among the clones of the repository under `~/projects` (`OMP_SHIP_PROJECTS` names another folder), adds a worktree for the branch beside a clone of the repository when no folder has it checked out, or clones the repository first, asks once naming the folder, and watches there with the fence armed in it. The link no longer needs this folder's `origin` to be on github.com. A new worktree or clone has nothing installed in it, and the first pass says so. A PR from a fork starts only from a checkout that is already on its branch, and one that is closed, merged or someone else's is refused before any folder is looked for. See [Ship](#ship-ship). Existing installs: nothing to do; `/ship <number>` and a bare `/ship` work as they did.
 - **Changed:** a `gh` or `git` call the extension makes can carry a longer time allowance and a stop signal. The clone, fetch and worktree add behind a link get 10 minutes, and `/ship stop` kills them together with the processes they started (`gh repo clone` runs git); every other call still has 90 seconds. Reading a PR URL no longer looks at this folder's `origin` at all: `parseTarget` reads numbers, and `parseLink` reads links.
 - **Fixed:** `/ship stop` during a start now reaches put-up. It checks the stop before it stages, commits, pushes and opens the draft PR, so a stop on a clean branch no longer ends in a push and a PR. A commit or push already running still completes. Fixes #17.

@@ -13,9 +13,9 @@ export const MODELS = {
 export const FABLE_PREVIOUS = "anthropic/claude-fable-5-1";
 
 export const CODEX_MODELS = {
-	sol: "openai-codex/gpt-6.1-sol",
+	sol: "openai-codex/gpt-6.2-sol",
 	luna: "openai-codex/gpt-6-luna",
-	astra: "openai-codex/gpt-6-astra",
+	astra: "openai-codex/gpt-6.2-astra",
 } as const;
 
 /** Antigravity subscription; the `claude-gemini` preset uses it for `tiny` work only. */
@@ -39,10 +39,10 @@ const CLAUDE_ROLES = {
 export const MODEL_PRESETS = {
 	codex: {
 		modelRoles: {
-			default: "openai-codex/gpt-6.1-sol",
-			slow: "openai-codex/gpt-6.1-sol:high",
+			default: CODEX_MODELS.sol,
+			slow: `${CODEX_MODELS.sol}:high`,
 			plan: "@slow",
-			deep: "openai-codex/gpt-6-astra:high",
+			deep: `${CODEX_MODELS.astra}:high`,
 			task: "openai-codex/gpt-6-luna:high",
 			smol: "openai-codex/gpt-6-luna",
 			tiny: "openai-codex/gpt-6-luna:low",

@@ -31,9 +31,9 @@ test("Astra and Fable use independent daily quotas and subscription-local fallba
 		const fable = await spawn("anthropic");
 		console.log(JSON.stringify({ a1, a2, capped, fable }));
 	`) as Record<string, { model: string[]; note: string }>;
-	expect(result.a1.model).toEqual(["openai-codex/gpt-6-astra:high", "openai-codex/gpt-6-luna:high", "openai-codex/gpt-6.1-sol:high"]);
+	expect(result.a1.model).toEqual(["openai-codex/gpt-6.2-astra:high", "openai-codex/gpt-6-luna:high", "openai-codex/gpt-6.2-sol:high"]);
 	expect(result.a2.note).toContain("2/2 today");
-	expect(result.capped.model).toEqual(["openai-codex/gpt-6.1-sol:high"]);
+	expect(result.capped.model).toEqual(["openai-codex/gpt-6.2-sol:high"]);
 	expect(result.fable.model).toEqual(["anthropic/claude-fable-5-2:high", "anthropic/claude-opus-5-5:high"]);
 	expect(result.fable.note).toContain("1/2 today");
 });
@@ -52,7 +52,7 @@ test("quota resets on a new day and survives a fresh router registration", async
 	`) as Record<string, { model: string[]; note: string }>;
 	expect(result.fresh.note).toContain("1/2 today");
 	expect(result.next.note).toContain("2/2 today");
-	expect(result.capped.model).toEqual(["openai-codex/gpt-6.1-sol:high"]);
+	expect(result.capped.model).toEqual(["openai-codex/gpt-6.2-sol:high"]);
 });
 
 test("a run's first deep consult goes to Opus at high effort uncounted; later consults and new runs follow the ladder", async () => {
@@ -99,7 +99,7 @@ test("only risky reviews escalate; coding and security agents retain their assig
 			other: await spawn("openai", "deep")
 		}));
 	`, true) as Record<string, { model: string[] }>;
-	expect(result.review.model[0]).toBe("openai-codex/gpt-6-astra:high");
+	expect(result.review.model[0]).toBe("openai-codex/gpt-6.2-astra:high");
 	expect(result).not.toHaveProperty("coding");
 	expect(result).not.toHaveProperty("security");
 	expect(result).not.toHaveProperty("other");
