@@ -126,7 +126,7 @@ function rig(options: Options = {}): Rigged {
 			return { code: 1, out: "", err: `unexpected gh ${args.join(" ")}` };
 		},
 		repoOf: url => {
-			const named = /([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(url);
+			const named = /([^/:]+)\/([^/]+?)(?:\.git)?\/?$/.exec(url);
 			return named ? { owner: named[1] as string, repo: named[2] as string } : null;
 		},
 		projects: projects(),
@@ -408,6 +408,229 @@ describe("a clone made for the link", () => {
 	});
 });
 
+describe("what a failed or stopped start leaves behind", () => {
+	const localBranches = (dir: string): string[] => git(dir, "branch", "--list", "--format=%(refname:short)").trim().split("\n");
+	const refspecs = (dir: string): string[] => git(dir, "config", "--get-all", "remote.origin.fetch").trim().split("\n");
+
+	/** git as /ship runs it, except that `worktree add` makes the branch, as git does before it does the rest, and then fails; `then` runs at that moment. */
+	function addFails(t: Rigged, then: () => void = () => {}): void {
+		const run = t.git;
+		t.git = async (dir, args, limits) => {
+			if (args[0] !== "worktree" || args[1] !== "add") return run(dir, args, limits);
+			git(dir, "branch", BRANCH, `origin/${BRANCH}`);
+			then();
+			return { code: 128, out: "", err: "fatal: could not create the worktree\n" };
+		};
+	}
+
+	test("a worktree add that fails takes the branch it made with it, so the next /ship for the PR starts", async () => {
+		origin();
+		const main = clone();
+		const t = rig();
+		addFails(t);
+		expect(await findCheckout(WANT, t)).toContain("could not create the worktree");
+		expect(localBranches(main)).toEqual(["main"]);
+		expect(await findCheckout(WANT, rig())).toEqual({ root: at(`${REPO}-${SLUG}`), kind: "worktree" });
+	});
+
+	test("a stop during the worktree add does the same, though the stopped signal can't carry the clean-up", async () => {
+		origin();
+		const main = clone();
+		const controller = new AbortController();
+		const t = rig({ signal: controller.signal });
+		addFails(t, () => controller.abort());
+		expect(await findCheckout(WANT, t)).toContain("failed");
+		expect(localBranches(main)).toEqual(["main"]);
+		expect(await findCheckout(WANT, rig())).toEqual({ root: at(`${REPO}-${SLUG}`), kind: "worktree" });
+	});
+
+	test.skipIf(process.getuid?.() === 0)("a real add that git can't make (a projects folder that can't be written to) leaves no branch either", async () => {
+		origin();
+		const main = clone();
+		fs.chmodSync(projects(), 0o555);
+		try {
+			expect(await findCheckout(WANT, rig())).toContain("failed");
+			expect(localBranches(main)).toEqual(["main"]);
+		} finally {
+			fs.chmodSync(projects(), 0o755);
+		}
+		expect(await findCheckout(WANT, rig())).toEqual({ root: at(`${REPO}-${SLUG}`), kind: "worktree" });
+	});
+
+	test("a worktree that survives a failed add keeps its branch: git won't delete one a worktree has checked out", async () => {
+		origin();
+		const main = clone();
+		const t = rig();
+		const run = t.git;
+		t.git = async (dir, args, limits) => {
+			if (args[0] !== "worktree" || args[1] !== "add") return run(dir, args, limits);
+			await run(dir, args, limits);
+			return { code: 1, out: "", err: "error: post-checkout hook failed\n" };
+		};
+		expect(await findCheckout(WANT, t)).toContain("post-checkout");
+		expect(localBranches(main)).toContain(BRANCH);
+		expect(await findCheckout(WANT, rig())).toEqual({ root: at(`${REPO}-${SLUG}`), kind: "existing" });
+	});
+
+	test("a fetch that fails gives a single-branch clone back the refspecs it fetched before", async () => {
+		origin(OWNER, REPO, []);
+		const main = clone(REPO, "--single-branch", "--branch", "main");
+		addBranch(OWNER, REPO, BRANCH);
+		const before = refspecs(main);
+		const t = rig();
+		const run = t.git;
+		t.git = (dir, args, limits) => (args[0] === "fetch" ? Promise.resolve({ code: 128, out: "", err: "fatal: unable to access 'origin'\n" }) : run(dir, args, limits));
+		expect(await findCheckout(WANT, t)).toContain("unable to access");
+		expect(refspecs(main)).toEqual(before);
+		expect(await findCheckout(WANT, rig())).toEqual({ root: at(`${REPO}-${SLUG}`), kind: "worktree" });
+	});
+
+	test("a stop during the fetch does too", async () => {
+		origin(OWNER, REPO, []);
+		const main = clone(REPO, "--single-branch", "--branch", "main");
+		addBranch(OWNER, REPO, BRANCH);
+		const before = refspecs(main);
+		const controller = new AbortController();
+		const t = rig({ signal: controller.signal });
+		const run = t.git;
+		t.git = (dir, args, limits) => {
+			if (args[0] !== "fetch") return run(dir, args, limits);
+			controller.abort();
+			return Promise.resolve({ code: 1, out: "", err: "stopped" });
+		};
+		expect(await findCheckout(WANT, t)).toContain("stopped");
+		expect(refspecs(main)).toEqual(before);
+	});
+
+	test("a clone that already fetches the branch is given no second refspec for it, and keeps the one it had when the fetch fails", async () => {
+		origin(OWNER, REPO, [BRANCH]);
+		const main = clone(REPO, "--single-branch", "--branch", "main");
+		git(main, "remote", "set-branches", "--add", "origin", BRANCH);
+		const before = refspecs(main);
+		expect(before).toHaveLength(2);
+		const t = rig();
+		const run = t.git;
+		t.git = (dir, args, limits) => (args[0] === "fetch" ? Promise.resolve({ code: 128, out: "", err: "fatal: unable to access 'origin'\n" }) : run(dir, args, limits));
+		await findCheckout(WANT, t);
+		expect(refspecs(main)).toEqual(before);
+	});
+
+	test("a clone made empty by a session that ended mid-clone is free: it is cloned into, and asked about as a new clone", async () => {
+		origin();
+		fs.mkdirSync(at(REPO));
+		const t = rig();
+		expect(await findCheckout(WANT, t)).toEqual({ root: at(`${REPO}-${SLUG}`), kind: "worktree" });
+		expect(fs.existsSync(path.join(at(REPO), ".git"))).toBe(true);
+		expect(t.asked).toHaveLength(1);
+	});
+
+	test("an empty folder that appears while the question is open is cloned into too; one with something in it is not", async () => {
+		origin();
+		const t = rig();
+		t.confirm = async () => {
+			fs.mkdirSync(at(REPO));
+			return true;
+		};
+		expect(await findCheckout(WANT, t)).toEqual({ root: at(`${REPO}-${SLUG}`), kind: "worktree" });
+
+		fs.rmSync(at(REPO), { recursive: true, force: true });
+		fs.rmSync(at(`${REPO}-${SLUG}`), { recursive: true, force: true });
+		const busy = rig();
+		busy.confirm = async () => {
+			fs.mkdirSync(at(REPO));
+			fs.writeFileSync(at(REPO, "mine.txt"), "keep");
+			return true;
+		};
+		expect(await findCheckout(WANT, busy)).toContain("appeared while");
+		expect(fs.readFileSync(at(REPO, "mine.txt"), "utf8")).toBe("keep");
+	});
+});
+
+describe("the URL a new clone is made from", () => {
+	const aliasOf = (repo: string): string => `git@blindx.github:${OWNER}/${repo}.git`;
+
+	/** A clone of another repository of the owner, as the operator's are made, whose origin is `url`. */
+	function neighbour(url: string, repo = "other", owner = OWNER): string {
+		origin(owner, repo, []);
+		const dir = cloneOf(owner, repo, at(repo));
+		git(dir, "remote", "set-url", "origin", url);
+		return dir;
+	}
+
+	/** Runs git as /ship does, but a clone from any URL is made from the scratch origin: returns the URLs asked for. */
+	function cloningFrom(t: Rigged, fails?: string): string[] {
+		const urls: string[] = [];
+		const run = t.git;
+		t.git = (dir, args, limits) => {
+			if (!args.includes("clone")) return run(dir, args, limits);
+			urls.push(args[args.indexOf("--") + 1] as string);
+			if (fails !== undefined) return Promise.resolve({ code: 128, out: "", err: fails });
+			return run(dir, args.map(arg => (arg === urls.at(-1) ? path.join(scratch, "origins", OWNER, `${REPO}.git`) : arg)), limits);
+		};
+		return urls;
+	}
+
+	test.each([
+		["the ssh alias", aliasOf("other"), aliasOf(REPO)],
+		["https without .git", `https://github.com/${OWNER}/other`, `https://github.com/${OWNER}/${REPO}`],
+		["https with .git, the owner in another case", "https://github.com/Tung-DNT/other.git", `https://github.com/Tung-DNT/${REPO}.git`],
+		["ssh:// with a trailing slash", `ssh://git@blindx.github/${OWNER}/other.git/`, `ssh://git@blindx.github/${OWNER}/${REPO}.git/`],
+	])("with another repository of the owner cloned over %s, it clones the same way, with git", async (_, otherUrl, expected) => {
+		origin();
+		neighbour(otherUrl);
+		const t = rig();
+		const urls = cloningFrom(t);
+		expect(await findCheckout(WANT, t)).toEqual({ root: at(`${REPO}-${SLUG}`), kind: "worktree" });
+		expect(urls).toEqual([expected]);
+		expect(t.ghCalls.some(call => call.args[1] === "clone")).toBe(false);
+		expect(t.asked[0]?.message).toContain(expected);
+		expect(branchOf(at(REPO))).toBe("main");
+	});
+
+	test("the clone is killed by a stop and has the long allowance, as gh's was", async () => {
+		origin();
+		neighbour(aliasOf("other"));
+		const t = rig();
+		const calls: (RunLimits | undefined)[] = [];
+		const run = t.git;
+		t.git = (dir, args, limits) => {
+			if (args.includes("clone")) calls.push(limits);
+			return run(dir, args, limits);
+		};
+		cloningFrom(t);
+		await findCheckout(WANT, t);
+		expect(calls[0]?.signal).toBe(t.signal);
+		expect(calls[0]?.timeoutMs).toBeGreaterThan(90_000);
+	});
+
+	test("a clone that fails says why and leaves nothing behind", async () => {
+		origin();
+		neighbour(aliasOf("other"));
+		const t = rig();
+		cloningFrom(t, "fatal: Could not read from remote repository.\n");
+		const why = await findCheckout(WANT, t);
+		expect(why).toContain("Could not read from remote repository");
+		expect(listing()).toEqual(["other"]);
+	});
+
+	test("with clones of other owners only, gh clones, as it does with none", async () => {
+		origin();
+		neighbour(`git@github.com:someone-else/other.git`, "other", "someone-else");
+		const t = rig();
+		expect(await findCheckout(WANT, t)).toEqual({ root: at(`${REPO}-${SLUG}`), kind: "worktree" });
+		expect(t.ghCalls.some(call => call.args[1] === "clone")).toBe(true);
+	});
+
+	test("an origin URL that carries a password is not copied: gh clones, and the secret is named nowhere", async () => {
+		origin();
+		neighbour(`https://tung:s3cret@github.com/${OWNER}/other.git`);
+		const t = rig();
+		await findCheckout(WANT, t);
+		expect(t.ghCalls.some(call => call.args[1] === "clone")).toBe(true);
+		expect(JSON.stringify(t.asked)).not.toContain("s3cret");
+	});
+});
+
 describe("several clones", () => {
 	test("the main clone that already owns linked worktrees gets the new one, and the question names it", async () => {
 		origin();
@@ -500,12 +723,26 @@ describe("what refuses before anything is made", () => {
 		expect(listing()).toEqual([REPO]);
 	});
 
+	test("that branch left behind by a worktree folder deleted by hand: the advice names git worktree prune, which git needs before the branch can go", async () => {
+		origin();
+		const main = clone();
+		const gone = at(`${REPO}-${SLUG}`);
+		git(main, "worktree", "add", "--quiet", "-b", BRANCH, gone);
+		fs.rmSync(gone, { recursive: true });
+		const why = await findCheckout(WANT, rig());
+		expect(why).toContain(`local branch ${BRANCH}`);
+		expect(why).toContain("git worktree prune");
+	});
+
 	test("a fork's PR, when this session isn't on its branch: no clone of this repository can hold it", async () => {
 		origin();
 		clone();
 		const t = rig();
 		const why = await findCheckout({ ...WANT, fork: true }, t);
 		expect(why).toContain("fork");
+		// The fork's own checkout would read /ship 12 as the fork's PR 12, not this one: the link is what names it.
+		expect(why).toContain("/ship <link>");
+		expect(why).not.toContain(`/ship ${WANT.pr.number}`);
 		expect(t.asked).toEqual([]);
 		expect(t.ghCalls).toEqual([]);
 		expect(listing()).toEqual([REPO]);
