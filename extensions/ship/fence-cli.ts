@@ -1,6 +1,6 @@
 // Checks one gh, gh-blinx, git or git-lfs process for bin/ship-fence/shim while the fence is armed: `fence-cli.ts gh|gh-blinx|git|git-lfs ARGS...`.
 // Exit 0 lets the shim run the real program; exit 1 prints the reason on stderr.
-import { checkGh, checkGit, readPush, readResolve, refused } from "./fence";
+import { checkGh, checkGit, checkPeerGh, peerRefused, readPush, readResolve, refused } from "./fence";
 import { checkPushContent, checkPushRefs, checkPushRepo, checkThread, FENCE_ENV, readState } from "./fence-state";
 
 const [program, ...args] = process.argv.slice(2);
@@ -11,6 +11,10 @@ function why(): string | null {
 	if (!file) return refused(`${FENCE_ENV} was removed from this command's environment`);
 	const state = readState(file);
 	if (!state.armed) return null;
+	if (state.mode === "peer") {
+		if (program === "gh" || program === "gh-blinx") return checkPeerGh(args, state.pr, process.env);
+		return peerRefused("git commands are refused; peer source reads come from GitHub");
+	}
 	// gh-blinx is gh as another account, so its argv goes through the same check: its shim runs the real wrapper past the fence once this has passed.
 	if (program === "gh" || program === "gh-blinx") {
 		const argvWhy = checkGh(args, state.pr, process.env);

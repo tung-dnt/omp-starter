@@ -361,6 +361,28 @@ Limits: reads run in the background, so the session stays responsive while `gh` 
 
 **Verify:** `bun test extensions/ship.test.ts`; the live proof on a throwaway repo is `scripts/ship-fixture.ts` (red check, conflict and comment made for you).
 
+### Peer review (`/peer`)
+
+`/peer` reviews a colleague's pull request, requests changes for blockers, and approves the exact commit it reviewed when the blockers are fixed. It keeps watching after approval. A new commit reopens review; an unchanged approved head starts no model pass. Design: [plans/002-peer.md](plans/002-peer.md).
+
+| Command | Effect |
+|---|---|
+| `/peer <pr#>` | Reviews that PR in this checkout's GitHub repository. |
+| `/peer <PR URL>` | Reviews that PR from any folder, without creating a checkout or worktree. |
+| `/peer … +bot` | Includes that bot's discussion alongside the author and repository writers. |
+| `/peer … --report <path>` | Writes JSON status for a caller outside the session. |
+| `/peer status`, `/peer stop` | Shows or stops this session's review watch. |
+
+The controller polls every 2 minutes without calling a model. Changed input starts a review pass, with at least 10 minutes between passes and at most 24 passes per 24 hours. The watch ends on merge, close, a base change, 7 days, stop, or the session ending. A second session cannot own the same PR.
+
+A pass reads the diff and source at the captured commits, checks earlier findings first, and returns structured findings. Code posts inline `Blocker:` comments with a request-changes review, answers replies, and resolves only its own verified-fixed threads. It does not duplicate unchanged findings. The controller checks the head before and after submitting a SHA-bound review. A commit pushed during review remains unreviewed.
+
+Approval requires no blockers and CI green or genuinely absent. Running or failed CI prevents approval. The model cannot write to GitHub or the checkout. `/peer` never runs colleague PR code, fixes their branch, pushes, reruns checks, or merges. It refuses self-review and cannot run alongside `/ship` in the same session. It uses `gh-blinx` for `blinxsolutions` and `gh` elsewhere.
+
+The guard is not a security sandbox. GitHub cannot atomically check the current head and submit a review, so a raced approval is reported as stale and the new head remains under review. Keep the omp session open for polling.
+
+**Verify:** `bun test extensions/peer.test.ts extensions/ship/pr-peer.test.ts`; `bun scripts/peer-smoke.ts` checks command handling through the real omp RPC host without calling a model or changing GitHub.
+
 ### Ship fence (`ship-fence`)
 
 The guard `/ship` runs behind while it watches a pull request (see `plans/001-ship.md`). When the extension loads it names a state file for the omp process in `OMP_SHIP_FENCE` (under `~/.omp/agent/ship/fence/`) and puts `bin/ship-fence` first on `PATH`, before omp captures the environment its shells start from. `/ship` then arms and disarms the fence by rewriting that file, so the change reaches every shell at once. Unarmed, a `gh` or `git` call costs one `grep` of the file. A session started with `OMP_SHIP_FENCE` naming an armed state (an unattended trigger, or a test) is fenced from its first call.
@@ -418,8 +440,9 @@ Limits: a session's repo comes from the origin URL of its working folder, so a f
 
 ## Release notes
 
-### Unreleased
+### 0.49.0 — 2026-11-25
 
+- **Added:** `/peer` reviews colleagues' PRs without changing their branches. It posts inline blockers, re-reviews fixes and replies, approves the reviewed commit when clear, and keeps watching for new commits. A separate read-only guard preserves `/ship`'s existing permissions. See [Peer review](#peer-review-peer).
 - **Changed:** the Codex preset and escalation router use GPT-6.2 Sol and GPT-6.2 Astra. GPT-6 Luna and effort levels are unchanged. Run `/starter models` to refresh saved presets, then restart open sessions.
 - **Added:** `/ship <PR link>` works from any folder. It finds the checkout of the PR's branch among the clones of the repository under `~/projects` (`OMP_SHIP_PROJECTS` names another folder), adds a worktree for the branch beside a clone of the repository when no folder has it checked out, or clones the repository first, asks once naming the folder, and watches there with the fence armed in it. The link no longer needs this folder's `origin` to be on github.com. A new worktree or clone has nothing installed in it, and the first pass says so. A PR from a fork starts only from a checkout that is already on its branch, and one that is closed, merged or someone else's is refused before any folder is looked for. See [Ship](#ship-ship). Existing installs: nothing to do; `/ship <number>` and a bare `/ship` work as they did.
 - **Changed:** a `gh` or `git` call the extension makes can carry a longer time allowance and a stop signal. The clone, fetch and worktree add behind a link get 10 minutes, and `/ship stop` kills them together with the processes they started (`gh repo clone` runs git); every other call still has 90 seconds. Reading a PR URL no longer looks at this folder's `origin` at all: `parseTarget` reads numbers, and `parseLink` reads links.

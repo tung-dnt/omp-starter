@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { privateHome, resetHome } from "../test-harness";
 import { MARKER } from "./fence";
-import { armFence, disarmFence, FENCE_ENV, installFence, SHIM_DIR } from "./fence-state";
+import { armFence, armPeerFence, disarmFence, FENCE_ENV, installFence, SHIM_DIR } from "./fence-state";
 
 const HOST = "github.localhost";
 const BRANCH = "feat/ship-live";
@@ -255,6 +255,47 @@ describe.skipIf(realGh === null)("the shims, with the installed gh and a mock Gi
 		expect(comment?.variables?.input?.body).toBe(marked);
 		expect(github.sent.every(s => s.token === `token ${SESSION_TOKEN}`)).toBe(true);
 	}, 30_000);
+
+	test("peer mode keeps source reads in the mock and refuses writes before requests, including inherited child shells", async () => {
+		try {
+			disarmFence();
+			armPeerFence({ pr: WATCH, root: repo });
+			const view = await passes(["pr", "view", "5", "-R", "o/r", "--json", "state"]);
+			expect(view.code).toBe(0);
+			expect(github.sent.some(request => request.method === "POST" && payload(request).query?.includes("pullRequest"))).toBe(true);
+
+			await passes(["api", "repos/o/r/contents/a.ts?ref=deadbeef"]);
+			expect(github.sent[0]?.method).toBe("GET");
+			expect(github.sent[0]?.path).toContain("/repos/o/r/contents/a.ts?ref=deadbeef");
+
+			await passes(["api", "graphql", "-f", "query=query { viewer { login } }"]);
+			expect(github.sent[0]?.method).toBe("POST");
+			expect(github.sent[0] ? payload(github.sent[0]).query : "").toContain("query { viewer");
+			await passes(["pr", "view", "5", "-R", "o/r", "--json", "state"], {}, "gh-blinx");
+
+			for (const args of [
+				["pr", "merge", "5", "-R", "o/r"],
+				["pr", "review", "5", "--approve", "-R", "o/r"],
+				["pr", "ready", "5", "-R", "o/r"],
+				["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE"],
+				["api", "graphql", "-f", "query=mutation { resolveReviewThread(input:{threadId:X}) { thread { isResolved } } }"],
+			]) {
+				github.sent.length = 0;
+				const blocked = await run("gh", args);
+				expect(blocked.code, args.join(" ")).toBe(1);
+				expect(blocked.err, args.join(" ")).toContain("peer fence");
+				expect(github.sent, args.join(" ")).toEqual([]);
+			}
+
+			github.sent.length = 0;
+			const inherited = await run("bash", ["-c", "gh pr merge 5 -R o/r"]);
+			expect(inherited.code).not.toBe(0);
+			expect(inherited.err).toContain("peer fence");
+			expect(github.sent).toEqual([]);
+		} finally {
+			disarmFence();
+		}
+	}, 90_000);
 
 	test("every gh command the skills tell the model to run is one the armed fence lets through", async () => {
 		const skills = ["ship", "build"].map(name => fs.readFileSync(path.join(import.meta.dir, "..", "..", "skills", name, "SKILL.md"), "utf8"));

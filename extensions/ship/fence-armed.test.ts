@@ -5,7 +5,7 @@ import * as path from "node:path";
 import shipFence from "../ship-fence";
 import { fakeContext, fakePi, privateHome, resetHome } from "../test-harness";
 import type { WatchedPr } from "./fence";
-import { armFence, checkPushContent, checkPushRefs, checkThread, currentState, disarmFence, FENCE_ENV, type Git, installFence, readState, realGit, type RunProgram, SHIM_DIR, stateDir } from "./fence-state";
+import { armFence, armPeerFence, checkPushContent, checkPushRefs, checkThread, currentState, disarmFence, FENCE_ENV, type Git, installFence, readState, realGit, type RunProgram, SHIM_DIR, stateDir } from "./fence-state";
 import { checkToolCall } from "./fence-tools";
 
 const BRANCH = "feat/ship-s1";
@@ -97,6 +97,31 @@ describe("state", () => {
 		expect(readState(bad)).toMatchObject({ armed: true, pushBranch: null });
 	});
 });
+
+	test("peer mode persists and ship cannot replace or retain it after disarming", () => {
+		expect(currentState().armed).toBe(false);
+		expect(Object.hasOwn(currentState(), "mode")).toBe(false);
+		const legacy = path.join(privateHome(), "legacy.json");
+		fs.writeFileSync(legacy, JSON.stringify({ armed: false, pr: PR }));
+		expect(Object.hasOwn(readState(legacy), "mode")).toBe(false);
+
+		armPeerFence({ pr: PR, root: repo });
+		expect(currentState()).toMatchObject({ armed: true, mode: "peer", root: fs.realpathSync(repo), pushBranch: null, pr: PR });
+		expect(JSON.parse(fs.readFileSync(process.env[FENCE_ENV] as string, "utf8")).mode).toBe("peer");
+		const gitCalls: string[][] = [];
+		const git: Git = (_dir, ...args) => (gitCalls.push(args), { code: 1, out: "" });
+		expect(() => armFence({ pushBranch: BRANCH, root: repo, pr: PR }, git)).toThrow("/peer is active");
+		expect(gitCalls).toEqual([]);
+		expect(currentState().mode).toBe("peer");
+
+		disarmFence();
+		expect(currentState().armed).toBe(false);
+		expect(Object.hasOwn(currentState(), "mode")).toBe(false);
+		armFence({ pushBranch: BRANCH, root: repo, pr: PR });
+		expect(() => armPeerFence({ pr: PR, root: repo })).toThrow("/ship is active");
+		expect(currentState().mode).toBeUndefined();
+		disarmFence();
+	});
 
 describe("the pull request a review thread is on", () => {
 	const watching = { ...readState(undefined), pr: PR };
@@ -207,6 +232,61 @@ describe("tool calls while armed", () => {
 		expect(call("github", { op: "pr_push", branch: "main" })).toContain("pushes only to");
 		expect(call("github", { op: "pr_push", branch: BRANCH })).toBeNull();
 	});
+
+	test("peer mode allows only read tools, pinned GitHub reads and named read-only review subagents", () => {
+		disarmFence();
+		armPeerFence({ pr: PR, root: repo });
+		for (const name of ["read", "glob", "grep", "ast_grep"]) expect(call(name, {})).toBeNull();
+		for (const agent of ["thermo-nuclear-review-subagent", "thermo-nuclear-code-quality-review-subagent", "scout", "reviewer", "security-reviewer"]) {
+			expect(call("task", { tasks: [{ agent, task: "Review read-only", tools: ["read", "bash"] }] })).toBeNull();
+		}
+		expect(call("reviewer", {})).toBeNull();
+		expect(call("reviewer", { tools: ["read", "bash"] })).toBeNull();
+		expect(call("reviewer", { isolation: "worktree" })).toContain("peer fence");
+		expect(call("task", { agent: "reviewer", task: "Review read-only" })).toBeNull();
+		expect(call("agent", { agent: "reviewer", task: "Review read-only" })).toBeNull();
+		expect(call("reviewer", { tools: ["write"] })).toContain("peer fence");
+		expect(call("reviewer", { worktree: "/tmp/review" })).toContain("peer fence");
+		expect(call("task", { tools: ["write"], tasks: [{ agent: "reviewer", task: "review" }] })).toContain("peer fence");
+		expect(call("subagent", {})).toContain("peer fence");
+		expect(call("subagent", { agent: "reviewer", task: "Review read-only" })).toBeNull();
+		expect(call("task", {})).toContain("peer fence");
+		expect(call("task", { tasks: [{ agent: "task", task: "write code" }] })).toContain("peer fence");
+		expect(call("task", { tasks: [{ agent: "poteto-agent", task: "write code" }] })).toContain("peer fence");
+		expect(call("task", { tasks: [{ agent: "reviewer", task: "review", isolation: "worktree" }] })).toContain("peer fence");
+		expect(call("task", { tasks: [{ agent: "reviewer", task: "review", tools: ["write"] }] })).toContain("peer fence");
+		expect(call("task", { isolation: "worktree", tasks: [{ agent: "reviewer", task: "review" }] })).toContain("peer fence");
+		for (const [tool, input] of [
+			["write", { path: "src/a.ts", content: "changed" }],
+			["edit", { path: "src/a.ts", input: "changed" }],
+			["ast_edit", { paths: ["src/a.ts"] }],
+			["eval", { code: "process.exit(0)" }],
+			["github", { op: "review_submit" }],
+		] as const) expect(call(tool, input)).toContain("peer fence");
+		for (const [tool, input] of [
+			["bash", { command: "gh pr view 5 --repo o/r --json title" }],
+			["bash", { command: "gh pr diff 5 -R o/r" }],
+			["bash", { command: "gh pr checks 5 -R o/r --required" }],
+			["bash", { command: "gh api 'repos/o/r/contents/a.ts?ref=deadbeef'" }],
+			["bash", { command: "gh api graphql -f 'query=query { viewer { login } }'" }],
+		] as const) expect(call(tool, input)).toBeNull();
+		for (const command of [
+			"gh pr merge 5 -R o/r",
+			"gh pr review 5 --approve -R o/r",
+			"gh pr ready 5 -R o/r",
+			"gh pr new --draft -R o/r --title t",
+			"gh -R o/r pr view 5",
+			"gh api -X POST repos/o/r/pulls/5/reviews -f event=APPROVE",
+			"gh api graphql -f 'query=mutation { resolveReviewThread(input:{threadId:X}) { thread { isResolved } } }'",
+			"git push origin main",
+			"env -u OMP_SHIP_FENCE gh pr view 5 -R o/r",
+			"gh api repos/o/r/contents/a.ts > out",
+			"curl -X POST https://api.github.com/repos/o/r/pulls/5/reviews",
+		]) expect(call("bash", { command })).toContain("peer fence");
+		expect(call("lsp", { action: "references", file: "src/a.ts" })).toBeNull();
+		expect(call("lsp", { action: "rename", file: "src/a.ts", newName: "b.ts" })).toContain("peer fence");
+		disarmFence();
+	});
 });
 
 test("the extension refuses only while the fence is armed", async () => {
@@ -221,6 +301,17 @@ test("the extension refuses only while the fence is armed", async () => {
 	expect(await fake.emit("tool_call", merge, ctx)).toBeUndefined();
 });
 
+test("peer tool restrictions also apply in read-only review subagents", async () => {
+	const fake = fakePi();
+	shipFence(fake.pi);
+	const main = fakeContext({ cwd: repo, agent: { kind: "main", name: "main" } });
+	const sub = fakeContext({ cwd: repo, agent: { kind: "sub", name: "reviewer" } });
+	armPeerFence({ pr: PR, root: repo });
+	expect(await fake.emit("tool_call", { toolName: "task", input: { tasks: [{ agent: "reviewer", task: "Review read-only" }] } }, main)).toBeUndefined();
+	expect(await fake.emit("tool_call", { toolName: "write", input: { path: "src/a.ts", content: "changed" } }, sub)).toMatchObject({ block: true, reason: expect.stringContaining("peer fence") });
+	disarmFence();
+});
+
 describe("the shims, with real git", () => {
 	const gitAt = (cwd: string, env: NodeJS.ProcessEnv, ...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, env, encoding: "utf8" });
 	const git = (env: NodeJS.ProcessEnv, ...args: string[]) => gitAt(repo, env, ...args);
@@ -233,6 +324,20 @@ describe("the shims, with real git", () => {
 		expect(other.stderr).toContain(`ship fence: this session pushes only to ${BRANCH}`);
 		expect(git(process.env, "push", "--quiet", "origin", BRANCH).status).toBe(0);
 		expect(git(process.env, "rev-parse", "--is-inside-work-tree").stdout.trim()).toBe("true");
+	});
+
+	test("peer mode refuses Git commands at the inherited shim", () => {
+		armPeerFence({ pr: PR, root: repo });
+		try {
+			const push = git(process.env, "push", "origin", BRANCH);
+			expect(push.status).toBe(1);
+			expect(push.stderr).toContain("peer fence");
+			const read = git(process.env, "show", "HEAD:src/a.ts");
+			expect(read.status).toBe(1);
+			expect(read.stderr).toContain("peer fence");
+		} finally {
+			disarmFence();
+		}
 	});
 
 	describe("a push is judged by the repository it runs in, not by the name origin", () => {

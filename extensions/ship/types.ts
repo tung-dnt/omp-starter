@@ -82,6 +82,27 @@ export interface Snapshot {
 	hash: string;
 }
 
+/** A /peer review, with identity for recognizing this account's own accepted or dismissed review. */
+export interface PeerReview extends Review {
+	/** GraphQL node ID; match REST receipts against `node_id`, not REST `id`. */
+	id: string;
+	yours: boolean;
+}
+
+/** A peer thread records whether its actual first note is this account's authenticated peer note. */
+export interface PeerThread extends Thread {
+	firstNoteYours: boolean;
+	side: "LEFT" | "RIGHT";
+}
+
+/** A peer read includes the immutable base commit and peer-only review identity; ship snapshots stay unchanged. */
+export interface PeerSnapshot extends Snapshot {
+	baseSha: string;
+	threads: PeerThread[];
+	reviews: PeerReview[];
+}
+
+
 /** Who may speak to the watch: the account /ship acts as, and the bots named with `+bot`. */
 export interface Trust {
 	me: string;
@@ -137,6 +158,8 @@ export type ParseTarget = (arg: string | null, originUrl: string, sshHostname: (
 export type ParseLink = (arg: string | null) => PrRef | string | null;
 /** Story 2, `pr.ts` `readPr`: one read of the PR, or why it couldn't be read. Waits on `gh`, so the session keeps running meanwhile. */
 export type ReadPr = (pr: PrRef, gh: Gh, trust: Trust) => Promise<Snapshot | string>;
+/** `pr.ts` `readPeerPr`: a complete peer read, pinned to both PR commits. */
+export type ReadPeerPr = (pr: PrRef, gh: Gh, trust: Trust) => Promise<PeerSnapshot | string>;
 
 /** What a PR link needs to know before it can name a folder: whether the PR is still open, whose it is, and where its branch is. */
 export interface Head {

@@ -27,6 +27,8 @@ export const MARKER = "<!-- omp-ship -->";
 
 export const refused = (what: string) => `ship fence: ${what}. This is final while /ship runs: tell the user instead of finding another way.`;
 
+export const peerRefused = (what: string) => `peer fence: ${what}. This is final while /peer runs: tell the user instead of finding another way.`;
+
 /** A refusal that lifts once the checkout or the connection is in order: what to do, then try again. */
 export const retryable = (what: string) => `ship fence: ${what}; then try again.`;
 
@@ -238,6 +240,9 @@ const GH_API = ghSpec(
 	["--cache", "-F", "--field", "-H", "--header", "--hostname", "--input", "-q", "--jq", "-X", "--method", "-p", "--preview", "-f", "--raw-field", "-t", "--template"],
 	["--allow-escape-sequences", "-i", "--include", "--paginate", "--silent", "--slurp", "--verbose"],
 );
+const GH_PEER_PR_VIEW = ghSpec(["-R", "--repo", "-q", "--jq", "--json", "-t", "--template"], ["-c", "--comments"]);
+const GH_PEER_PR_DIFF = ghSpec(["-R", "--repo", "--color"], ["--patch", "--name-only", "--name-status"]);
+const GH_PEER_PR_CHECKS = ghSpec(["-R", "--repo", "-q", "--jq", "--json", "-t", "--template"], ["--required"]);
 const GH_PR_CREATE = ghSpec(
 	["-a", "--assignee", "--attach", "-B", "--base", "-b", "--body", "-F", "--body-file", "-H", "--head", "-l", "--label", "-m", "--milestone", "-p", "--project", "--recover", "-r", "--reviewer", "-T", "--template", "-t", "--title", "-R", "--repo"],
 	["-d", "--draft", "--dry-run", "-e", "--editor", "-f", "--fill", "--fill-first", "--fill-verbose", "--no-maintainer-edit", "-w", "--web"],
@@ -503,6 +508,69 @@ export function checkGh(args: string[], pr: WatchedPr | null, env: Env = {}): st
 	if (kind === "auth status") return checkAuthStatus(args);
 	const write = Object.hasOwn(GH_WRITES, kind) ? GH_WRITES[kind] : undefined;
 	return write === undefined ? null : checkWrite(kind, write, args, pr, env);
+}
+
+function checkPeerPrTarget(kind: string, f: GhArgs, pr: WatchedPr, env: Env): string | null {
+	const repositories = f.flags.filter(flag => flag.name === "-R" || flag.name === "--repo");
+	for (const { value: repository } of repositories) {
+		const match = REPO_ARG.exec(repository ?? "");
+		const host = match?.[1] ?? (env.GH_HOST || pr.host);
+		if (!match || !same(host, pr.host) || !same(match[2] ?? "", pr.owner) || !same(match[3] ?? "", pr.repo)) {
+			return peerRefused(`${repository ?? ""} is not the peer pull request's repository (${pr.host}/${pr.owner}/${pr.repo})`);
+		}
+	}
+	const target = f.words[0];
+	if (f.words.length !== 1 || target === undefined) return peerRefused(`name exactly the pull request for gh pr ${kind}`);
+	const page = PAGE_URL.exec(target);
+	if (page !== null) {
+		if (same(page[1] ?? "", pr.host) && same(page[2] ?? "", pr.owner) && same(page[3] ?? "", pr.repo) && Number(page[5]) === pr.number && page[4] === "pull") return null;
+		return peerRefused(`${target} is not the peer pull request (${pr.host}/${pr.owner}/${pr.repo}#${pr.number})`);
+	}
+	const number = /^#?(\d+)$/.exec(target)?.[1];
+	if (number === undefined || Number(number) !== pr.number) return peerRefused(`${target} is not the peer pull request (#${pr.number})`);
+	return repositories.length > 0 ? null : peerRefused(`name the repository with --repo ${pr.owner}/${pr.repo}`);
+}
+
+function checkPeerApi(args: string[], pr: WatchedPr, env: Env): string | null {
+	const parsed = readApi(args);
+	if (typeof parsed === "string") return peerRefused("gh api arguments are not safely readable");
+	const { f, endpoint, fields, input, method, texts } = parsed;
+	if (input || fields.some(field => field.reads)) return peerRefused("request bodies and fields read from files are refused");
+	if (f.flags.some(flag => flag.name === "--verbose")) return peerRefused("gh api --verbose can print the session token");
+	if (f.flags.some(flag => ["--cache", "-H", "--header", "-p", "--preview"].includes(flag.name))) return peerRefused("custom API headers and local caching are refused");
+	const host = lastOf(f, "--hostname")?.value ?? (env.GH_HOST || pr.host);
+	if (!same(host, pr.host)) return peerRefused(`gh api would go to ${host}, not the peer pull request's host (${pr.host})`);
+	if (endpoint === "graphql") {
+		const queries = fields.filter(field => field.key === "query");
+		if (f.words.length !== 1 || queries.length !== 1 || queries[0]?.value === "" || method !== "GET" && method !== "POST") {
+			return peerRefused("GraphQL reads need one inline query and no request body");
+		}
+		if (texts.some(text => /\bmutation\b/i.test(text))) return peerRefused("GraphQL mutations, including review writes and thread resolutions, are refused");
+		return null;
+	}
+	if (endpoint === "" || f.words.length !== 1 || /^[a-z][a-z0-9+.-]*:\/\//i.test(endpoint)) return peerRefused("gh api needs one API endpoint");
+	if (method !== "GET") return peerRefused(`gh api ${method} ${endpoint} is not read-only`);
+	return null;
+}
+
+/** The peer model can read the selected pull request, but only through known read commands. */
+export function checkPeerGh(args: string[], pr: WatchedPr | null, env: Env = {}): string | null {
+	if (env.GH_CONFIG_DIR) return peerRefused("GH_CONFIG_DIR is set for this command");
+	if (pr === null) return peerRefused("no peer pull request is recorded");
+	if (env.GH_HOST && !same(env.GH_HOST, pr.host)) return peerRefused(`gh would go to ${env.GH_HOST}, not the peer pull request's host (${pr.host})`);
+	const command = ghCommand(args);
+	if (typeof command === "string") return peerRefused("gh command arguments are ambiguous");
+	const { group, sub, at } = command;
+	if (group === "api") {
+		if (at !== 1) return peerRefused("put gh global flags after the api command so their target can be checked");
+		return checkPeerApi(args.slice(at), pr, env);
+	}
+	if (group !== "pr" || at !== 2) return peerRefused(`gh ${group} ${sub} is not a peer read command`);
+	const spec = sub === "view" ? GH_PEER_PR_VIEW : sub === "diff" ? GH_PEER_PR_DIFF : sub === "checks" ? GH_PEER_PR_CHECKS : undefined;
+	if (spec === undefined) return peerRefused(`gh pr ${sub} is not a peer read command`);
+	const parsed = pflag(args.slice(at), spec);
+	if (parsed.unknown !== undefined) return peerRefused(`gh pr ${sub} ${parsed.unknown} is not an allowed read flag`);
+	return checkPeerPrTarget(sub, parsed, pr, env);
 }
 
 // ---- git ------------------------------------------------------------------------------------------------------------

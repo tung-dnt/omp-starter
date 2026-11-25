@@ -16,13 +16,15 @@ export const stateDir = (): string => path.join(os.homedir(), ".omp", "agent", "
 
 export interface FenceState extends GitPolicy {
 	armed: boolean;
+	/** Present only for the peer's read-only policy; existing and ship states omit it. */
+	mode?: "peer";
 	/** The checkout /ship works in; its git folders are `gitDirs`. */
 	root: string | null;
 	/** Protected files as the branch held them when /ship armed: path to `<mode> <blob id>`. A push may keep these. */
 	snapshot: Record<string, string>;
 	/** Where a push to `origin` goes, as /ship armed (`git remote get-url --push origin`); null when it was not recorded. */
 	originUrl: string | null;
-	/** The pull request /ship watches, which every write on GitHub is held to; null when it was not recorded (an older /ship armed the fence). */
+	/** The pull request the fence watches; null when it was not recorded (an older /ship armed the fence). */
 	pr: WatchedPr | null;
 	/** What the shims run their check with: bun, or omp's own binary with BUN_BE_BUN=1. */
 	bun: string;
@@ -47,6 +49,7 @@ export function readState(file: string | undefined): FenceState {
 		const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<FenceState>;
 		const pr = raw.pr;
 		return {
+			...(raw.mode === "peer" ? { mode: raw.mode } : {}),
 			armed: raw.armed !== false,
 			pushBranch: typeof raw.pushBranch === "string" && raw.pushBranch !== "" ? raw.pushBranch : null,
 			root: typeof raw.root === "string" ? raw.root : null,
@@ -122,10 +125,13 @@ function protectedEntries(dir: string, ref: string, git: Git): Record<string, st
 	return out;
 }
 
-/** Arms the fence for a watch of pull request `pr`, whose head branch `pushBranch` is checked out in `root`. Arming again replaces the watch. */
+/** Arms the ship fence for a watch of pull request `pr`, whose head branch `pushBranch` is checked out in `root`. Arming again replaces the watch. */
 export function armFence(watch: { pushBranch: string; root: string; pr: WatchedPr }, git: Git = realGit): void {
 	const file = process.env[FENCE_ENV];
 	if (!file) throw new Error("ship fence: the ship-fence extension is not loaded in this session");
+	const previous = readState(file);
+	if (previous.armed && previous.mode === "peer") throw new Error("ship fence: /peer is active in this session; /ship cannot replace its claim");
+	delete previous.mode;
 	const root = fs.realpathSync(watch.root);
 	const gitDirs = ["--git-dir", "--git-common-dir"]
 		.map(flag => git(root, "rev-parse", "--path-format=absolute", flag).out.trim())
@@ -133,12 +139,26 @@ export function armFence(watch: { pushBranch: string; root: string; pr: WatchedP
 		.map(dir => fs.realpathSync(dir));
 	const origin = git(root, "remote", "get-url", "--push", "origin");
 	const originUrl = origin.code === 0 && origin.out.trim() !== "" ? origin.out.trim() : null;
-	writeState(file, { ...readState(file), armed: true, pushBranch: watch.pushBranch, root, gitDirs: [...new Set(gitDirs)], snapshot: protectedEntries(root, "HEAD", git) ?? {}, originUrl, pr: watch.pr });
+	writeState(file, { ...previous, armed: true, pushBranch: watch.pushBranch, root, gitDirs: [...new Set(gitDirs)], snapshot: protectedEntries(root, "HEAD", git) ?? {}, originUrl, pr: watch.pr });
+}
+
+/** Arms the read-only peer fence for `pr`; no local Git state is part of a peer review. */
+export function armPeerFence(peer: { pr: WatchedPr; root: string }): void {
+	const file = process.env[FENCE_ENV];
+	if (!file) throw new Error("peer fence: the ship-fence extension is not loaded in this session");
+	const previous = readState(file);
+	if (previous.armed && previous.mode !== "peer") throw new Error("peer fence: /ship is active in this session; /peer cannot replace its claim");
+	writeState(file, { ...previous, armed: true, mode: "peer", pushBranch: null, root: fs.realpathSync(peer.root), gitDirs: [], snapshot: {}, originUrl: null, pr: peer.pr });
 }
 
 export function disarmFence(): void {
 	const file = process.env[FENCE_ENV];
-	if (file) writeState(file, { ...readState(file), armed: false, pushBranch: null, root: null, gitDirs: [], snapshot: {}, originUrl: null, pr: null });
+	if (file) {
+		const state = readState(file);
+		const next = { ...state, armed: false, pushBranch: null, root: null, gitDirs: [], snapshot: {}, originUrl: null, pr: null };
+		delete next.mode;
+		writeState(file, next);
+	}
 }
 
 /**

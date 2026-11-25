@@ -3,7 +3,7 @@
 // filter here (AC7), and `hash` covers only what survives it, so an untrusted comment never starts a pass.
 import { createHash } from "node:crypto";
 import { MARKER } from "./fence";
-import type { Gh, Note, ParseLink, ParseTarget, PrRef, ReadHead, ReadPr, Review, Snapshot, Thread, Trust } from "./types";
+import type { Gh, Note, ParseLink, ParseTarget, PeerReview, PeerSnapshot, PeerThread, PrRef, ReadHead, ReadPeerPr, ReadPr, Review, Snapshot, Thread, Trust } from "./types";
 
 // ---- which pull request ---------------------------------------------------------------------------------------------
 
@@ -139,15 +139,16 @@ comments(last:100){nodes{id body createdAt url isMinimized author{login __typena
 // ---- the trust filter (AC7) -----------------------------------------------------------------------------------------
 
 const NOTE_LIMIT = 4000;
+const PEER_MARKER = "<!-- omp-peer -->";
 const WRITE_ROLES = ["admin", "maintain", "write"];
 
 /** Logins compare without case and without the `[bot]` suffix REST adds (GraphQL leaves it off). */
 const bare = (login: string) => login.replace(/\[bot\]$/i, "").toLowerCase();
 
 /** What the model gets of a body: quoted lines and HTML comments gone (quotes could carry a stranger's text), cut at NOTE_LIMIT. */
-function clean(raw: string, yours: boolean): { body: string; cut: boolean } {
+function clean(raw: string, yours: boolean, marker = MARKER): { body: string; cut: boolean } {
 	let body = raw.replace(/\r\n?/g, "\n");
-	if (yours) body = body.trimStart().slice(MARKER.length);
+	if (yours) body = body.trimStart().slice(marker.length);
 	body = body
 		.replace(/<!--[\s\S]*?(?:-->|$)/g, "")
 		.split("\n")
@@ -155,15 +156,17 @@ function clean(raw: string, yours: boolean): { body: string; cut: boolean } {
 		.join("\n")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
-	// Only /ship's own comments keep the marker; on anyone else's it is just another hidden comment.
-	if (yours) body = body === "" ? MARKER : `${MARKER}\n${body}`;
+	// An authenticated self note keeps its own marker; all other HTML comments are hidden.
+	if (yours) body = body === "" ? marker : `${marker}\n${body}`;
 	if (body.length <= NOTE_LIMIT) return { body, cut: false };
 	return { body: body.slice(0, NOTE_LIMIT).replace(/[\ud800-\udbff]$/, ""), cut: true };
 }
 
-/** Lets through the user, people with write access (one permission lookup each per read) and the named bots; counts the rest it turns away. */
-function trustFilter(gh: Gh, repo: string, trust: Trust) {
+/** Lets through the user, optionally the peer PR author, writers and named bots; counts the rest it turns away. */
+function trustFilter(gh: Gh, repo: string, trust: Trust, peer?: { author: string; marker: string }) {
 	const me = bare(trust.me);
+	const prAuthor = peer === undefined ? "" : bare(peer.author);
+	const marker = peer?.marker ?? MARKER;
 	const bots = new Set(trust.bots.map(bare));
 	const writers = new Map<string, boolean>();
 	let untrusted = 0;
@@ -174,14 +177,17 @@ function trustFilter(gh: Gh, repo: string, trust: Trust) {
 		// A lookup that fails (no push access to the repo, a network error) leaves the person untrusted: fail closed.
 		return r.code === 0 && WRITE_ROLES.includes(r.out.trim());
 	};
-	/** The author when trusted. A Bot is trusted by name alone, never by permission, and a User never by a bot's name. */
+	/** A Bot is trusted by name, except the peer's PR author, who is trusted by identity. */
 	const allowed = async (author: unknown): Promise<{ login: string; type: "User" | "Bot" } | null> => {
 		const { login, __typename: type } = obj(author);
 		if (typeof login !== "string" || (type !== "User" && type !== "Bot")) return null;
 		const who = bare(login);
 		if (who === "") return null;
-		if (type === "Bot") return bots.has(who) ? { login, type } : null;
-		if (who === me) return { login, type };
+		if (type === "Bot") {
+			if (prAuthor !== "" && who === prAuthor) return { login, type };
+			return bots.has(who) ? { login, type } : null;
+		}
+		if (who === me || (prAuthor !== "" && who === prAuthor)) return { login, type };
 		let can = writers.get(who);
 		if (can === undefined) {
 			can = await canWrite(login);
@@ -201,8 +207,8 @@ function trustFilter(gh: Gh, repo: string, trust: Trust) {
 				untrusted++;
 				return null;
 			}
-			const yours = who.type === "User" && bare(who.login) === me && text(c.body).trimStart().startsWith(MARKER);
-			const shown = clean(text(c.body), yours);
+			const yours = who.type === "User" && bare(who.login) === me && text(c.body).trimStart().startsWith(marker);
+			const shown = clean(text(c.body), yours, marker);
 			if (shown.body === "") return null;
 			return { id: text(c.id), author: who.login, bot: who.type === "Bot", yours, at: text(c.createdAt), url: text(c.url), ...shown };
 		},
@@ -217,6 +223,20 @@ function trustFilter(gh: Gh, repo: string, trust: Trust) {
 			// A review that says nothing only carries inline comments, which the threads hold.
 			if (body === "" && (state === "COMMENTED" || state === "PENDING")) return null;
 			return { author: who.login, state, at: text(r.submittedAt) || text(r.createdAt), body, commit: text(obj(r.commit).oid) || null };
+		},
+		async peerReview(r: Obj): Promise<PeerReview | null> {
+			const who = await allowed(r.author);
+			if (!who) {
+				if (text(r.body).trim() !== "") untrusted++;
+				return null;
+			}
+			const id = need(r.id, "a review's id");
+			const state = pick(r.state, REVIEW_STATES, "a review's state");
+			const raw = text(r.body);
+			const yours = who.type === "User" && bare(who.login) === me && raw.trimStart().startsWith(marker);
+			const body = clean(raw, yours, marker).body;
+			if (body === "" && (state === "COMMENTED" || state === "PENDING")) return null;
+			return { id, author: who.login, state, at: text(r.submittedAt) || text(r.createdAt), body, commit: text(obj(r.commit).oid) || null, yours };
 		},
 	};
 }
@@ -286,6 +306,290 @@ async function read(pr: PrRef, gh: Gh, trust: Trust): Promise<Snapshot> {
 export const readPr: ReadPr = async (pr, gh, trust) => {
 	try {
 		return await read(pr, gh, trust);
+	} catch (error) {
+		if (error instanceof Unreadable) return error.message;
+		throw error;
+	}
+};
+
+const PEER_META = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){headRefOid baseRefOid}}}`;
+const PEER_COMMENTS = `query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){headRefOid baseRefOid comments(first:100,after:$endCursor){nodes{id body createdAt url isMinimized author{login __typename}} pageInfo{hasNextPage endCursor}}}}}`;
+const PEER_REVIEWS = `query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){headRefOid baseRefOid reviews(first:100,after:$endCursor){nodes{id state body submittedAt createdAt commit{oid} author{login __typename}} pageInfo{hasNextPage endCursor}}}}}`;
+const PEER_THREADS = `query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){headRefOid baseRefOid reviewThreads(first:100,after:$endCursor){nodes{id isResolved path line diffSide} pageInfo{hasNextPage endCursor}}}}}`;
+const PEER_THREAD_COMMENTS = `query($owner:String!,$repo:String!,$number:Int!,$threadId:ID!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){headRefOid baseRefOid}} node(id:$threadId){... on PullRequestReviewThread{comments(first:100,after:$endCursor){nodes{id body createdAt url isMinimized author{login __typename}} pageInfo{hasNextPage endCursor}}}}}`;
+const DIFF_SIDES = ["LEFT", "RIGHT"] as const;
+
+type PeerConnection = "comments" | "reviews" | "reviewThreads" | "threadComments";
+const PEER_QUERIES: Record<PeerConnection, string> = {
+	comments: PEER_COMMENTS,
+	reviews: PEER_REVIEWS,
+	reviewThreads: PEER_THREADS,
+	threadComments: PEER_THREAD_COMMENTS,
+};
+
+interface PeerMeta {
+	headSha: string;
+	baseSha: string;
+}
+
+function peerDigest(s: Omit<PeerSnapshot, "hash">): string {
+	const rows = (items: unknown[][]) => items.map(row => JSON.stringify(row) ?? "").sort();
+	const notes = (items: Note[]) => items.map(n => [n.id, n.author, n.yours, n.at, n.body, n.cut]);
+	const parts = [
+		[s.pr.owner, s.pr.repo, s.pr.number],
+		[s.headRef, s.headSha, s.baseRef, s.baseSha],
+		[s.state, s.isDraft, s.author, s.mergeable, s.mergeState, s.reviewDecision],
+		rows(s.checks.map(c => [c.name, c.bucket])),
+		rows(s.threads.map(t => [t.id, t.isResolved, t.path, t.line, t.side, t.firstNoteYours, notes(t.notes)])),
+		rows(notes(s.comments)),
+		rows(s.reviews.map(r => [r.id, r.author, r.state, r.at, r.body, r.commit, r.yours])),
+	];
+	return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
+
+function assertPeerGraphql(page: Obj): void {
+	if (page.errors !== undefined && (!Array.isArray(page.errors) || page.errors.length > 0)) {
+		throw new Unreadable("gh api graphql returned incomplete data");
+	}
+}
+
+function peerPull(page: Obj): Obj {
+	const pull = obj(obj(obj(page.data).repository).pullRequest);
+	if (Object.keys(pull).length === 0) throw new Unreadable("the PR is not readable with this account");
+	return pull;
+}
+
+function peerMetaFromPull(pull: Obj): PeerMeta {
+	return { headSha: need(pull.headRefOid, "the PR head commit"), baseSha: need(pull.baseRefOid, "the PR base commit") };
+}
+
+function requireSamePeerMeta(actual: PeerMeta, expected: PeerMeta): void {
+	if (actual.headSha !== expected.headSha || actual.baseSha !== expected.baseSha) {
+		throw new Unreadable("the PR head or base moved during the peer read; retry");
+	}
+}
+
+async function readPeerMeta(pr: PrRef, gh: Gh): Promise<PeerMeta> {
+	const page = obj(
+		await run(gh, [
+			"api",
+			"graphql",
+			"-f",
+			`query=${PEER_META}`,
+			"-f",
+			`owner=${pr.owner}`,
+			"-f",
+			`repo=${pr.repo}`,
+			"-F",
+			`number=${pr.number}`,
+		]),
+	);
+	assertPeerGraphql(page);
+	return peerMetaFromPull(peerPull(page));
+}
+
+function peerConnection(page: Obj, kind: PeerConnection): Obj {
+	if (kind === "threadComments") {
+		const node = obj(obj(page.data).node);
+		if (Object.keys(node).length === 0 || node.comments === null || node.comments === undefined) {
+			throw new Unreadable("a review thread is no longer readable");
+		}
+		return obj(node.comments);
+	}
+	const pull = peerPull(page);
+	const key = kind === "reviewThreads" ? "reviewThreads" : kind;
+	if (pull[key] === null || pull[key] === undefined) throw new Unreadable(`gh api graphql returned no ${kind}`);
+	return obj(pull[key]);
+}
+
+function peerNodes(connection: Obj, kind: PeerConnection): Obj[] {
+	if (!Array.isArray(connection.nodes)) throw new Unreadable(`gh api graphql returned incomplete ${kind} history`);
+	return connection.nodes.map(node => {
+		if (typeof node !== "object" || node === null || Array.isArray(node)) {
+			throw new Unreadable(`gh api graphql returned incomplete ${kind} history`);
+		}
+		return obj(node);
+	});
+}
+
+async function readPeerPages(pr: PrRef, gh: Gh, kind: PeerConnection, threadId?: string): Promise<PeerMeta & { nodes: Obj[] }> {
+	const args = [
+		"api",
+		"graphql",
+		"--paginate",
+		"--slurp",
+		"-f",
+		`query=${PEER_QUERIES[kind]}`,
+		"-f",
+		`owner=${pr.owner}`,
+		"-f",
+		`repo=${pr.repo}`,
+		"-F",
+		`number=${pr.number}`,
+	];
+	if (kind === "threadComments") {
+		if (threadId === undefined) throw new Unreadable("a review thread had no id");
+		args.push("-f", `threadId=${threadId}`);
+	}
+	const result = await run(gh, args);
+	if (!Array.isArray(result) || result.length === 0) throw new Unreadable(`gh api graphql returned no ${kind} pages`);
+
+	let headSha: string | null = null;
+	let baseSha: string | null = null;
+	const nodes: Obj[] = [];
+	const cursors = new Set<string>();
+	for (let i = 0; i < result.length; i++) {
+		const value = result[i];
+		if (typeof value !== "object" || value === null || Array.isArray(value)) {
+			throw new Unreadable(`gh api graphql returned incomplete ${kind} pages`);
+		}
+		const page = obj(value);
+		assertPeerGraphql(page);
+		const meta = peerMetaFromPull(peerPull(page));
+		if (headSha !== null && (headSha !== meta.headSha || baseSha !== meta.baseSha)) {
+			throw new Unreadable("the PR head or base moved during the peer read; retry");
+		}
+		headSha = meta.headSha;
+		baseSha = meta.baseSha;
+
+		const connection = peerConnection(page, kind);
+		nodes.push(...peerNodes(connection, kind));
+		const info = obj(connection.pageInfo);
+		if (typeof info.hasNextPage !== "boolean" || info.hasNextPage !== (i < result.length - 1)) {
+			throw new Unreadable(`gh api graphql returned partial ${kind} pagination`);
+		}
+		if (info.hasNextPage) {
+			if (typeof info.endCursor !== "string" || info.endCursor === "" || cursors.has(info.endCursor)) {
+				throw new Unreadable(`gh api graphql returned invalid ${kind} pagination`);
+			}
+			cursors.add(info.endCursor);
+		}
+	}
+	if (headSha === null || baseSha === null) throw new Unreadable(`gh api graphql returned no ${kind} metadata`);
+	return { headSha, baseSha, nodes };
+}
+
+async function peerChecks(pr: PrRef, gh: Gh): Promise<Snapshot["checks"]> {
+	const args = ["pr", "checks", String(pr.number), "-R", `${pr.owner}/${pr.repo}`, "--json", "name,bucket,link"];
+	// `gh pr checks` owns its checks pagination; it has no `--paginate` flag.
+	const result = await gh(args);
+	if (result.code !== 0 && result.code !== 8) {
+		if (result.err.includes("no checks reported")) return [];
+		const firstLine = (result.err || result.out).trim().split("\n")[0];
+		throw new Unreadable(`gh pr checks failed: ${firstLine || `exit ${result.code}`}`);
+	}
+	let value: unknown;
+	try {
+		value = JSON.parse(result.out);
+	} catch {
+		throw new Unreadable("gh pr checks did not return JSON");
+	}
+	if (!Array.isArray(value)) throw new Unreadable("gh pr checks did not return a list");
+	return value.map(item => {
+		const check = obj(item);
+		return {
+			name: need(check.name, "a check's name"),
+			bucket: pick(check.bucket, BUCKETS, "a check's bucket"),
+			link: text(check.link) || null,
+		};
+	});
+}
+
+
+async function readPeer(pr: PrRef, gh: Gh, trust: Trust): Promise<PeerSnapshot> {
+	const repo = `${pr.owner}/${pr.repo}`;
+	const view = obj(await run(gh, ["pr", "view", String(pr.number), "-R", repo, "--json", VIEW_FIELDS]));
+	const headSha = need(view.headRefOid, "head commit");
+	const author = text(obj(view.author).login) || "ghost";
+	const captured = await readPeerMeta(pr, gh);
+	if (captured.headSha !== headSha) throw new Unreadable("the PR head moved during the peer read; retry");
+
+	const checks = await peerChecks(pr, gh);
+	const filter = trustFilter(gh, repo, trust, { author, marker: PEER_MARKER });
+	const rawComments = await readPeerPages(pr, gh, "comments");
+	requireSamePeerMeta(rawComments, captured);
+	for (const comment of rawComments.nodes) need(comment.id, "a comment id");
+	const comments = await keep(rawComments.nodes, c => filter.note(c));
+
+	const rawReviews = await readPeerPages(pr, gh, "reviews");
+	requireSamePeerMeta(rawReviews, captured);
+	for (const review of rawReviews.nodes) need(review.id, "a review id");
+	const reviews = await keep(rawReviews.nodes, r => filter.peerReview(r));
+
+	const rawThreads = await readPeerPages(pr, gh, "reviewThreads");
+	requireSamePeerMeta(rawThreads, captured);
+	const threads: PeerThread[] = [];
+	for (const thread of rawThreads.nodes) {
+		const id = need(thread.id, "a review thread id");
+		const side = pick(thread.diffSide, DIFF_SIDES, "a review thread's diff side");
+		const rawNotes = await readPeerPages(pr, gh, "threadComments", id);
+		requireSamePeerMeta(rawNotes, captured);
+		for (const note of rawNotes.nodes) need(note.id, "a comment id");
+		const first = rawNotes.nodes[0];
+		const firstAuthor = obj(first?.author);
+		const firstNoteYours =
+			first !== undefined &&
+			firstAuthor.__typename === "User" &&
+			typeof firstAuthor.login === "string" &&
+			bare(firstAuthor.login) === bare(trust.me) &&
+			text(first.body).trimStart().startsWith(PEER_MARKER);
+		if (typeof thread.isResolved !== "boolean") throw new Unreadable("gh api graphql returned a review thread without resolution state");
+		if (thread.isResolved === false && rawNotes.nodes.length === 0) throw new Unreadable("an unresolved thread has no readable comments");
+		if (
+			thread.isResolved === false &&
+			rawNotes.nodes.some(note => {
+				const noteAuthor = obj(note.author);
+				return note.isMinimized === true && noteAuthor.__typename === "User" && typeof noteAuthor.login === "string" && bare(noteAuthor.login) === bare(trust.me);
+			})
+		) {
+			throw new Unreadable("an unresolved thread contains a minimized comment by this account");
+		}
+		const notes = await keep(rawNotes.nodes, c => filter.note(c));
+		if (thread.path !== null && typeof thread.path !== "string") throw new Unreadable("gh api graphql returned a review thread without a path");
+		if (thread.line !== null && (typeof thread.line !== "number" || !Number.isInteger(thread.line))) {
+			throw new Unreadable("gh api graphql returned a review thread without a line");
+		}
+		if (notes.length > 0) {
+			threads.push({
+				id,
+				side,
+				isResolved: thread.isResolved,
+				path: typeof thread.path === "string" && thread.path !== "" ? thread.path : null,
+				line: typeof thread.line === "number" ? thread.line : null,
+				firstNoteYours,
+				notes,
+			});
+		}
+	}
+
+	const current = await readPeerMeta(pr, gh);
+	requireSamePeerMeta(current, captured);
+	const snapshot: Omit<PeerSnapshot, "hash"> = {
+		pr,
+		url: need(view.url, "url"),
+		state: pick(view.state, STATES, "the PR's state"),
+		isDraft: view.isDraft === true,
+		author,
+		headRef: need(view.headRefName, "head branch"),
+		headSha,
+		baseRef: need(view.baseRefName, "base branch"),
+		baseSha: captured.baseSha,
+		mergeable: pick(view.mergeable, MERGEABLE, "the PR's mergeable state"),
+		mergeState: text(view.mergeStateStatus),
+		reviewDecision: text(view.reviewDecision) || null,
+		checks,
+		threads,
+		comments,
+		reviews,
+		untrusted: filter.untrusted,
+	};
+	return { ...snapshot, hash: peerDigest(snapshot) };
+}
+
+/** A complete /peer read; incomplete API data, partial pagination, or a moved head/base return a refusal. */
+export const readPeerPr: ReadPeerPr = async (pr, gh, trust) => {
+	try {
+		return await readPeer(pr, gh, trust);
 	} catch (error) {
 		if (error instanceof Unreadable) return error.message;
 		throw error;

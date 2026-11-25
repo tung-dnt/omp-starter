@@ -12,7 +12,7 @@ import * as path from "node:path";
 import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { expandHome, tildify } from "./lib/state";
 import { desktopNotificationsOn, postNotification } from "./notify";
-import { armFence, disarmFence, SHIM_DIR } from "./ship/fence-state";
+import { armFence, currentState, disarmFence, SHIM_DIR } from "./ship/fence-state";
 import { findCheckout, projectsRoot } from "./ship/find";
 import { parseLink, parseTarget, readHead, readPr } from "./ship/pr";
 import { putUp, type PutUpDeps } from "./ship/putup";
@@ -55,6 +55,7 @@ const FAILED_READS_BEFORE_NOTICE = 5;
 const STALE_TURN_MS = 30 * 60_000;
 /** What the ship_start tool reports when `/ship stop` or the session's end cancelled the start; nobody else is told. */
 const STOPPED = "/ship: stopped before it started watching";
+const PEER_ACTIVE = "/peer is running in this session; run /peer stop first";
 
 /** What a trigger that can't watch the session (another process, a Hermes card) reads from `--report`. */
 export interface Report {
@@ -327,6 +328,11 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 		let starting: AbortController | null = null;
 
 		const unattended = (): boolean => process.env.OMP_STARTER_UNATTENDED === "1";
+
+		const peerArmed = (): boolean => {
+			const fence = currentState();
+			return fence.armed && fence.mode === "peer";
+		};
 		const say = (ctx: ExtensionContext, text: string, level: "info" | "warning" | "error" = "info"): void => ctx.ui.notify(text, level);
 
 		function writeReport(r: Run): void {
@@ -687,6 +693,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 						// Asked once put-up knows the branch's PR, before it pushes. The claim is taken here, so of two sessions starting at once only the first pushes, and a /ship that is refused pushes nothing (AC11). The PR's refs aren't read yet; the claim below records them.
 						claim: found => {
 							if (signal.aborted) return STOPPED;
+							if (peerArmed()) return PEER_ACTIVE;
 							const taken = parts.claimWatch(found, { baseRef: "", headRef: "", session, pid: process.pid, now: parts.now() });
 							if (typeof taken === "string") return taken;
 							held = taken;
@@ -711,6 +718,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				// Nothing below waits, so a start that gets past this check goes on to watch.
 				if (signal.aborted) return refuse(STOPPED);
 
+				if (peerArmed()) return refuse(`/ship: ${PEER_ACTIVE}`, "warning");
 				// A rerun on the same PR starts the watch over from GitHub and the state file (AC10), with the pass count reset (AC14).
 				if (run !== null) finish(run, "stopped", { quiet: true });
 				const watch = parts.claimWatch(pr, { baseRef: snapshot.baseRef, headRef: snapshot.headRef, session, pid: process.pid, now: parts.now() });
@@ -770,7 +778,9 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 
 		async function start(args: Extract<Args, { kind: "start" }> & { cwd?: string }, ctx: ExtensionContext): Promise<Started> {
 			let started: Started;
-			if (starting !== null) {
+			if (peerArmed()) {
+				started = refuse(`/ship: ${PEER_ACTIVE}`, "warning");
+			} else if (starting !== null) {
 				started = refuse("/ship: another /ship is still starting; run it again in a moment", "warning");
 			} else {
 				const attempt = new AbortController();

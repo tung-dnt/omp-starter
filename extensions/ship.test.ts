@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type Args, createShip, exec, parseArgs, readVerdict, type Report, type ShipParts } from "./ship";
-import { SHIM_DIR } from "./ship/fence-state";
+import { armPeerFence, currentState, disarmFence, FENCE_ENV, installFence, SHIM_DIR } from "./ship/fence-state";
 import { findCheckout } from "./ship/find";
 import { parseLink, parseTarget } from "./ship/pr";
 import { putUp } from "./ship/putup";
@@ -837,6 +837,91 @@ describe("refusals leave nothing behind", () => {
 		expect(lastMessage(t)).toBe("/ship: tung-dnt/sandbox#12 is already watched by session sess-B (pid 4242); run /ship stop there first");
 		expect(t.ctx.ui.notifications.at(-1)?.type).toBe("error");
 		nothingStarted(t);
+	});
+
+	test("/ship refuses before claiming or releasing an active peer watch", async () => {
+		const savedFence = process.env[FENCE_ENV];
+		const savedPath = process.env.PATH;
+		try {
+			delete process.env[FENCE_ENV];
+			installFence();
+			armPeerFence({ pr: PR, root: privateHome() });
+			const t = rig();
+			await t.cmd("12");
+			expect(lastMessage(t)).toContain("/peer is running");
+			expect(t.calls.claims).toEqual([]);
+			expect(t.calls.unclaimed).toEqual([]);
+			expect(t.calls.released).toEqual([]);
+			expect(t.calls.disarmed).toBe(0);
+			expect(currentState()).toMatchObject({ armed: true, mode: "peer", pr: PR });
+			nothingStarted(t);
+		} finally {
+			disarmFence();
+			if (savedFence === undefined) delete process.env[FENCE_ENV];
+			else process.env[FENCE_ENV] = savedFence;
+			if (savedPath === undefined) delete process.env.PATH;
+			else process.env.PATH = savedPath;
+		}
+	});
+
+	test("/ship rechecks peer mode after asynchronous reads and before claiming", async () => {
+		const savedFence = process.env[FENCE_ENV];
+		const savedPath = process.env.PATH;
+		try {
+			delete process.env[FENCE_ENV];
+			installFence();
+			const t = rig({
+				parts: {
+					readPr: async () => {
+						armPeerFence({ pr: PR, root: privateHome() });
+						return snap();
+					},
+				},
+			});
+			await t.cmd("12");
+			expect(lastMessage(t)).toContain("/peer is running");
+			expect(t.calls.claims).toEqual([]);
+			expect(t.calls.unclaimed).toEqual([]);
+			expect(t.calls.disarmed).toBe(0);
+			expect(currentState().mode).toBe("peer");
+			nothingStarted(t);
+		} finally {
+			disarmFence();
+			if (savedFence === undefined) delete process.env[FENCE_ENV];
+			else process.env[FENCE_ENV] = savedFence;
+			if (savedPath === undefined) delete process.env.PATH;
+			else process.env.PATH = savedPath;
+		}
+	});
+
+	test("/ship put-up cannot claim a PR if peer mode arms during the start", async () => {
+		const savedFence = process.env[FENCE_ENV];
+		const savedPath = process.env.PATH;
+		try {
+			delete process.env[FENCE_ENV];
+			installFence();
+			const t = rig({
+				parts: {
+					putUp: async (_root, deps) => {
+						armPeerFence({ pr: PR, root: privateHome() });
+						return deps.claim?.(PR) ?? PR;
+					},
+				},
+			});
+			await t.cmd("");
+			expect(lastMessage(t)).toContain("/peer is running");
+			expect(t.calls.claims).toEqual([]);
+			expect(t.calls.unclaimed).toEqual([]);
+			expect(t.calls.disarmed).toBe(0);
+			expect(currentState().mode).toBe("peer");
+			nothingStarted(t);
+		} finally {
+			disarmFence();
+			if (savedFence === undefined) delete process.env[FENCE_ENV];
+			else process.env[FENCE_ENV] = savedFence;
+			if (savedPath === undefined) delete process.env.PATH;
+			else process.env.PATH = savedPath;
+		}
 	});
 
 	test.each([

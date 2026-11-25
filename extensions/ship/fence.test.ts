@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { checkCommentBody, checkGh as check, checkGit, type GitPolicy, isProtectedPath, MARKER, readPush, readResolve, type WatchedPr } from "./fence";
+import { checkCommentBody, checkGh as check, checkGit, checkPeerGh, type GitPolicy, isProtectedPath, MARKER, readPush, readResolve, type WatchedPr } from "./fence";
 
 const policy: GitPolicy = { pushBranch: "feat/ship-s1", gitDirs: ["/repo/.git", "/main/.git", "/data/app-gitdir"] };
 /** The pull request the fence is armed on. */
@@ -896,5 +896,43 @@ describe.skipIf(realGh === null)("the fence reads gh's argv as the installed gh 
 		}
 		expect(aliases).toBeGreaterThan(20);
 		expect(wrong).toEqual([]);
+	});
+});
+
+describe("peer gh", () => {
+	const peer = (args: string[], env: Record<string, string> = {}) => checkPeerGh(args, WATCH, env);
+
+	test("allows only explicit PR reads and API GET or GraphQL queries", () => {
+		for (const args of [
+			["pr", "view", "5", "--repo", "o/r", "--json", "title,state"],
+			["pr", "diff", "https://github.com/o/r/pull/5"],
+			["pr", "checks", "#5", "-R", "o/r", "--required"],
+			["api", "repos/o/r/contents/src/a.ts?ref=abc123"],
+			["api", "-X", "GET", "repos/o/r/pulls/5/files", "-f", "per_page=100"],
+			["api", "graphql", "-f", "query=query { repository(owner:\"o\",name:\"r\") { pullRequest(number:5) { title } } }"],
+			["api", "-X", "GET", "graphql", "-f", "query={viewer{login}}"],
+		]) expect(peer(args), args.join(" ")).toBeNull();
+	});
+
+	test("refuses mutations, ambiguous commands, changed targets, token leaks and file inputs", () => {
+		for (const args of [
+			["pr", "merge", "5", "-R", "o/r"],
+			["pr", "review", "5", "--approve", "-R", "o/r"],
+			["pr", "ready", "5", "-R", "o/r"],
+			["pr", "new", "--draft", "-R", "o/r"],
+			["pr", "view", "6", "-R", "o/r"],
+			["pr", "view", "5", "-R", "x/y"],
+			["pr", "view", "5"],
+			["pr", "view", "https://example.com/o/r/pull/5"],
+			["-R", "o/r", "pr", "view", "5"],
+			["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE"],
+			["api", "graphql", "-f", "query=mutation { resolveReviewThread(input:{threadId:X}) { thread { isResolved } } }"],
+			["api", "graphql", "-f", "query=query { viewer { login } }", "-H", "X-HTTP-Method-Override: PATCH"],
+			["api", "--hostname", "evil.example", "repos/o/r/contents/a.ts"],
+			["api", "repos/o/r/contents/a.ts", "--method", "GET", "--input", "body.json"],
+			["api", "-X", "GET", "repos/o/r/contents/a.ts", "-F", "ref=@secret.txt"],
+			["api", "-X", "GET", "repos/o/r/contents/a.ts", "--verbose"],
+		]) expect(peer(args), args.join(" ")).toContain("peer fence");
+		expect(peer(["api", "user"], { GH_HOST: "evil.example" })).toContain("peer fence");
 	});
 });

@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { repoRoot } from "../lib/repo";
 import { resolveFrom, simpleCommands, targetPaths } from "../lib/tool-input";
-import { canonical, isProtectedPath, refused } from "./fence";
+import { canonical, checkPeerGh, isProtectedPath, peerRefused, refused } from "./fence";
 import { FENCE_SOURCE, type FenceState, type Git, realGit, SHIM_DIR, stateDir } from "./fence-state";
 
 /** omp URL schemes that never name a repo file. `conflict://` does (a conflicted file), so it is not here. */
@@ -109,7 +109,78 @@ function checkText(toolName: string, text: unknown): string | null {
 	return null;
 }
 
+const PEER_READ_TOOLS: Record<string, true> = { read: true, glob: true, grep: true, ast_grep: true };
+const PEER_LSP_READS: Record<string, true> = { diagnostics: true, definition: true, references: true, hover: true, symbols: true, type_definition: true, implementation: true, status: true, capabilities: true };
+const PEER_REVIEW_AGENTS: Record<string, true> = {
+	"thermo-nuclear-review-subagent": true,
+	"thermo-nuclear-code-quality-review-subagent": true,
+	scout: true,
+	reviewer: true,
+	"security-reviewer": true,
+};
+const PEER_CHILD_TOOLS: Record<string, true> = { read: true, glob: true, grep: true, ast_grep: true, lsp: true, bash: true };
+
+function checkPeerTasks(input: Record<string, unknown>): string | null {
+	if (input.isolation === "worktree" || "worktree" in input && input.worktree !== false && input.worktree !== undefined) return peerRefused("subagent worktrees are refused");
+	if ("tools" in input && (!Array.isArray(input.tools) || input.tools.some((tool: unknown) => typeof tool !== "string" || !Object.hasOwn(PEER_CHILD_TOOLS, tool)))) return peerRefused("subagents may receive only read-only peer tools");
+	const tasks: unknown[] = Array.isArray(input.tasks) ? input.tasks : "tasks" in input ? [] : typeof input.agent === "string" ? [input] : [];
+	if (tasks.length === 0) return peerRefused("only named read-only review subagents may be started");
+	for (const task of tasks) {
+		if (typeof task !== "object" || task === null || Array.isArray(task) || !("agent" in task)) return peerRefused("only named read-only review subagents may be started");
+		if (typeof task.agent !== "string" || !Object.hasOwn(PEER_REVIEW_AGENTS, task.agent)) return peerRefused("general-purpose and writer subagents are refused");
+		if (("isolation" in task && task.isolation === "worktree") || ("worktree" in task && task.worktree !== false && task.worktree !== undefined)) return peerRefused("subagent worktrees are refused");
+		if ("tools" in task && (!Array.isArray(task.tools) || task.tools.some((tool: unknown) => typeof tool !== "string" || !Object.hasOwn(PEER_CHILD_TOOLS, tool)))) {
+			return peerRefused("subagents may receive only read-only peer tools");
+		}
+	}
+	return null;
+}
+
+/** Peer shell allows one literal gh command; its argv is checked again by the shim. */
+function checkPeerShell(text: unknown, state: FenceState, input: Record<string, unknown>): string | null {
+	if (typeof text !== "string" || "env" in input) return peerRefused("shell input is not a single checked gh command");
+	let quote: "'" | '"' | null = null;
+	for (let i = 0; i < text.length; i++) {
+		const char = text[i] ?? "";
+		if (quote === "'") {
+			if (char === "'") quote = null;
+		} else if (quote === '"') {
+			if (char === '"') quote = null;
+			else if (char === "$" || char === "`" || char === "\\") return peerRefused("shell expansion is refused");
+		} else if (char === "'" || char === '"') quote = char;
+		else if (char === "\\" || ";&|<>`$()\n\r*?[]{}!".includes(char)) return peerRefused("shell operators, expansion and globbing are refused");
+		else if (char === "#" && (i === 0 || /\s/.test(text[i - 1] ?? ""))) return peerRefused("shell comments are refused");
+	}
+	if (quote !== null) return peerRefused("unclosed shell quotes are refused");
+	const commands = simpleCommands(text);
+	if (commands.length !== 1) return peerRefused("shell input must be one gh command");
+	const [command] = commands;
+	if (command === undefined || command.piped || command.words.length === 0) return peerRefused("shell input must be one gh command");
+	const [program, ...args] = command.words;
+	if (program !== "gh" && program !== "gh-blinx") return peerRefused("only read-only gh commands may run in a peer review");
+	return checkPeerGh(args, state.pr, process.env);
+}
+
+function checkPeerToolCall(toolName: string, input: Record<string, unknown>, state: FenceState): string | null {
+	if (toolName === "bash") return checkPeerShell(input.command, state, input);
+	if (toolName === "eval") return peerRefused("eval can execute arbitrary code");
+	if (toolName === "task" || toolName === "agent" || toolName === "subagent") return checkPeerTasks(input);
+	if (Object.hasOwn(PEER_REVIEW_AGENTS, toolName)) {
+		if (
+			input.isolation === "worktree" ||
+			("worktree" in input && input.worktree !== false && input.worktree !== undefined) ||
+			("tools" in input && (!Array.isArray(input.tools) || input.tools.some((tool: unknown) => typeof tool !== "string" || !Object.hasOwn(PEER_CHILD_TOOLS, tool))))
+		) return peerRefused("review subagents may not create worktrees or receive writer tools");
+		return null;
+	}
+	if (Object.hasOwn(PEER_READ_TOOLS, toolName)) return null;
+	if (toolName === "lsp" && typeof input.action === "string" && Object.hasOwn(PEER_LSP_READS, input.action)) return null;
+	if (toolName === "lsp" && input.action === "code_actions" && input.apply === false) return null;
+	return peerRefused(`${toolName} is not an allowed read-only peer tool`);
+}
+
 export function checkToolCall(toolName: string, input: Record<string, unknown>, state: FenceState, cwd: string, git: Git = realGit): string | null {
+	if (state.mode === "peer") return checkPeerToolCall(toolName, input, state);
 	if (toolName === "bash") return checkText(toolName, input.command);
 	if (toolName === "eval") return checkText(toolName, input.code);
 	const held = protectedTargets(toolName, input, cwd, state, git);
