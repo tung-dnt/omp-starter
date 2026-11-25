@@ -442,6 +442,10 @@ Limits: a session's repo comes from the origin URL of its working folder, so a f
 
 ## Release notes
 
+### 0.49.1 — 2026-11-25
+
+- **Fixed:** `/peer` recovers omitted or truncated file patches from the pinned GitHub comparison. It still refuses incomplete diffs.
+
 ### 0.49.0 — 2026-11-25
 
 - **Added:** `/peer` reviews colleagues' PRs without changing their branches. It posts inline blockers, re-reviews fixes and replies, approves the reviewed commit when clear, and keeps watching for new commits. A separate read-only guard preserves `/ship`'s existing permissions. See [Peer review](#peer-review-peer).
