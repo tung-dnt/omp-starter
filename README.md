@@ -442,6 +442,10 @@ Limits: a session's repo comes from the origin URL of its working folder, so a f
 
 ## Release notes
 
+### 0.49.2 — 2026-11-25
+
+- **Fixed:** `blast-radius` loads on OMP 19.2.0 by using standard file URI conversion.
+
 ### 0.49.1 — 2026-11-25
 
 - **Fixed:** `/peer` recovers omitted or truncated file patches from the pinned GitHub comparison. It still refuses incomplete diffs.

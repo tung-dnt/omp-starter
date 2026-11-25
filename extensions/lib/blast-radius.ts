@@ -265,7 +265,7 @@ export interface Location {
 
 /**
  * Use sites outside the edited file, relative to `cwd`, one per file and line, sorted. `toPath` turns a
- * location URI into an absolute path (the host's `uriToFile`).
+ * location URI into an absolute path.
  */
 export function referenceSites(locations: Location[], editedFile: string, cwd: string, toPath: (uri: string) => string): RefSite[] {
 	const seen = new Set<string>();

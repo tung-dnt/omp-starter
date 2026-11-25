@@ -4,12 +4,12 @@
 // Never blocks or alters the edit: any failure or the 6 s budget running out appends nothing.
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ExtensionAPI, ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
 import type { EditToolDetails } from "@oh-my-pi/pi-coding-agent/edit";
 import { getOrCreateClient, reconcileFileFromDisk, sendRequest, waitForProjectLoaded } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import { getConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
 import { getLspServerForFile } from "@oh-my-pi/pi-coding-agent/lsp/servers";
-import { fileToUri, uriToFile } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import {
 	changedExports,
 	formatBlastRadius,
@@ -82,14 +82,14 @@ async function lspSites(file: string, at: NonNullable<ExportChange["at"]>, cwd: 
 	if (!server) return [];
 	const client = await getOrCreateClient(server[1], cwd, undefined, signal);
 	await reconcileFileFromDisk(client, file, signal);
-	const params = { textDocument: { uri: fileToUri(file) }, position: at, context: { includeDeclaration: false } };
+	const params = { textDocument: { uri: pathToFileURL(file).href }, position: at, context: { includeDeclaration: false } };
 	let locations = (await sendRequest(client, "textDocument/references", params, signal)) as Location[] | null;
 	if (!locations?.length) {
 		// An empty answer from a server still indexing means "unknown", not "no callers": wait once within budget.
 		await waitForProjectLoaded(client, signal);
 		locations = (await sendRequest(client, "textDocument/references", params, signal)) as Location[] | null;
 	}
-	return referenceSites(locations ?? [], file, cwd, uriToFile);
+	return referenceSites(locations ?? [], file, cwd, uri => uri.startsWith("file://") ? fileURLToPath(uri.replaceAll("#", "%23").replaceAll("?", "%3F")) : uri);
 }
 
 /**
