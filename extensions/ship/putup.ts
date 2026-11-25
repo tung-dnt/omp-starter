@@ -33,9 +33,10 @@ interface Repo {
 	repo: string;
 }
 
-class Refusal extends Error {}
+/** A reason to refuse, thrown where it is found and caught at the edge of put-up or of the find step (find.ts), which share this vocabulary. */
+export class Refusal extends Error {}
 
-function no(why: string): never {
+export function no(why: string): never {
 	throw new Refusal(why);
 }
 
@@ -43,12 +44,12 @@ function no(why: string): never {
 const STOPPED = "stopped before it went further";
 
 /** Gives up, changing nothing more, when the caller has stopped this put-up. */
-function unlessStopped(signal: AbortSignal | undefined): void {
+export function unlessStopped(signal: AbortSignal | undefined): void {
 	if (signal?.aborted) no(STOPPED);
 }
 
 /** What a failed command said, short enough to read in a refusal; hook and git errors come last. */
-function brief(outcome: Outcome): string {
+export function brief(outcome: { code: number; out: string; err: string }): string {
 	const text = [outcome.err, outcome.out].map(s => s.trim()).filter(Boolean).join(" ").replace(/\s+/g, " ");
 	return text.length > 400 ? `…${text.slice(-400)}` : text || `exit ${outcome.code}`;
 }
@@ -106,7 +107,7 @@ async function currentBranch(run: RunGit): Promise<string> {
 }
 
 /** A branch name origin may advertise and put-up may pass to git: no space, control character or `~^:?*[\`, and no leading `-`. */
-const BRANCH_NAME = /^(?!-)[^\s~^:?*[\\\x00-\x1f\x7f]+$/;
+export const BRANCH_NAME = /^(?!-)[^\s~^:?*[\\\x00-\x1f\x7f]+$/;
 
 async function defaultBranch(run: RunGit): Promise<string> {
 	const head = await run("symbolic-ref", "-q", "refs/remotes/origin/HEAD");

@@ -5,7 +5,7 @@ import commented from "./fixtures/pr-commented.json";
 import conflicting from "./fixtures/pr-conflicting.json";
 import green from "./fixtures/pr-green.json";
 import red from "./fixtures/pr-red.json";
-import { parseTarget, readPr } from "./pr";
+import { parseLink, parseTarget, readHead, readPr } from "./pr";
 import type { Gh, PrRef, Snapshot, Trust } from "./types";
 
 // The fixtures are what gh printed for the calls readPr makes, recorded on 2026-11-24 (gh 2.103.3) from throwaway pull
@@ -278,12 +278,10 @@ describe("parseTarget", () => {
 	const pr = (owner: string, repo: string, number: number): PrRef => ({ host: "github.com", owner, repo, number });
 	const origin = "git@github.com:o/r.git";
 
-	test("a number, #number or a PR URL names the PR; no argument names the repo alone", () => {
+	test("a number or #number names the PR in the checkout's repo; no argument names the repo alone", () => {
 		expect(parseTarget("12", origin, sshHostname)).toEqual(pr("o", "r", 12));
 		expect(parseTarget("#12", origin, sshHostname)).toEqual(pr("o", "r", 12));
 		expect(parseTarget(" 12\n", origin, sshHostname)).toEqual(pr("o", "r", 12));
-		expect(parseTarget("https://github.com/x/y/pull/7", origin, sshHostname)).toEqual(pr("x", "y", 7));
-		expect(parseTarget("https://github.com/x/y/pull/7/files?w=1#diff-a", origin, sshHostname)).toEqual(pr("x", "y", 7));
 		expect(parseTarget(null, origin, sshHostname)).toEqual({ owner: "o", repo: "r" });
 		expect(parseTarget("  ", origin, sshHostname)).toEqual({ owner: "o", repo: "r" });
 	});
@@ -341,5 +339,68 @@ describe("parseTarget", () => {
 		for (const arg of ["abc", "0", "-3", "12x", "stop", "#", "99999999999999999999", "https://gitlab.com/o/r/-/merge_requests/3", "https://github.com/o/r/issues/3", "https://github.com/o/r", "https://github.com/../r/pull/3"]) {
 			expect(parseTarget(arg, origin, sshHostname)).toMatch(/not a PR|PR number/);
 		}
+	});
+});
+
+describe("parseLink", () => {
+	const pr = (owner: string, repo: string, number: number): PrRef => ({ host: "github.com", owner, repo, number });
+
+	test("a github.com pull request URL names its PR, whatever follows the number", () => {
+		expect(parseLink("https://github.com/x/y/pull/7")).toEqual(pr("x", "y", 7));
+		expect(parseLink("https://github.com/x/y/pull/7/files?w=1#diff-a")).toEqual(pr("x", "y", 7));
+		expect(parseLink("http://github.com/blinxsolutions/paco24/pull/9689")).toEqual(pr("blinxsolutions", "paco24", 9689));
+		expect(parseLink("  https://github.com/x/y/pull/7\n")).toEqual(pr("x", "y", 7));
+		expect(parseLink("https://GitHub.com/X/Y/pull/7")).toEqual(pr("X", "Y", 7));
+	});
+
+	test("anything else is not a link, for parseTarget to read", () => {
+		for (const arg of [null, "", "  ", "12", "#12", "stop", "abc", "https://gitlab.com/o/r/-/merge_requests/3", "https://github.com/o/r/issues/3", "https://github.com/o/r", "github.com/o/r/pull/3", "https://github.example.com/o/r/pull/3"]) {
+			expect(parseLink(arg)).toBeNull();
+		}
+	});
+
+	test("a URL that looks like a PR's but isn't says so", () => {
+		expect(parseLink("https://github.com/../r/pull/3")).toMatch(/not a PR/);
+		expect(parseLink("https://github.com/o/r/pull/0")).toBe("0 is not a PR number");
+		expect(parseLink("https://github.com/o/r/pull/99999999999999999999")).toBe("99999999999999999999 is not a PR number");
+	});
+});
+
+describe("readHead", () => {
+	const view = (out: unknown, over: { code?: number; err?: string } = {}): { gh: Gh; calls: string[][] } => {
+		const calls: string[][] = [];
+		const gh: Gh = async args => {
+			calls.push(args);
+			return { code: over.code ?? 0, err: over.err ?? "", out: typeof out === "string" ? out : JSON.stringify(out) };
+		};
+		return { gh, calls };
+	};
+	const open = { state: "OPEN", author: { login: "tung-dnt" }, headRefName: "feat/x", isCrossRepository: false };
+	const read = (out: unknown, over?: { code?: number; err?: string }) => readHead({ ...PR, number: 12 }, view(out, over).gh);
+
+	test("says whether the PR is open, whose it is and where its branch is, from one gh pr view", async () => {
+		const { gh, calls } = view(open);
+		expect(await readHead({ ...PR, number: 12 }, gh)).toEqual({ state: "OPEN", author: "tung-dnt", branch: "feat/x", fork: false });
+		expect(calls).toEqual([["pr", "view", "12", "-R", "tung-dnt/omp-ship-sandbox", "--json", "state,author,headRefName,isCrossRepository"]]);
+	});
+
+	test("a branch in a fork is a fork's", async () => {
+		expect(await read({ ...open, isCrossRepository: true })).toMatchObject({ fork: true });
+	});
+
+	test("a merged or closed PR is read as such, so the caller can refuse it", async () => {
+		expect(await read({ ...open, state: "MERGED" })).toMatchObject({ state: "MERGED" });
+		expect(await read({ ...open, state: "CLOSED" })).toMatchObject({ state: "CLOSED" });
+	});
+
+	test("a PR whose author GitHub no longer has is ghost's", async () => {
+		expect(await read({ ...open, author: null })).toMatchObject({ author: "ghost" });
+	});
+
+	test("says why when gh can't answer", async () => {
+		expect(await read("", { code: 1, err: "GraphQL: Could not resolve to a PullRequest with the number of 999. (repository.pullRequest)\n" })).toBe("gh pr view failed: GraphQL: Could not resolve to a PullRequest with the number of 999. (repository.pullRequest)");
+		expect(await read("<html>")).toBe("gh pr view did not return JSON");
+		expect(await read({ ...open, headRefName: "" })).toBe("gh pr view returned no head branch");
+		expect(await read({ ...open, state: "WEIRD" })).toContain("the PR's state");
 	});
 });

@@ -10,10 +10,16 @@ export interface PrRef {
 	number: number;
 }
 
+/** What a call asks for when it may outlive the usual 90 s, or when the user may stop it: a longer time allowance, and a signal that kills it. */
+export interface RunLimits {
+	timeoutMs?: number;
+	signal?: AbortSignal;
+}
+
 /** Runs `gh` (or `gh-blinx` for blinxsolutions repos, AC1) with these args, without blocking the session. Output is untrimmed. Injected, so tests replay recorded output. */
-export type Gh = (args: string[]) => Promise<{ code: number; out: string; err: string }>;
+export type Gh = (args: string[], limits?: RunLimits) => Promise<{ code: number; out: string; err: string }>;
 /** Runs `git -C <dir>` with these args, without blocking the session. Output is untrimmed. */
-export type Git = (dir: string, args: string[]) => Promise<{ code: number; out: string; err: string }>;
+export type Git = (dir: string, args: string[], limits?: RunLimits) => Promise<{ code: number; out: string; err: string }>;
 
 export type CheckBucket = "pass" | "fail" | "pending" | "skipping" | "cancel";
 
@@ -125,10 +131,24 @@ export const SHIP = {
 
 // ---- what each story exports ---------------------------------------------------------------------------------------
 
-/** Story 2, `pr.ts` `parseTarget`: a `/ship` argument (`<n>`, `#<n>`, a PR URL) plus the checkout's origin URL, or why not. SSH aliases resolve through `sshHostname`. */
+/** Story 2, `pr.ts` `parseTarget`: a `/ship` argument (`<n>`, `#<n>`, or none) plus the checkout's origin URL, or why not. SSH aliases resolve through `sshHostname`. */
 export type ParseTarget = (arg: string | null, originUrl: string, sshHostname: (alias: string) => string | null) => PrRef | { owner: string; repo: string } | string;
+/** `pr.ts` `parseLink`: the PR a github.com pull request URL names, which needs no checkout. null when the argument is no such URL (`parseTarget` reads numbers, and none), or why a URL that looks like one isn't a PR's. */
+export type ParseLink = (arg: string | null) => PrRef | string | null;
 /** Story 2, `pr.ts` `readPr`: one read of the PR, or why it couldn't be read. Waits on `gh`, so the session keeps running meanwhile. */
 export type ReadPr = (pr: PrRef, gh: Gh, trust: Trust) => Promise<Snapshot | string>;
+
+/** What a PR link needs to know before it can name a folder: whether the PR is still open, whose it is, and where its branch is. */
+export interface Head {
+	state: Snapshot["state"];
+	author: string;
+	/** The head branch's name. */
+	branch: string;
+	/** The branch lives in a fork, not in the PR's own repository. */
+	fork: boolean;
+}
+/** `pr.ts` `readHead`: one `gh pr view` of the PR, or why it couldn't be read. */
+export type ReadHead = (pr: PrRef, gh: Gh) => Promise<Head | string>;
 
 /** Story 3, `watch.ts` `nextStep`: pure. */
 export type NextStep = (snapshot: Snapshot, watch: Watch, now: number) => Step;
@@ -139,3 +159,38 @@ export type SaveWatch = (watch: Watch) => void;
 
 /** Story 5, `putup.ts` `putUp`: commit, push and open a draft PR for the branch in `root`; or why it refused. `confirm` is absent in unattended sessions; `signal` aborts when the start is stopped, and put-up then gives up before its next add, commit, push or PR create. */
 export type PutUp = (root: string, deps: { git: Git; gh: Gh; confirm?: (files: string[]) => Promise<boolean>; signal?: AbortSignal }) => Promise<PrRef | string>;
+
+/** What a PR link asks the find step for: the checkout of this PR's branch. */
+export interface Want {
+	pr: PrRef;
+	/** The PR's head branch. */
+	branch: string;
+	/** The branch lives in a fork, so no clone of the PR's repository can hold it. */
+	fork: boolean;
+}
+
+/** What the find step needs from the session: git and gh, how an origin URL names a repository, where to look, and the user. */
+export interface FindDeps {
+	git: Git;
+	/** As the account that owns the PR's repository: it clones. */
+	gh: Gh;
+	/** The repository an origin URL names, or null when it isn't one /ship can read (no GitHub URL, an ssh alias ssh can't resolve). */
+	repoOf(originUrl: string): { owner: string; repo: string } | null;
+	/** The folder whose direct children are searched for clones of the repository, and where a new clone goes. */
+	projects: string;
+	/** The checkout this session is in, or null when it is in none. */
+	session: string | null;
+	/** Asks the user once before anything is made or used; absent when nobody can answer (an unattended session, or none with a UI), which refuses instead. */
+	confirm?: (title: string, message: string) => Promise<boolean>;
+	/** Aborts when the user stops the /ship that called this. Checked before each step that changes something; a clone or fetch under way is killed. */
+	signal: AbortSignal;
+}
+
+/** Where the watch runs: this session's own folder, an existing checkout of the branch, or a worktree or clone made for it. */
+export interface Found {
+	root: string;
+	kind: "session" | "existing" | "worktree" | "clone";
+}
+
+/** Find step, `find.ts` `findCheckout`: the folder to watch `want` in, or why there is none. Nothing is made until the user has said yes, and every refusal that can be known beforehand comes first, so such a refusal or a no leaves every folder as it was; a clone that fails or is stopped is removed again. */
+export type FindCheckout = (want: Want, deps: FindDeps) => Promise<Found | string>;

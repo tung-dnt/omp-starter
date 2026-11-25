@@ -5,22 +5,29 @@
 // `pi.sendMessage` in this same conversation, carrying skills/ship/SKILL.md and a snapshot of the PR. Code arms the fence,
 // counts passes and pushes, keeps the claim on the PR alive and tells the user; all the model decides is its pass, and it
 // ends each pass with one SHIP-STATUS line that code branches on.
+// A PR link names its repository and branch, so it works from any folder: ship/find.ts finds the checkout of that branch, or
+// makes one after a confirm, before anything is claimed or armed.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { expandHome } from "./lib/state";
+import { expandHome, tildify } from "./lib/state";
 import { desktopNotificationsOn, postNotification } from "./notify";
 import { armFence, disarmFence, SHIM_DIR } from "./ship/fence-state";
-import { parseTarget, readPr } from "./ship/pr";
+import { findCheckout, projectsRoot } from "./ship/find";
+import { parseLink, parseTarget, readHead, readPr } from "./ship/pr";
 import { putUp, type PutUpDeps } from "./ship/putup";
 import {
 	type ClaimWatch,
 	type EndReason,
+	type FindCheckout,
+	type Found,
 	type Gh,
 	type Git,
 	type NextStep,
+	type ParseLink,
 	type ParseTarget,
 	type PrRef,
+	type ReadHead,
 	type ReadPr,
 	type SaveWatch,
 	SHIP,
@@ -31,7 +38,7 @@ import {
 import { claimWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch, unclaimWatch } from "./ship/watch";
 
 const USAGE = [
-	"/ship [<pr#>|<pr url>] [+bot ...] [--report <path>]  watch a pull request; with none named, put the branch up first",
+	"/ship [<pr#>|<pr url>] [+bot ...] [--report <path>]  watch a pull request (a link works from any folder); with none named, put the branch up first",
 	"/ship status                                          what this session is watching",
 	"/ship stop                                            stop watching",
 ].join("\n");
@@ -72,7 +79,14 @@ export interface ShipParts {
 	ghFor(owner: string): Gh;
 	sshHostname(alias: string): string | null;
 	parseTarget: ParseTarget;
+	parseLink: ParseLink;
 	readPr: ReadPr;
+	/** One light read of a PR link's head, before any folder is looked for. */
+	readHead: ReadHead;
+	/** Finds, or makes after one confirm, the checkout a PR link's branch is in. */
+	findCheckout: FindCheckout;
+	/** The folder a PR link's clones are searched for in, and made in. */
+	projects(): string;
 	putUp: PutUpFn;
 	nextStep: NextStep;
 	/** Takes the PR's watch for this session. Put-up asks for it before it pushes, so of two sessions starting at once only the first pushes (AC11); the session that holds it asks again once the PR is read, to record the PR's refs. */
@@ -145,6 +159,8 @@ interface PassInfo {
 	dirty: string[];
 	unattended: boolean;
 	triage: boolean;
+	/** /ship made this checkout for the watch, and the pass is the first: nothing is installed in it yet. */
+	fresh: boolean;
 }
 
 function passPrompt(p: PassInfo): string {
@@ -159,6 +175,7 @@ function passPrompt(p: PassInfo): string {
 		"## This pass",
 		"",
 		`- You act as ${p.me} in ${p.root}, on branch ${s.headRef} (base ${s.baseRef}, head ${s.headSha.slice(0, 7)}).`,
+		...(p.fresh ? ["- This checkout was made for this watch, so nothing is installed in it yet: install what the repo needs, the way its README or lockfile says, before you run any test."] : []),
 		`- Pushes so far per cause (the cap is ${SHIP.maxPushesPerCause}): ${pushes.join(", ") || "none"}.`,
 		...(capped.length > 0 ? [`- At the cap, so don't push for these again; bring them to the user: ${capped.join(", ")}.`] : []),
 		`- Files the user changed in the checkout (never commit, stash or discard them): ${p.dirty.join(", ") || "none"}.`,
@@ -232,6 +249,7 @@ const clock = (at: number): string => new Date(at).toTimeString().slice(0, 5);
 const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const label = (pr: PrRef): string => `${pr.owner}/${pr.repo}#${pr.number}`;
 const samePr = (a: PrRef, b: PrRef): boolean => label(a).toLowerCase() === label(b).toLowerCase();
+const outOf = (r: { code: number; out: string }): string | null => (r.code === 0 ? r.out.trim() : null);
 
 // ---- the session ----------------------------------------------------------------------------------------------------
 
@@ -262,6 +280,8 @@ interface Run {
 	passFrom: Snapshot | null;
 	/** The review ran, and the next pass triages its findings. */
 	triage: boolean;
+	/** The watch runs in a checkout /ship just made, and no pass has gone out yet: the first one tells the model nothing is installed there. */
+	fresh: boolean;
 	failedReads: number;
 	/** The look or pass re-read in flight, or null. Reads of the PR never overlap: a tick that finds one running is skipped, and a pass's re-read waits for it. */
 	reading: Promise<void> | null;
@@ -278,6 +298,24 @@ interface Refusal {
 }
 
 type Started = { url: string } | Refusal;
+
+/** What a /ship is aimed at: the checkout it runs in, the PR or repository it names, the account it acts as, and (for a PR link) where the checkout came from when it is not the session's own. */
+interface Aim {
+	root: string;
+	target: PrRef | { owner: string; repo: string };
+	gh: Gh;
+	me: string;
+	found: Found | null;
+}
+
+/** Why a PR that was read isn't one to watch, or null: it is over, or another account opened it. */
+function notWatchable(pr: PrRef, read: { state: Snapshot["state"]; author: string }, me: string): Refusal | null {
+	if (read.state !== "OPEN") return { refusal: `/ship: ${label(pr)} is ${read.state.toLowerCase()}; nothing to watch`, level: "warning" };
+	if (read.author.toLowerCase() !== me.toLowerCase()) {
+		return { refusal: `/ship: ${label(pr)} was opened by ${read.author}, and gh acts as ${me} for ${pr.owner}; /ship only watches pull requests of that account`, level: "error" };
+	}
+	return null;
+}
 
 export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 	return function ship(pi: ExtensionAPI): void {
@@ -411,6 +449,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				dirty,
 				unattended: unattended(),
 				triage: r.triage,
+				fresh: r.fresh,
 			});
 			try {
 				pi.sendMessage({ customType: MESSAGE_TYPE, content, display: false, details: { pr: snapshot.url, pass: n, why } }, { triggerTurn: true });
@@ -421,7 +460,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			r.passes = n;
 			r.watch = parts.recordPass(r.watch, snapshot, now);
 			parts.saveWatch(r.watch);
-			Object.assign(r, { awaiting: "pass", sentAt: now, sent: { head: snapshot.headSha, causes }, passFrom: snapshot, triage: false, state: "working", waitingFor: null, lastLine: `pass ${n} sent: ${why}` });
+			Object.assign(r, { awaiting: "pass", sentAt: now, sent: { head: snapshot.headSha, causes }, passFrom: snapshot, triage: false, fresh: false, state: "working", waitingFor: null, lastLine: `pass ${n} sent: ${why}` });
 			say(r.ctx, `ship #${r.pr.number}: pass ${n}: ${why}`);
 			refresh(r);
 		}
@@ -546,6 +585,69 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 		/** Why /ship didn't start. `start` tells the user, and hands the same text to a caller that isn't a person (the ship_start tool). */
 		const refuse = (text: string, level: Refusal["level"] = "error"): Refusal => ({ refusal: text, level });
 
+		/** One watch at a time: why a /ship for `pr` can't start while another PR is watched, or null. */
+		const watchingOther = (pr: PrRef): Refusal | null => (run !== null && !samePr(run.pr, pr) ? refuse(`/ship: already watching ${label(run.pr)}; run /ship stop first`) : null);
+
+		/** The account `gh` acts as for `owner`'s repositories. */
+		async function actingAs(owner: string): Promise<{ gh: Gh; me: string } | Refusal> {
+			const gh = parts.ghFor(owner);
+			const me = outOf(await gh(["api", "user", "--jq", ".login"]));
+			return me ? { gh, me } : refuse(`/ship: can't tell which GitHub account to use for ${owner} (gh api user failed)`);
+		}
+
+		/**
+		 * The checkout a /ship runs in, and what it is to watch. A number, or no argument, means the checkout `dir` is in. A PR
+		 * link names its repository and branch itself, so it works from any folder: the find step looks for the checkout of that
+		 * branch, or makes one, and asks the user once before it uses or makes anything. Every refusal that needs nothing made
+		 * comes first, so a PR that is over, someone else's or a fork's leaves every folder as it was.
+		 */
+		async function aimAt(dir: string, args: Extract<Args, { kind: "start" }>, ctx: ExtensionContext, signal: AbortSignal): Promise<Aim | Refusal> {
+			const folder = outOf(await parts.git(dir, ["rev-parse", "--show-toplevel"]));
+			const link = parts.parseLink(args.target);
+			if (typeof link === "string") return refuse(`/ship: ${link}`);
+			if (link === null) {
+				if (folder === null) return refuse("/ship: this folder is not in a git checkout");
+				const target = parts.parseTarget(args.target, outOf(await parts.git(folder, ["remote", "get-url", "origin"])) ?? "", parts.sshHostname);
+				if (typeof target === "string") return refuse(`/ship: ${target}`);
+				const account = await actingAs(target.owner);
+				return "refusal" in account ? account : { root: folder, target, ...account, found: null };
+			}
+			const other = watchingOther(link);
+			if (other !== null) return other;
+			const account = await actingAs(link.owner);
+			if ("refusal" in account) return account;
+			const head = await parts.readHead(link, account.gh);
+			if (typeof head === "string") return refuse(`/ship: ${head}`);
+			const over = notWatchable(link, { state: head.state, author: head.author }, account.me);
+			if (over !== null) return over;
+			if (signal.aborted) return refuse(STOPPED);
+			// Nobody to confirm in an unattended or UI-less session: the find step refuses instead of asking, unless the checkout is this session's own. A stop closes the dialog.
+			const confirm = !unattended() && ctx.hasUI ? (title: string, text: string) => ctx.ui.confirm(title, text, { signal }) : undefined;
+			// The find step reads every clone's origin, and each ssh alias costs a synchronous `ssh -G`: ask once per alias.
+			const hosts = new Map<string, string | null>();
+			const hostOf = (alias: string): string | null => {
+				if (!hosts.has(alias)) hosts.set(alias, parts.sshHostname(alias));
+				return hosts.get(alias) ?? null;
+			};
+			const found = await parts.findCheckout(
+				{ pr: link, branch: head.branch, fork: head.fork },
+				{
+					git: parts.git,
+					gh: account.gh,
+					repoOf: url => {
+						const named = parts.parseTarget(null, url, hostOf);
+						return typeof named === "string" ? null : named;
+					},
+					projects: parts.projects(),
+					session: folder,
+					confirm,
+					signal,
+				},
+			);
+			if (typeof found === "string") return refuse(`/ship: ${found}`);
+			return { root: found.root, target: link, ...account, found: found.kind === "session" ? null : found };
+		}
+
 		/**
 		 * Puts the branch up when no PR is named, then starts the watch. `signal` aborts when `/ship stop` or the session's end
 		 * cancels the start. It is checked after the waits that come before something with an effect, so a cancelled start gives
@@ -555,16 +657,11 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 			if (ctx.mode === "print" || ctx.mode === "json") return refuse("/ship needs a session that stays open (the TUI or rpc mode); this one ends after its prompt.");
 			// A bare /ship means this checkout's branch, and put-up could push or open a PR for it while another is watched.
 			if (run !== null && args.target === null) return refuse(`/ship: already watching ${label(run.pr)}; run /ship stop first, or name a pull request: /ship <number>`);
-			const out = (r: { code: number; out: string }): string | null => (r.code === 0 ? r.out.trim() : null);
 			// A model or a command line passes these paths as text, and no shell expands a leading ~ in them.
 			const dir = expandHome(args.cwd ?? ctx.cwd);
-			const root = out(await parts.git(dir, ["rev-parse", "--show-toplevel"]));
-			if (root === null) return refuse("/ship: this folder is not in a git checkout");
-			const target = parts.parseTarget(args.target, out(await parts.git(root, ["remote", "get-url", "origin"])) ?? "", parts.sshHostname);
-			if (typeof target === "string") return refuse(`/ship: ${target}`);
-			const gh = parts.ghFor(target.owner);
-			const me = out(await gh(["api", "user", "--jq", ".login"]));
-			if (!me) return refuse(`/ship: can't tell which GitHub account to use for ${target.owner} (gh api user failed)`);
+			const aim = await aimAt(dir, args, ctx, signal);
+			if ("refusal" in aim) return aim;
+			const { root, target, gh, me, found } = aim;
 			const session = ctx.sessionManager.getSessionId();
 
 			// The claim this start took that no run owns yet. Every way out of here but a started watch gives it back.
@@ -601,16 +698,15 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 					putUp = true;
 				}
 				if (signal.aborted) return refuse(STOPPED);
-				if (run !== null && !samePr(run.pr, pr)) return refuse(`/ship: already watching ${label(run.pr)}; run /ship stop first`);
+				const other = watchingOther(pr);
+				if (other !== null) return other;
 
 				const trust = { me, bots: args.bots };
 				const snapshot = await parts.readPr(pr, gh, trust);
 				if (typeof snapshot === "string") return refuse(`/ship: ${snapshot}`);
-				if (snapshot.state !== "OPEN") return refuse(`/ship: ${label(pr)} is ${snapshot.state.toLowerCase()}; nothing to watch`, "warning");
-				if (snapshot.author.toLowerCase() !== me.toLowerCase()) {
-					return refuse(`/ship: ${label(pr)} was opened by ${snapshot.author}, and gh acts as ${me} for ${pr.owner}; /ship only watches pull requests of that account`);
-				}
-				const branch = out(await parts.git(root, ["symbolic-ref", "--short", "-q", "HEAD"]));
+				const over = notWatchable(pr, snapshot, me);
+				if (over !== null) return over;
+				const branch = outOf(await parts.git(root, ["symbolic-ref", "--short", "-q", "HEAD"]));
 				if (branch !== snapshot.headRef) return refuse(`/ship: this checkout is on ${branch ?? "no branch"}, but ${label(pr)} is ${snapshot.headRef}; check that branch out first`);
 				// Nothing below waits, so a start that gets past this check goes on to watch.
 				if (signal.aborted) return refuse(STOPPED);
@@ -626,6 +722,8 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 					return refuse(`/ship: ${message(error)}`);
 				}
 
+				const made = found?.kind === "worktree" ? "a new worktree" : found?.kind === "clone" ? "a new clone" : null;
+				const where = found === null ? "" : ` in ${tildify(root)}${made === null ? "" : ` (${made})`}`;
 				const r: Run = {
 					ctx,
 					pr,
@@ -646,6 +744,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 					sent: null,
 					passFrom: null,
 					triage: false,
+					fresh: made !== null,
 					failedReads: 0,
 					reading: null,
 					turnsEnded: 0,
@@ -655,7 +754,7 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 				held = null;
 				try {
 					r.timer = ctx.setInterval(() => tick(r), SHIP.tickMs);
-					say(ctx, `/ship: watching ${label(pr)} as ${me} on ${snapshot.headRef}, fence armed. The PR is read every ${SHIP.tickMs / 60_000} minutes; a model pass starts only when something changes.`);
+					say(ctx, `/ship: watching ${label(pr)} as ${me} on ${snapshot.headRef}${where}, fence armed. The PR is read every ${SHIP.tickMs / 60_000} minutes; a model pass starts only when something changes.`);
 					// The review comes first, so the first pass has its findings to triage; the first tick follows on the timer.
 					if (putUp && !watch.told.includes(TOLD_REVIEWED)) sendReview(r);
 					else await tick(r, snapshot);
@@ -779,6 +878,10 @@ export function createShip(parts: ShipParts): (pi: ExtensionAPI) => void {
 // ---- the real parts -------------------------------------------------------------------------------------------------
 
 const RUN_TIMEOUT_MS = 90_000;
+/** What a call that was given a signal says when the signal stopped it. */
+const STOPPED_CALL = "stopped";
+/** How long a stopped call waits for the child to go, before it is killed outright. */
+const STOP_GRACE_MS = 3_000;
 const SKILL = path.join(import.meta.dir, "..", "skills", "ship", "SKILL.md");
 
 /**
@@ -800,31 +903,55 @@ function drain(pipe: ReadableStream<Uint8Array>): { done: Promise<void>; text():
  * gh and git run for the watch's own reads and for put-up, not for the model, so they skip the fence's shims: the fence
  * judges what the model runs, and a refusal of the watch's own GraphQL read would end the watch. Nothing prompts. Never
  * synchronous: a read takes seconds on a slow link, and the session must keep running while it waits (#7). Output is untrimmed.
- * A call that outlives `timeoutMs` kills the child and fails at once, whatever still holds its pipes (#14).
+ * A call that outlives `timeoutMs` kills the child and fails at once, whatever still holds its pipes (#14). One that is given
+ * a `signal` (a clone, which the user may stop) runs in a process group of its own, so a stop reaches what it started too
+ * (`gh repo clone` runs git), and the call returns once they are gone.
  */
-export async function exec(command: string, args: string[], timeoutMs = RUN_TIMEOUT_MS): Promise<{ code: number; out: string; err: string }> {
+export async function exec(command: string, args: string[], timeoutMs = RUN_TIMEOUT_MS, signal?: AbortSignal): Promise<{ code: number; out: string; err: string }> {
 	const entries = (process.env.PATH ?? "").split(path.delimiter).filter(entry => entry !== SHIM_DIR);
 	try {
+		if (signal?.aborted) return { code: 1, out: "", err: STOPPED_CALL };
 		const child = Bun.spawn([command, ...args], {
 			env: { ...process.env, PATH: entries.join(path.delimiter), GH_PROMPT_DISABLED: "1", GIT_TERMINAL_PROMPT: "0" },
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",
+			detached: signal !== undefined,
 		});
 		// Both pipes are read while it runs, so a chatty child never fills one and stalls.
 		const out = drain(child.stdout);
 		const err = drain(child.stderr);
-		const late = Promise.withResolvers<false>();
-		const deadline = setTimeout(late.resolve, timeoutMs, false);
-		const finished = await Promise.race([Promise.all([out.done, err.done, child.exited]).then(() => true), late.promise]).finally(() => clearTimeout(deadline));
+		const ended = Promise.withResolvers<"timeout" | "stop">();
+		const deadline = setTimeout(ended.resolve, timeoutMs, "timeout");
+		const stop = (): void => ended.resolve("stop");
+		signal?.addEventListener("abort", stop, { once: true });
+		const finished = await Promise.race([Promise.all([out.done, err.done, child.exited]).then(() => true as const), ended.promise]).finally(() => {
+			clearTimeout(deadline);
+			signal?.removeEventListener("abort", stop);
+		});
 		// A child killed by a signal has no exit code: that is a failure.
-		if (finished) return { code: child.exitCode ?? 1, out: out.text(), err: err.text() };
-		// Out of time. Killing the child isn't enough: a grandchild that inherited the pipes keeps them open, and waiting for them to close would hold this call up for as long as it lives.
-		child.kill();
+		if (finished === true) return { code: child.exitCode ?? 1, out: out.text(), err: err.text() };
+		// Out of time, or stopped. Killing the child isn't enough: a grandchild that inherited the pipes keeps them open, and waiting for them to close would hold this call up for as long as it lives.
+		const killGroup = (sig: "SIGTERM" | "SIGKILL"): void => {
+			try {
+				process.kill(-child.pid, sig);
+			} catch {}
+		};
+		if (signal === undefined) child.kill();
+		else killGroup("SIGTERM");
 		const said = { out: out.text(), err: err.text() };
 		out.close();
 		err.close();
-		return { code: child.exitCode || 1, out: said.out, err: `timed out after ${timeoutMs / 1000} s${said.err === "" ? "" : `\n${said.err}`}` };
+		if (finished === "stop") {
+			// The caller cleans up what the call made, and that must not race what it is still writing.
+			const grace = Promise.withResolvers<void>();
+			const patience = setTimeout(grace.resolve, STOP_GRACE_MS);
+			await Promise.race([child.exited, grace.promise]);
+			clearTimeout(patience);
+			if (child.exitCode === null) killGroup("SIGKILL");
+		}
+		const why = finished === "stop" ? STOPPED_CALL : `timed out after ${timeoutMs / 1000} s`;
+		return { code: child.exitCode || 1, out: said.out, err: `${why}${said.err === "" ? "" : `\n${said.err}`}` };
 	} catch (error) {
 		return { code: 127, out: "", err: message(error) };
 	}
@@ -847,11 +974,15 @@ function sshHostname(alias: string): string | null {
 const realParts: ShipParts = {
 	now: Date.now,
 	platform: process.platform,
-	git: (dir, args) => exec("git", ["-C", dir, ...args]),
-	ghFor: owner => args => exec(owner.toLowerCase() === "blinxsolutions" ? "gh-blinx" : "gh", args),
+	git: (dir, args, limits) => exec("git", ["-C", dir, ...args], limits?.timeoutMs, limits?.signal),
+	ghFor: owner => (args, limits) => exec(owner.toLowerCase() === "blinxsolutions" ? "gh-blinx" : "gh", args, limits?.timeoutMs, limits?.signal),
 	sshHostname,
 	parseTarget,
+	parseLink,
 	readPr,
+	readHead,
+	findCheckout,
+	projects: projectsRoot,
 	putUp,
 	nextStep,
 	claimWatch,
