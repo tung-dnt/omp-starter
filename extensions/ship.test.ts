@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type Args, createShip, exec, parseArgs, readVerdict, type Report, type ShipParts } from "./ship";
 import { SHIM_DIR } from "./ship/fence-state";
+import { findCheckout } from "./ship/find";
+import { parseLink, parseTarget } from "./ship/pr";
 import { putUp } from "./ship/putup";
-import { type Note, type PrRef, SHIP, type Snapshot, type Step, type Watch } from "./ship/types";
+import { type FindDeps, type Found, type Head, type Note, type PrRef, SHIP, type Snapshot, type Step, type Want, type Watch } from "./ship/types";
 import { claimWatch, loadWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch, unclaimWatch } from "./ship/watch";
 import { fakeContext, fakePi, privateHome, resetHome, scriptedUi, type FakeContext, type FakePi } from "./test-harness";
 
@@ -12,6 +15,8 @@ const PR = { host: "github.com", owner: "tung-dnt", repo: "sandbox", number: 12 
 const URL = "https://github.com/tung-dnt/sandbox/pull/12";
 const T0 = Date.UTC(2026, 10, 24, 9, 0, 0);
 const ROOT = "/work/sandbox";
+/** Where the find step is told to look for clones; the fake find step never reads it. */
+const PROJECTS = "/work/projects";
 /** What `gh pr list --head <branch>` finds when the branch already has the user's open PR. */
 const listed = { number: 12, url: URL, author: { login: "tung-dnt" }, isCrossRepository: false };
 
@@ -71,6 +76,10 @@ interface Rig {
 		unclaimed: Watch[];
 		saved: Watch[];
 		reads: { trust: { me: string; bots: string[] } }[];
+		/** The reads of a PR link's head that came before any folder was looked for. */
+		heads: PrRef[];
+		/** Every find step that ran: what it was asked for, and with what. */
+		finds: { want: Want; deps: FindDeps }[];
 		pushes: string[];
 		puts: { root: string; confirm: boolean }[];
 		/** The abort signal each put-up was given: it fires when the start is stopped. */
@@ -86,10 +95,10 @@ interface Rig {
 		mostOpen: number;
 	};
 	/** What the parts answer; the last snapshot repeats, and an Error is thrown by the read. `listed` is what `gh pr list` finds for the branch. */
-	answers: { snapshots: (Snapshot | string | Error)[]; steps: Step[]; claim: string | Watch | null; put: unknown; putFiles: string[]; confirmed: boolean | null; renew: "held" | "taken"; branch: string; dirty: string; armError: string | null; listed: unknown[]; ahead: string; readMs: number };
+	answers: { snapshots: (Snapshot | string | Error)[]; steps: Step[]; claim: string | Watch | null; put: unknown; putFiles: string[]; confirmed: boolean | null; renew: "held" | "taken"; branch: string; dirty: string; armError: string | null; listed: unknown[]; ahead: string; readMs: number; toplevel: string | null; head: Head | string; found: Found | string };
 	clock: { now: number };
-	/** Makes the next read of the PR, `git status`, `gh pr list` or `gh api user`, or the next `git push`, wait until the returned function is called, as a slow GitHub, disk or link would. */
-	hold(what?: "read" | "git" | "list" | "user" | "push"): () => void;
+	/** Makes the next read of the PR, `git status`, `gh pr list`, `gh api user`, or the find step, or the next `git push`, wait until the returned function is called, as a slow GitHub, disk or link would. */
+	hold(what?: "read" | "git" | "list" | "user" | "push" | "find"): () => void;
 	cmd(args: string, ctx?: Rig["ctx"]): Promise<void>;
 	/** Moves the clock, fires the timer and lets everything that isn't held run to its end. */
 	tick(minutes?: number): Promise<void>;
@@ -105,7 +114,7 @@ function settled(): Promise<void> {
 }
 
 /** `realPutUp` runs story 5's put-up on the fake git and gh instead of a fake put-up. */
-function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform?: string; sessionId?: string; real?: boolean; realPutUp?: boolean } = {}): Rig {
+function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform?: string; sessionId?: string; real?: boolean; realPutUp?: boolean; parts?: Partial<ShipParts> } = {}): Rig {
 	const fake = fakePi();
 	const sent: Rig["sent"] = [];
 	const clock = { now: T0 };
@@ -119,9 +128,9 @@ function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform
 	const setInterval = ctx.setInterval;
 	ctx.setInterval = (callback, ms) => (ctx.intervals.push(ms), setInterval(callback, ms));
 
-	const calls: Rig["calls"] = { claims: [], armed: [], disarmed: 0, released: [], unclaimed: [], saved: [], reads: [], pushes: [], puts: [], putSignals: [], dirs: [], gitPushes: [], creates: [], open: 0, mostOpen: 0 };
-	const answers: Rig["answers"] = { snapshots: [snap()], steps: [], claim: null, put: PR, putFiles: [], confirmed: null, renew: "held", branch: "feat/x", dirty: "", armError: null, listed: [], ahead: "", readMs: 0 };
-	const holds = { read: [] as Promise<void>[], git: [] as Promise<void>[], list: [] as Promise<void>[], user: [] as Promise<void>[], push: [] as Promise<void>[] };
+	const calls: Rig["calls"] = { claims: [], armed: [], disarmed: 0, released: [], unclaimed: [], saved: [], reads: [], heads: [], finds: [], pushes: [], puts: [], putSignals: [], dirs: [], gitPushes: [], creates: [], open: 0, mostOpen: 0 };
+	const answers: Rig["answers"] = { snapshots: [snap()], steps: [], claim: null, put: PR, putFiles: [], confirmed: null, renew: "held", branch: "feat/x", dirty: "", armError: null, listed: [], ahead: "", readMs: 0, toplevel: ROOT, head: { state: "OPEN", author: "tung-dnt", branch: "feat/x", fork: false }, found: { root: ROOT, kind: "session" } };
+	const holds = { read: [] as Promise<void>[], git: [] as Promise<void>[], list: [] as Promise<void>[], user: [] as Promise<void>[], push: [] as Promise<void>[], find: [] as Promise<void>[] };
 
 	const parts: ShipParts = {
 		now: () => clock.now,
@@ -129,7 +138,7 @@ function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform
 		git: async (dir, args) => {
 			calls.dirs.push(dir);
 			const key = args.join(" ");
-			if (key === "rev-parse --show-toplevel") return { code: 0, out: `${ROOT}\n`, err: "" };
+			if (key === "rev-parse --show-toplevel") return answers.toplevel === null ? { code: 128, out: "", err: "fatal: not a git repository\n" } : { code: 0, out: `${answers.toplevel}\n`, err: "" };
 			if (key === "remote get-url origin") return { code: 0, out: "git@github.com:tung-dnt/sandbox.git\n", err: "" };
 			if (key === "symbolic-ref --short -q HEAD") return { code: 0, out: `${answers.branch}\n`, err: "" };
 			if (key === "symbolic-ref -q refs/remotes/origin/HEAD") return { code: 0, out: "refs/remotes/origin/main\n", err: "" };
@@ -162,6 +171,17 @@ function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform
 		},
 		sshHostname: () => null,
 		parseTarget: arg => (arg === null ? { owner: "tung-dnt", repo: "sandbox" } : /^\d+$/.test(arg) ? { ...PR, number: Number(arg) } : `"${arg}" is not a PR number`),
+		parseLink,
+		readHead: async pr => {
+			calls.heads.push(pr);
+			return answers.head;
+		},
+		findCheckout: async (want, deps) => {
+			calls.finds.push({ want, deps });
+			await holds.find.shift();
+			return answers.found;
+		},
+		projects: () => PROJECTS,
 		readPr: async (_pr, _gh, trust) => {
 			calls.reads.push({ trust });
 			const answer = (answers.snapshots.length > 1 ? answers.snapshots.shift() : answers.snapshots[0]) as Snapshot | string | Error;
@@ -204,7 +224,7 @@ function rig(options: { hasUI?: boolean; idle?: boolean; mode?: string; platform
 		rules: () => "RULES OF THE PASS",
 	};
 	// With `real`, story 3's engine decides and keeps the watch file; only reading the PR and the fence stay fakes.
-	createShip({ ...parts, ...(options.real ? { claimWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch, unclaimWatch } : {}), ...(options.realPutUp ? { putUp } : {}) })(fake.pi);
+	createShip({ ...parts, ...(options.real ? { claimWatch, nextStep, recordPass, recordPush, releaseWatch, renewClaim, saveWatch, unclaimWatch } : {}), ...(options.realPutUp ? { putUp } : {}), ...options.parts })(fake.pi);
 
 	return {
 		fake,
@@ -1064,6 +1084,316 @@ describe("an unattended session", () => {
 	});
 });
 
+describe("a PR link", () => {
+	/** Where the find step puts the watch when this session's folder isn't the one. */
+	const FOUND = "/work/sandbox-feat-x";
+	/** The session is in no checkout, and the find step names `FOUND`. */
+	const away = (t: Rig, kind: Found["kind"] = "existing"): void => {
+		t.answers.toplevel = null;
+		t.answers.found = { root: FOUND, kind };
+	};
+	const startMessage = (t: Rig): string => t.ctx.ui.notifications.find(n => n.message.startsWith("/ship: watching"))?.message ?? "";
+	const nothingStarted = (t: Rig): void => {
+		expect(t.calls.claims).toEqual([]);
+		expect(t.calls.armed).toEqual([]);
+		expect(t.ctx.timers.size).toBe(0);
+		expect(t.sent).toEqual([]);
+	};
+
+	test("from a folder that is no checkout, it watches in the folder the find step names, with the fence armed there", async () => {
+		const t = rig();
+		away(t);
+		await t.cmd(URL);
+		expect(t.calls.finds.map(found => found.want)).toEqual([{ pr: PR, branch: "feat/x", fork: false }]);
+		expect(t.calls.armed).toEqual([{ pushBranch: "feat/x", root: FOUND, pr: PR }]);
+		expect(t.calls.claims).toHaveLength(1);
+		expect(t.ctx.timers.size).toBe(1);
+		expect(t.calls.dirs).toContain(FOUND);
+	});
+
+	test("says which folder it watches in, and when the folder is new", async () => {
+		const existing = rig();
+		away(existing);
+		await existing.cmd(URL);
+		expect(startMessage(existing)).toContain(`on feat/x in ${FOUND}, fence armed`);
+		expect(startMessage(existing)).not.toContain("new");
+		const worktree = rig();
+		away(worktree, "worktree");
+		await worktree.cmd(URL);
+		expect(startMessage(worktree)).toContain(`in ${FOUND} (a new worktree), fence armed`);
+		const clone = rig();
+		away(clone, "clone");
+		await clone.cmd(URL);
+		expect(startMessage(clone)).toContain(`in ${FOUND} (a new clone), fence armed`);
+	});
+
+	test("from the checkout it already is on the branch of, nothing changes: no folder is named", async () => {
+		const t = rig();
+		await t.cmd(URL);
+		expect(t.calls.armed).toEqual([{ pushBranch: "feat/x", root: ROOT, pr: PR }]);
+		expect(startMessage(t)).toBe("/ship: watching tung-dnt/sandbox#12 as tung-dnt on feat/x, fence armed. The PR is read every 2 minutes; a model pass starts only when something changes.");
+	});
+
+	test("the find step is given this session's checkout, the projects folder, and a way to ask that a stop closes", async () => {
+		const t = rig();
+		let dialog: AbortSignal | undefined;
+		t.ctx.ui.confirm = (_title, _message, options?: { signal?: AbortSignal }) => {
+			dialog = options?.signal;
+			return Promise.resolve(true);
+		};
+		await t.cmd(URL);
+		const deps = t.calls.finds[0]?.deps as FindDeps;
+		expect(deps.session).toBe(ROOT);
+		expect(deps.projects).toBe(PROJECTS);
+		expect(await deps.confirm?.("Watch it there?", "Details")).toBe(true);
+		expect(dialog).toBe(deps.signal);
+		expect(deps.signal.aborted).toBe(false);
+	});
+
+	test("the find step is told which repository an origin URL names, the way /ship reads origin everywhere else", async () => {
+		const t = rig();
+		await t.cmd(URL);
+		const deps = t.calls.finds[0]?.deps as FindDeps;
+		expect(deps.repoOf("git@github.com:tung-dnt/sandbox.git")).toEqual({ owner: "tung-dnt", repo: "sandbox" });
+	});
+
+	test("the find step's reads of origin ask ssh about an alias once, however many clones use it", async () => {
+		const asked: string[] = [];
+		const t = rig({
+			parts: {
+				sshHostname: alias => {
+					asked.push(alias);
+					return "github.com";
+				},
+				parseTarget,
+			},
+		});
+		await t.cmd(URL);
+		const deps = t.calls.finds[0]?.deps as FindDeps;
+		for (const repo of ["paco24", "paco24-ui", "paco24-api"]) expect(deps.repoOf(`git@blindx.github:blinxsolutions/${repo}.git`)).toEqual({ owner: "blinxsolutions", repo });
+		expect(deps.repoOf("git@github.com:tung-dnt/sandbox.git")).toEqual({ owner: "tung-dnt", repo: "sandbox" });
+		expect(asked).toEqual(["blindx.github"]);
+	});
+
+	test("an unattended session, and one with no UI, give the find step no way to ask", async () => {
+		process.env.OMP_STARTER_UNATTENDED = "1";
+		const unattended = rig();
+		await unattended.cmd(URL);
+		expect(unattended.calls.finds).toHaveLength(1);
+		expect(unattended.calls.finds[0]?.deps.confirm).toBeUndefined();
+		delete process.env.OMP_STARTER_UNATTENDED;
+		const headless = rig({ hasUI: false });
+		await headless.cmd(URL);
+		expect(headless.calls.finds).toHaveLength(1);
+		expect(headless.calls.finds[0]?.deps.confirm).toBeUndefined();
+	});
+
+	test.each([
+		["a closed PR", { state: "CLOSED", author: "tung-dnt", branch: "feat/x", fork: false }, "is closed; nothing to watch", "warning"],
+		["a merged PR", { state: "MERGED", author: "tung-dnt", branch: "feat/x", fork: false }, "is merged; nothing to watch", "warning"],
+		["a PR someone else opened", { state: "OPEN", author: "someone", branch: "feat/x", fork: false }, "was opened by someone, and gh acts as tung-dnt", "error"],
+	] as const)("%s is refused before any folder is looked for", async (_name, head, why, level) => {
+		const t = rig();
+		away(t);
+		t.answers.head = { ...head };
+		await t.cmd(URL);
+		expect(lastMessage(t)).toContain(why);
+		expect(t.ctx.ui.notifications.at(-1)?.type).toBe(level);
+		expect(t.calls.finds).toEqual([]);
+		expect(t.calls.reads).toEqual([]);
+		nothingStarted(t);
+	});
+
+	test("a PR gh can't read is refused with gh's words", async () => {
+		const t = rig();
+		t.answers.head = "gh pr view failed: HTTP 502";
+		await t.cmd(URL);
+		expect(lastMessage(t)).toBe("/ship: gh pr view failed: HTTP 502");
+		expect(t.calls.finds).toEqual([]);
+		nothingStarted(t);
+	});
+
+	test("what the find step refuses is shown as it said it, and nothing starts", async () => {
+		const t = rig();
+		t.answers.found = "tung-dnt/sandbox#12 is on feat/x, which is not checked out under ~/projects, and nobody can confirm a new worktree here";
+		await t.cmd(URL);
+		expect(lastMessage(t)).toBe("/ship: tung-dnt/sandbox#12 is on feat/x, which is not checked out under ~/projects, and nobody can confirm a new worktree here");
+		expect(t.ctx.ui.notifications.at(-1)?.type).toBe("error");
+		nothingStarted(t);
+	});
+
+	test("a fork's PR reaches the find step marked as one", async () => {
+		const t = rig();
+		t.answers.head = { state: "OPEN", author: "tung-dnt", branch: "feat/x", fork: true };
+		await t.cmd(URL);
+		expect(t.calls.finds[0]?.want.fork).toBe(true);
+	});
+
+	test("a number, and no argument at all, never reach it", async () => {
+		const t = rig();
+		await t.cmd("12");
+		await t.cmd("stop");
+		await t.cmd("");
+		expect(t.calls.finds).toEqual([]);
+		expect(t.calls.heads).toEqual([]);
+	});
+
+	test("a link to another PR while one is watched is refused before any folder is looked for or asked about", async () => {
+		const t = rig();
+		await t.cmd("12");
+		await t.cmd("https://github.com/tung-dnt/sandbox/pull/13");
+		expect(lastMessage(t)).toBe("/ship: already watching tung-dnt/sandbox#12; run /ship stop first");
+		expect(t.calls.heads).toEqual([]);
+		expect(t.calls.finds).toEqual([]);
+		expect(t.calls.claims).toHaveLength(1);
+		expect(t.ctx.timers.size).toBe(1);
+	});
+
+	test("the link of the PR that is watched starts the watch over, in the folder found for it", async () => {
+		const t = rig();
+		await t.cmd("12");
+		t.answers.found = { root: "/work/sandbox-feat-x", kind: "existing" };
+		await t.cmd(URL);
+		expect(t.calls.finds).toHaveLength(1);
+		expect(t.calls.released).toEqual([{ reason: "stopped" }]);
+		expect(t.calls.armed.map(armed => armed.root)).toEqual([ROOT, "/work/sandbox-feat-x"]);
+		expect(t.ctx.timers.size).toBe(1);
+	});
+
+	test("a link that isn't a PR's is refused with why", async () => {
+		const t = rig();
+		await t.cmd("https://github.com/tung-dnt/sandbox/pull/0");
+		expect(lastMessage(t)).toBe("/ship: 0 is not a PR number");
+		expect(t.calls.finds).toEqual([]);
+		nothingStarted(t);
+	});
+
+	test("a /ship stop while the find step waits cancels the start: nothing is claimed, fenced or watched, and the stop is the only word said", async () => {
+		const t = rig();
+		away(t);
+		const release = t.hold("find");
+		const starting = t.cmd(URL);
+		await settled();
+		expect(t.calls.finds).toHaveLength(1);
+		await t.cmd("stop");
+		expect(lastMessage(t)).toBe("Stopped the /ship that was still starting.");
+		release();
+		await starting;
+		expect(t.calls.finds[0]?.deps.signal.aborted).toBe(true);
+		nothingStarted(t);
+		expect(t.ctx.ui.notifications).toHaveLength(1);
+	});
+
+	test("a refusal from the find step after a stop says nothing more", async () => {
+		const t = rig();
+		t.answers.found = "the clone was stopped";
+		const release = t.hold("find");
+		const starting = t.cmd(URL);
+		await settled();
+		await t.cmd("stop");
+		release();
+		await starting;
+		expect(t.ctx.ui.notifications).toHaveLength(1);
+	});
+
+	test.each(["worktree", "clone"] as const)("the first pass in a new %s says nothing is installed there, and no later pass does", async kind => {
+		const t = rig();
+		away(t, kind);
+		t.answers.steps = [PASS];
+		await t.cmd(URL);
+		expect(t.sent).toHaveLength(1);
+		const first = t.sent[0]?.message.content ?? "";
+		expect(first).toContain(`You act as tung-dnt in ${FOUND}`);
+		expect(first).toContain("nothing is installed in it");
+		await t.finishTurn("pushed\nSHIP-STATUS: working: waiting for checks");
+		t.answers.steps = [PASS];
+		await t.tick(10);
+		expect(t.sent).toHaveLength(2);
+		expect(t.sent[1]?.message.content).not.toContain("nothing is installed");
+	});
+
+	test.each(["session", "existing"] as const)("a %s checkout, which has been worked in, gets no such line", async kind => {
+		const t = rig();
+		away(t, kind);
+		t.answers.steps = [PASS];
+		await t.cmd(URL);
+		expect(t.sent[0]?.message.content).toContain(`in ${FOUND}`);
+		expect(t.sent[0]?.message.content).not.toContain("nothing is installed");
+	});
+
+	test("the new-folder line waits for the first pass, even when the first look sends none", async () => {
+		const t = rig();
+		away(t, "worktree");
+		t.answers.steps = [{ kind: "wait", until: T0 + SHIP.quietMs }, PASS];
+		await t.cmd(URL);
+		expect(t.sent).toEqual([]);
+		await t.tick();
+		expect(t.sent[0]?.message.content).toContain("nothing is installed in it");
+	});
+
+	test("a report path given with the link resolves against the session's folder, not the folder it found", async () => {
+		const t = rig();
+		away(t);
+		await t.cmd(`${URL} --report out/link.json`);
+		expect(t.report("out/link.json")).toMatchObject({ state: "watching" });
+		expect(fs.existsSync(path.join(FOUND, "out"))).toBe(false);
+	});
+});
+
+describe("a PR link with the real find step", () => {
+	const run = (cwd: string, ...args: string[]): string =>
+		execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+	test("from a folder that is no checkout, with no clone anywhere: asks, clones, adds the worktree, and watches there with the fence armed in it", async () => {
+		const scratch = fs.mkdtempSync(path.join(privateHome(), "link-"));
+		const bare = path.join(scratch, "origins", "tung-dnt", "sandbox.git");
+		const seed = path.join(scratch, "seed");
+		const projects = path.join(scratch, "projects");
+		fs.mkdirSync(path.dirname(bare), { recursive: true });
+		fs.mkdirSync(seed);
+		run(scratch, "init", "--quiet", "--bare", "-b", "main", bare);
+		run(seed, "init", "--quiet", "-b", "main");
+		run(seed, "remote", "add", "origin", bare);
+		fs.writeFileSync(path.join(seed, "README.md"), "main\n");
+		run(seed, "add", ".");
+		run(seed, "commit", "--quiet", "-m", "main");
+		run(seed, "push", "--quiet", "origin", "main");
+		run(seed, "checkout", "--quiet", "-b", "feat/x");
+		fs.writeFileSync(path.join(seed, "x.txt"), "x\n");
+		run(seed, "add", ".");
+		run(seed, "commit", "--quiet", "-m", "x");
+		run(seed, "push", "--quiet", "origin", "feat/x");
+
+		const repoOf = (url: string) => {
+			const named = /([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(url);
+			return named ? { owner: named[1] as string, repo: named[2] as string } : "not a repository URL";
+		};
+		const t = rig({
+			parts: {
+				git: (dir, args, limits) => exec("git", ["-C", dir, ...args], limits?.timeoutMs, limits?.signal),
+				ghFor: () => async args => {
+					if (args.join(" ") === "api user --jq .login") return { code: 0, out: "tung-dnt\n", err: "" };
+					if (args[0] === "repo" && args[1] === "view") return { code: 0, out: "main\n", err: "" };
+					if (args[0] === "repo" && args[1] === "clone") return exec("git", ["clone", "--quiet", bare, args[3] as string]);
+					return { code: 1, out: "", err: `unexpected gh ${args.join(" ")}` };
+				},
+				parseTarget: (arg, url) => (arg === null ? repoOf(url) : "not used here"),
+				projects: () => projects,
+				findCheckout,
+			},
+		});
+		await t.cmd(URL);
+		const tree = path.join(projects, "sandbox-feat-x");
+		expect(t.ctx.ui.prompts).toHaveLength(1);
+		expect(t.ctx.ui.prompts[0]?.title).toContain("sandbox-feat-x");
+		expect(t.calls.armed).toEqual([{ pushBranch: "feat/x", root: tree, pr: PR }]);
+		expect(run(tree, "symbolic-ref", "--short", "HEAD").trim()).toBe("feat/x");
+		expect(fs.existsSync(path.join(projects, "sandbox", ".git"))).toBe(true);
+		expect(t.ctx.timers.size).toBe(1);
+		expect(t.ctx.ui.notifications.find(n => n.message.startsWith("/ship: watching"))?.message).toContain("(a new worktree)");
+	});
+});
+
 describe("the report file", () => {
 	test("is rewritten after each pass with the state, PR, last line and what it waits for", async () => {
 		const t = rig();
@@ -1449,5 +1779,61 @@ describe("the real gh and git runner", () => {
 		} finally {
 			process.env.PATH = before;
 		}
+	});
+});
+
+describe("the real runner's stop signal", () => {
+	const alive = (pid: number): boolean => {
+		try {
+			process.kill(pid, 0);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+
+	test("a command whose signal aborts is killed, and the call fails at once saying it was stopped", async () => {
+		const stop = new AbortController();
+		const started = performance.now();
+		const done = exec("sleep", ["30"], 60_000, stop.signal);
+		stop.abort();
+		const result = await done;
+		expect(performance.now() - started).toBeLessThan(2000);
+		expect(result.code).not.toBe(0);
+		expect(result.err).toContain("stopped");
+	});
+
+	test("a signal that has already aborted never starts the command", async () => {
+		const ran = path.join(privateHome(), "ran");
+		const stop = new AbortController();
+		stop.abort();
+		const result = await exec("sh", ["-c", `echo ran > ${ran}`], 60_000, stop.signal);
+		expect(result.code).not.toBe(0);
+		expect(result.err).toContain("stopped");
+		expect(fs.existsSync(ran)).toBe(false);
+	});
+
+	test("what the command started goes with it: gh clones through a child of its own", async () => {
+		const pidFile = path.join(privateHome(), "grandchild.pid");
+		const stop = new AbortController();
+		const done = exec("sh", ["-c", `sleep 30 & echo $! > ${pidFile}; wait`], 60_000, stop.signal);
+		// Real polling, for the OS to get to the shell and for its child to die: neither can be driven by a fake clock.
+		const waitFor = async (condition: () => boolean): Promise<void> => {
+			const deadline = performance.now() + 5000;
+			while (!condition() && performance.now() < deadline) await Bun.sleep(10);
+		};
+		await waitFor(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8").trim() !== "");
+		const grandchild = Number(fs.readFileSync(pidFile, "utf8"));
+		expect(alive(grandchild)).toBe(true);
+		stop.abort();
+		await done;
+		await waitFor(() => !alive(grandchild));
+		expect(alive(grandchild)).toBe(false);
+	});
+
+	test("an abort after the command has finished changes nothing about its result", async () => {
+		const stop = new AbortController();
+		expect(await exec("printf", ["ok"], 60_000, stop.signal)).toEqual({ code: 0, out: "ok", err: "" });
+		stop.abort();
 	});
 });
