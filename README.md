@@ -377,6 +377,8 @@ The controller polls every 2 minutes without calling a model. Changed input star
 
 A pass reads the diff and source at the captured commits, checks earlier findings first, and returns structured findings. Code posts inline `Blocker:` comments with a request-changes review, answers replies, and resolves only its own verified-fixed threads. It does not duplicate unchanged findings. The controller checks the head before and after submitting a SHA-bound review. A commit pushed during review remains unreviewed.
 
+If GitHub omits or truncates a file patch, `/peer` fetches the comparison diff for the captured base and head. Review stops if any changed file lacks a complete text patch or the required source.
+
 Approval requires no blockers and CI green or genuinely absent. Running or failed CI prevents approval. The model cannot write to GitHub or the checkout. `/peer` never runs colleague PR code, fixes their branch, pushes, reruns checks, or merges. It refuses self-review and cannot run alongside `/ship` in the same session. It uses `gh-blinx` for `blinxsolutions` and `gh` elsewhere.
 
 The guard is not a security sandbox. GitHub cannot atomically check the current head and submit a review, so a raced approval is reported as stale and the new head remains under review. Keep the omp session open for polling.

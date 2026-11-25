@@ -73,6 +73,7 @@ function snapshot(over: Partial<PeerSnapshot> = {}): PeerSnapshot {
 }
 
 const DIFF: PeerDiff = {
+	baseSourceSha: BASE,
 	files: [
 		{
 			path: "src/a.ts",
@@ -556,6 +557,50 @@ describe("peer review lifecycle", () => {
 });
 
 describe("pinned changed-file reads", () => {
+	const filePath = "src/large file.ts";
+	const patch = "@@ -1 +1 @@\n-old()\n+new()";
+	const mergeBase = "e".repeat(40);
+	const compare = `repos/alice/sample/compare/${BASE}...${HEAD}`;
+	const fullDiff = `diff --git a/${filePath} b/${filePath}\nindex 1111111..2222222 100644\n--- a/${filePath}\t\n+++ b/${filePath}\t\n${patch}\n`;
+
+	function omittedPatch(diff: string, apiPatch?: string): Gh {
+		return async args => {
+			const endpoint = args[1] ?? "";
+			if (endpoint.includes("/files?")) {
+				return { code: 0, out: JSON.stringify([{ filename: filePath, status: "modified", additions: 1, deletions: 1, patch: apiPatch }]), err: "" };
+			}
+			if (endpoint === compare && args.includes("Accept: application/vnd.github.diff")) return { code: 0, out: diff, err: "" };
+			if (endpoint.startsWith(`${compare}?`)) return { code: 0, out: JSON.stringify({ merge_base_commit: { sha: mergeBase } }), err: "" };
+			if (endpoint.includes("/contents/")) {
+				const ref = endpoint.split("?ref=")[1];
+				if (ref !== mergeBase && ref !== HEAD) return { code: 1, out: "", err: "wrong source revision" };
+				const content = ref === mergeBase ? "old()\n" : "new()\n";
+				return { code: 0, out: JSON.stringify({ type: "file", encoding: "base64", size: Buffer.byteLength(content), content: Buffer.from(content).toString("base64") }), err: "" };
+			}
+			if (endpoint === "repos/alice/sample/pulls/7") return { code: 0, out: JSON.stringify({ base: { sha: BASE }, head: { sha: HEAD }, changed_files: 1 }), err: "" };
+			return { code: 1, out: "", err: "unexpected endpoint" };
+		};
+	}
+
+	test.each([undefined, "@@ -1 +0,0 @@\n-old()"])("recovers an omitted or partial patch (%s) from the pinned comparison", async apiPatch => {
+		const result = await readPeerDiff(PR, omittedPatch(fullDiff, apiPatch), snapshot());
+		if (typeof result === "string") throw new Error(result);
+		expect(result).toMatchObject({
+			baseSourceSha: mergeBase,
+			files: [{ path: filePath, patch, leftReviewLines: [1], rightReviewLines: [1], baseSource: "old()\n", headSource: "new()\n" }],
+		});
+	});
+
+	test.each([
+		["no section for the changed path", ""],
+		["a duplicate section", fullDiff + fullDiff],
+		["a different changed path", fullDiff.replaceAll(filePath, "src/other.ts")],
+		["a truncated hunk", fullDiff.replace("+new()\n", "")],
+		["a valid hunk with the wrong line totals", fullDiff.replace("@@ -1 +1 @@\n-old()\n+new()", "@@ -1 +1,2 @@\n-old()\n+new()\n+extra()")],
+	])("blocks review when the pinned comparison has %s", async (_reason, diff) => {
+		expect(typeof await readPeerDiff(PR, omittedPatch(diff), snapshot())).toBe("string");
+	});
+
 	test("paginates the changed-file endpoint and loads both exact source SHAs", async () => {
 		const current = snapshot();
 		const calls: string[][] = [];
@@ -564,7 +609,7 @@ describe("pinned changed-file reads", () => {
 		const gh: Gh = async args => {
 			calls.push(args);
 			const endpoint = args[1] ?? "";
-			if (endpoint.endsWith("/files?per_page=100&page=1")) return { code: 0, out: JSON.stringify([{ filename: "src/a.ts", status: "modified", patch: "@@ -1 +1 @@\n-old()\n+new()" }]), err: "" };
+			if (endpoint.endsWith("/files?per_page=100&page=1")) return { code: 0, out: JSON.stringify([{ filename: "src/a.ts", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-old()\n+new()" }]), err: "" };
 			if (endpoint.endsWith("/files?per_page=100&page=2")) return { code: 0, out: "[]", err: "" };
 			if (endpoint.includes("/contents/src/a.ts?ref=")) {
 				const content = endpoint.endsWith(`ref=${BASE}`) ? baseText : headText;
@@ -590,7 +635,7 @@ describe("pinned changed-file reads", () => {
 				const page = Number(new globalThis.URL(endpoint, "https://api.github.com").searchParams.get("page"));
 				const first = (page - 1) * 100;
 				const files = Array.from({ length: Math.min(100, Math.max(0, 301 - first)) }, (_, index) => ({
-					filename: `src/${first + index}.ts`, status: "modified", patch: "@@ -1 +1 @@\n-old\n+new",
+					filename: `src/${first + index}.ts`, status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-old\n+new",
 				}));
 				return { code: 0, out: JSON.stringify(files), err: "" };
 			}
