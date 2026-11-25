@@ -3,7 +3,7 @@
 // filter here (AC7), and `hash` covers only what survives it, so an untrusted comment never starts a pass.
 import { createHash } from "node:crypto";
 import { MARKER } from "./fence";
-import type { Gh, Note, ParseTarget, PrRef, ReadPr, Review, Snapshot, Thread, Trust } from "./types";
+import type { Gh, Note, ParseLink, ParseTarget, PrRef, ReadHead, ReadPr, Review, Snapshot, Thread, Trust } from "./types";
 
 // ---- which pull request ---------------------------------------------------------------------------------------------
 
@@ -45,22 +45,36 @@ function originRepo(origin: string, sshHostname: (alias: string) => string | nul
 	return repoFromPath(path) ?? "origin has no owner/repo path";
 }
 
+const notAPr = (given: string): string => `"${given.slice(0, 60)}" is not a PR number, #number or github.com pull request URL`;
+
+/** The PR `owner/repo#n` names, or why the names or the number aren't a PR's. */
+function prRef(owner: string, repo: string, n: string, given: string): PrRef | string {
+	if (!validName(owner) || !validName(repo)) return notAPr(given);
+	const number = Number(n);
+	return number >= 1 && Number.isSafeInteger(number) ? { host: "github.com", owner, repo, number } : `${n} is not a PR number`;
+}
+
 /**
- * Names the PR a `/ship` argument points at: `<n>` and `#<n>` in the checkout's repo, a github.com PR URL in its own.
- * No argument gives the repo alone, for the caller to find the current branch's PR. Origin must be on github.com in every
- * case; a PR URL may name another repo than origin (a fork's checkout).
+ * The PR a github.com pull request URL names, whatever follows its number, or why a URL that looks like a PR's isn't one;
+ * null for any other argument. The link names its repository itself, so nothing about the checkout the session is in
+ * matters to it: `/ship <link>` works from any folder.
+ */
+export const parseLink: ParseLink = arg => {
+	const given = (arg ?? "").trim();
+	const named = PR_URL.exec(given)?.groups;
+	return named ? prRef(named.owner ?? "", named.repo ?? "", named.n ?? "", given) : null;
+};
+
+/**
+ * Names the PR a `/ship` argument points at: `<n>` and `#<n>` in the checkout's repo. No argument gives the repo alone,
+ * for the caller to find the current branch's PR. Origin must be on github.com. A pull request URL is `parseLink`'s.
  */
 export const parseTarget: ParseTarget = (arg, originUrl, sshHostname) => {
 	const origin = originRepo(originUrl, sshHostname);
 	const given = (arg ?? "").trim();
 	if (typeof origin === "string" || given === "") return origin;
-	const notAPr = `"${given.slice(0, 60)}" is not a PR number, #number or github.com pull request URL`;
-	const named = PR_NUMBER.exec(given)?.groups ?? PR_URL.exec(given)?.groups;
-	if (!named) return notAPr;
-	const { owner = origin.owner, repo = origin.repo, n = "" } = named;
-	if (!validName(owner) || !validName(repo)) return notAPr;
-	const number = Number(n);
-	return number >= 1 && Number.isSafeInteger(number) ? { host: "github.com", owner, repo, number } : `${n} is not a PR number`;
+	const n = PR_NUMBER.exec(given)?.groups?.n;
+	return n === undefined ? notAPr(given) : prRef(origin.owner, origin.repo, n, given);
 };
 
 // ---- reading gh's answers -------------------------------------------------------------------------------------------
@@ -272,6 +286,24 @@ async function read(pr: PrRef, gh: Gh, trust: Trust): Promise<Snapshot> {
 export const readPr: ReadPr = async (pr, gh, trust) => {
 	try {
 		return await read(pr, gh, trust);
+	} catch (error) {
+		if (error instanceof Unreadable) return error.message;
+		throw error;
+	}
+};
+
+const HEAD_FIELDS = "state,author,headRefName,isCrossRepository";
+
+/** One `gh pr view` of what a PR link has to know before any folder is looked for: whether the PR is open, whose it is, and where its branch lives. */
+export const readHead: ReadHead = async (pr, gh) => {
+	try {
+		const view = obj(await run(gh, ["pr", "view", String(pr.number), "-R", `${pr.owner}/${pr.repo}`, "--json", HEAD_FIELDS]));
+		return {
+			state: pick(view.state, STATES, "the PR's state"),
+			author: text(obj(view.author).login) || "ghost",
+			branch: need(view.headRefName, "head branch"),
+			fork: view.isCrossRepository === true,
+		};
 	} catch (error) {
 		if (error instanceof Unreadable) return error.message;
 		throw error;
